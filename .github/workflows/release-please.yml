@@ -1,0 +1,48 @@
+name: release-please
+
+# Maintains a continuously-updated "release PR" (version bump + CHANGELOG.md
+# entries, driven by Conventional-Commits PR titles -- see
+# docs/CONTRIBUTING.md#pr-titles-conventional-commits) and, once that PR is
+# merged, tags the resulting commit and publishes the GitHub Release. See
+# docs/RELEASING.md for the full process this fits into, including why "!"
+# means OUTPUT-SCHEMA-breaking here, not API-breaking.
+#
+# Runs as the account-wide "brawer-release-bot" GitHub App (already used the
+# same way by brawer/osmviews, brawer/osmviews-rs and brawer/osmviews-py)
+# rather than the built-in GITHUB_TOKEN: workflow runs caused by the default
+# GITHUB_TOKEN don't trigger other workflow runs (GitHub does this
+# deliberately, to prevent recursive-workflow loops -- see
+# https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#triggering-a-workflow-from-a-workflow).
+# Without the App identity, the release PR this action opens would never get
+# test.yml's "Execute unit and integration tests" run against it (that
+# workflow triggers on `pull_request`), so it could never clear the
+# required-status-check the branch ruleset demands, and could never be
+# merged. See "Setting up the release-please App" in docs/RELEASING.md for
+# how this was installed on this repo.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # kick a run by hand if a push-triggered one was skipped
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Open/update the release PR, or publish a release
+    runs-on: ubuntu-latest
+    permissions: {}
+    # Skip (rather than fail every push to main) until the App is installed
+    # on this repo and its client ID is set -- see docs/RELEASING.md.
+    if: vars.RELEASE_PLEASE_APP_CLIENT_ID != ''
+    steps:
+    - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+      id: app-token
+      with:
+        client-id: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
+        private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+        permission-contents: write # tag + GitHub release
+        permission-pull-requests: write # open and update the release PR
+
+    - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
+      with:
+        token: ${{ steps.app-token.outputs.token }}

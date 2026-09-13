@@ -651,7 +651,7 @@ fn test_no_subcommand() {
 #[test]
 fn test_version_flag() {
     // Asserts against CARGO_PKG_VERSION (rather than a hardcoded string) so
-    // this doesn't need updating every time cut-release.sh bumps the version.
+    // this doesn't need updating every time release-please bumps the version.
     Command::new(cargo_bin!("osmdiffs"))
         .arg("--version")
         .assert()

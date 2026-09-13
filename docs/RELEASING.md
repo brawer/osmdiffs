@@ -7,16 +7,27 @@ This document is the practical how-to for cutting a release of
 
 ## Quick start
 
-```sh
-./scripts/cut-release.sh vX.Y.Z
-```
+[`release-please`](https://github.com/googleapis/release-please) keeps a
+"release PR" continuously open against `main`, titled something like
+"chore(main): release 0.8.4", with `Cargo.toml`/`Cargo.lock`'s version
+bump and the new `CHANGELOG.md` entries already prepared from merged PR
+titles. To cut a release:
 
-Run it from a clean, up-to-date `main` checkout. It handles everything
-else: bumping the version, opening and merging the PR for that, tagging,
-and publishing the release. See “What happens automatically” below for
-the full sequence — but read “Choosing the version number” first, it’s
-the one part of this that actually needs a careful decision, not just
-running a command.
+1. Open that PR, sanity-check the version number it proposes against
+   “Choosing the version number” below, and merge it like any other PR
+   (it goes through the normal required checks and merge queue).
+2. Once merged, `release-please` tags that commit and publishes the
+   GitHub Release (with the same notes) on its own — nothing further to
+   run.
+3. Optionally, verify the release actually came out right (build,
+   SBOM, attestations):
+   ```sh
+   ./scripts/verify-release.sh vX.Y.Z
+   ```
+
+See “What happens automatically” below for the full sequence — but read
+“Choosing the version number” first, it’s the one part of this that
+actually needs a careful decision, not just clicking merge.
 
 ## Choosing the version number
 
@@ -60,51 +71,80 @@ bumps for breaking changes once there’s an actual 1.0.0 to break
 compatibility with — i.e. once this pipeline has real downstream
 consumers depending on schema stability, not before.
 
-`cut-release.sh` gives you one piece of help with this call, not a
-replacement for it: it scans merged PR titles since the last tag for a
-Conventional Commits `!` marker (see
-[`CONTRIBUTING.md`](CONTRIBUTING.md#pr-titles-conventional-commits) — on
-this project `!` means *output-schema-breaking*, not API-breaking) and
-prints what it finds before asking you to confirm the version. Treat it
-as a “did you forget something” prompt: false positives and false
-negatives are both possible, since a PR’s type is chosen by whoever wrote
-the title, not by inspecting the schema diff.
+### How release-please's version bumps map to this rule
+
+`release-please` derives version bumps from Conventional-Commits PR
+titles, not from a schema diff — so the mapping in
+[`release-please-config.json`](../release-please-config.json) has to
+reproduce the two-tier, pre-1.0 rule above using only the commit types
+and the `!` marker:
+
+- `"bump-minor-pre-major": true` — a `!`-marked (breaking, i.e.
+  *output-schema*-breaking per
+  [`CONTRIBUTING.md`](CONTRIBUTING.md#pr-titles-conventional-commits))
+  commit bumps **minor** instead of major, matching “before 1.0.0, a
+  schema-breaking release bumps minor” above.
+- `"bump-patch-for-minor-pre-major": true` — a non-breaking `feat:`
+  commit bumps **patch** instead of minor. This isn't a compromise: it's
+  the same “anything else bumps patch” rule above, exactly. Pre-1.0.0
+  there's no separate slot left for “schema evolved compatibly” once
+  breaking has claimed minor — that's the whole point of the two-tier
+  collapse, not a gap release-please forces on us.
+
+Net effect while we're at `0.y.z`: a `!` commit → minor, everything else
+(`feat:`, `fix:`, `chore:`, ...) → patch. This is exactly the existing
+convention, just executed by config instead of by the old
+`cut-release.sh` script's best-effort PR-title scan (that script is
+gone; `release-please` reads the same `!` marker directly from commit
+history instead).
+
+This still leans entirely on contributors choosing PR titles correctly —
+`release-please` only ever sees the type, never the schema diff. Before
+merging the release PR, skim the commits it's based on (linked from the
+PR body) against “Choosing the version number” above; if a title was
+wrong, edit `Cargo.toml`'s version and the `CHANGELOG.md` entry directly
+in the release PR before merging — `release-please` treats that edit as
+authoritative on its next run. Once this pipeline has real downstream
+consumers depending on schema stability (i.e. we cut an actual 1.0.0),
+both flags should be revisited: an ordinary `feat:` would then bump
+minor again, and something more deliberate (a `Release-As:` footer, or a
+third `!`-only category) would be needed to keep pre-1.0's collapsed
+“anything else” tier from silently becoming three real tiers.
 
 ## What happens automatically, step by step
 
-Once you run `cut-release.sh vX.Y.Z`:
-
-1. **Preconditions are checked**: you’re on a clean, up-to-date `main`;
-   `vX.Y.Z` doesn’t already exist; it’s actually newer than `Cargo.toml`’s
-   current version; the latest CI run on `main`’s current commit passed.
-   Any failure here stops immediately, before anything is pushed.
-2. **A version-bump PR is opened**: `Cargo.toml`’s version (and
-   `Cargo.lock`’s self-entry) is bumped on a new branch, and a PR titled
-   “Bump version to X.Y.Z” is opened against `main`. `main` is protected
-   (PR required, status checks required, merge queue), so this can’t be
-   pushed directly.
-3. **The script waits** for that PR to clear required checks and the
-   merge queue, and actually land on `main`. This normally takes a few
-   minutes (the required test job takes ~4–5 min; the merge queue has a
-   minimum 3 min wait).
-4. **The release is created**: a GitHub Release for `vX.Y.Z` is published
-   at the new `main` HEAD, with auto-generated notes (categorized per
-   [`.github/release.yml`](../.github/release.yml)’s label rules). This
-   creates the underlying git tag as a side effect, and the release is
-   immutable from this point on (see
+1. **Every merge to `main` updates the release PR.**
+   [`.github/workflows/release-please.yml`](../.github/workflows/release-please.yml)
+   runs [`release-please`](https://github.com/googleapis/release-please)
+   on every push to `main`. It parses Conventional-Commits PR titles
+   since the last release, and keeps one PR open (creating it if it
+   doesn't exist yet) with `Cargo.toml`/`Cargo.lock`'s version bumped and
+   the new `CHANGELOG.md` entries drafted — see “How release-please's
+   version bumps map to this rule” above for exactly how it picks the
+   version.
+2. **You merge that PR when you're ready to release** — like any other
+   PR: it needs the required check
+   (`Execute unit and integration tests`) and goes through the merge
+   queue. `main` is protected, so this can't be pushed directly.
+3. **The merge itself publishes the release.** The next
+   `release-please.yml` run (triggered by that merge landing on `main`)
+   recognizes its own release commit, tags it, and creates a real GitHub
+   Release there with the same notes as `CHANGELOG.md`'s new section —
+   no separate step. This is what makes the release immutable from this
+   point on (see
    [`SUPPLY_CHAIN_SECURITY.md`](SUPPLY_CHAIN_SECURITY.md#immutable-releases)).
-5. **That tag push triggers
+4. **That tag push triggers
    [`.github/workflows/release.yml`](../.github/workflows/release.yml)**,
-   entirely independently of the script. `release.yml` itself is just a
-   thin caller: it hands off to
+   entirely independently of `release-please`. `release.yml` itself is
+   just a thin caller: it hands off to
    [`.github/workflows/release-build.yml`](../.github/workflows/release-build.yml)
    as a reusable workflow — a separate file with its own identity is what
    gets this to SLSA Build Level 3 rather than Level 2 (see
    [`SUPPLY_CHAIN_SECURITY.md`](SUPPLY_CHAIN_SECURITY.md#build-provenance-and-attestations)).
    The called workflow runs:
    - `verify-version`: re-checks the tag matches `Cargo.toml`’s version
-     (a server-side safety net — this should never fail if you used the
-     script, since the script only ever tags a version it just set).
+     (a server-side safety net — this should never fail, since the tag
+     only ever gets created from a commit that just set that version).
    - `build` (once per architecture, amd64 and arm64): builds the
      container via [`Containerfile`](../Containerfile), which also
      generates the SBOM (see
@@ -115,23 +155,17 @@ Once you run `cut-release.sh vX.Y.Z`:
    - `attest`: publishes signed SBOM and build-provenance attestations
      for both per-architecture images, plus a build-provenance
      attestation for the manifest list.
-6. **The script waits for that workflow to finish**, then runs
-   [`verify-release.sh`](../scripts/verify-release.sh) to confirm it
-   actually came out right — not just that it reported success, but that
-   both a build-provenance and an SBOM attestation genuinely exist for
-   both architectures (see “Verifying a release” below).
+5. **Once that workflow finishes, verify it** (see “Verifying a release”
+   below) — this step is manual, unlike 1–4.
 
-Steps 1–4 usually take under 10 minutes; steps 5–6 (the actual container
-build, plus verification) take roughly another 20–25 minutes.
+Steps 1–3 are immediate (a few minutes for required checks plus the
+merge queue's minimum wait); step 4 (the actual container build) takes
+roughly another 20–25 minutes.
 
 ## Verifying a release
 
-This happens automatically as the last step of `cut-release.sh` — you
-don’t need to do anything extra. It’s implemented as a separate script,
-[`verify-release.sh`](../scripts/verify-release.sh), specifically so it
-can also be run standalone at any later time, e.g. if `cut-release.sh`
-didn’t get to finish (the machine running it crashed, the connection
-dropped, ...), or to double-check an older release:
+Unlike the steps above, this one is on you to run — nothing currently
+triggers it automatically:
 
 ```sh
 ./scripts/verify-release.sh vX.Y.Z
@@ -143,66 +177,120 @@ and an SBOM attestation exist for each per-architecture image — the same
 two checks described in
 [`SUPPLY_CHAIN_SECURITY.md`](SUPPLY_CHAIN_SECURITY.md#build-provenance-and-attestations),
 done for real rather than assumed. This is exactly what was done by hand
-to confirm v0.6.9, the first release cut with `cut-release.sh` — see the
-comment trail on
+to confirm v0.6.9, the first release cut with the old `cut-release.sh`
+script — see the comment trail on
 [brawer/osmdiffs#562](https://github.com/brawer/osmdiffs/pull/562)
 for that walkthrough, which is what `verify-release.sh` automates.
 
+## Setting up the release-please App
+
+`release-please.yml` needs to run as a real identity, not the default
+`GITHUB_TOKEN` — GitHub deliberately doesn't let a `GITHUB_TOKEN`-authored
+push or PR trigger further workflow runs (to prevent recursive-workflow
+loops), which means `test.yml`'s `pull_request`-triggered "Execute unit
+and integration tests" check would never run against the release PR, and
+it could never clear the branch ruleset's required-status-check to be
+merged.
+
+Rather than a Personal Access Token, this uses **`brawer-release-bot`**,
+an account-wide GitHub App already installed for
+[`osmviews`](https://github.com/brawer/osmviews),
+[`osmviews-rs`](https://github.com/brawer/osmviews-rs), and
+[`osmviews-py`](https://github.com/brawer/osmviews-py) the same way — an
+App's installation token is minted fresh per workflow run and expires in
+under an hour, so there's no long-lived credential to rotate the way a
+PAT would need.
+
+One-time setup to add `osmdiffs` to that same App's installations:
+
+1. On the App's installation page
+   (`github.com/settings/installations/<installation-id>` — find it from
+   any of the three repos above under **Settings → GitHub Apps** →
+   `brawer-release-bot` → **Configure**), add `brawer/osmdiffs` to the
+   repositories it's installed on.
+2. Set the repo **variable** `RELEASE_PLEASE_APP_CLIENT_ID` to the App's
+   Client ID (the same value already used by the other three repos —
+   visible on the App's settings page, or via `gh variable get
+   RELEASE_PLEASE_APP_CLIENT_ID --repo brawer/osmviews-rs`).
+3. Set the repo **secret** `RELEASE_PLEASE_APP_PRIVATE_KEY` to a private
+   key for the App. Secrets can't be read back, so this can't just be
+   copied from another repo: on the App's settings page, **Generate a
+   private key** (an App can hold several valid keys at once, so this
+   doesn't invalidate the other repos' key), then
+   ```sh
+   gh secret set RELEASE_PLEASE_APP_PRIVATE_KEY --repo brawer/osmdiffs < path/to/key.pem
+   ```
+   and delete the local `.pem` afterwards.
+
+Until both the variable and the secret exist, `release-please.yml` skips
+itself (`if: vars.RELEASE_PLEASE_APP_CLIENT_ID != ''`) rather than
+failing on every push to `main`.
+
 ## Rules
 
-- **Always cut releases with `cut-release.sh`.** Never push a `v*` tag by
-  hand. `release.yml` would still build and publish a container for it,
-  but you’d have skipped the version-consistency checks, and immutability
+- **Never push a `v*` tag by hand, and never hand-edit `CHANGELOG.md`
+  for an already-released version.** `release.yml` would still build and
+  publish a container for a hand-pushed tag, but you'd have skipped
+  `release-please`'s version-consistency bookkeeping, and immutability
   protections apply to tags that went through a real GitHub Release —
   not to a bare tag pushed directly.
 - **Releases are immutable. If one’s bad, cut a new patch version and
   leave the bad one as-is.** You can’t fix a published release in place,
   and you can’t reuse or move its tag even if you delete it.
-- **Anyone with write access can cut a release.** There’s no separate
-  approval gate for this beyond the normal merge-queue checks — we don’t
-  have enough people for dedicated release roles.
+- **Anyone with write access can merge the release PR.** There’s no
+  separate approval gate for this beyond the normal merge-queue checks —
+  we don’t have enough people for dedicated release roles.
 
 ## If it goes wrong
 
-- **A precondition check fails** (dirty tree, stale `main`, tag exists,
-  version not newer, CI not green): nothing was pushed. Fix the
-  underlying issue and re-run.
-- **The bump PR fails its required checks**: auto-merge won’t complete,
-  and the script eventually times out (~25 min) with the PR still open.
-  Look at why CI failed on that PR, fix it, and either let auto-merge
-  finish or close the PR and start over.
-- **The bump PR merges, but the release itself fails to get created**
-  (rare): `main` now has the version bump, but re-running the whole
-  script will fail its “is this version newer” check, since `Cargo.toml`
-  already matches. Just run the release-creation step directly instead:
-  `gh release create vX.Y.Z --target main --generate-notes`.
+- **The release PR fails its required checks**: it just sits open,
+  unmergeable, same as any other failing PR. Look at why CI failed
+  (usually something landed on `main` after the PR was last updated;
+  `release-please` rebases it automatically on the next push), fix it,
+  and merge once green.
+- **The release PR merges, but no GitHub Release shows up**: check
+  `release-please.yml`'s run for the merge commit — the App not (or no
+  longer) being installed on this repo, or the private key having been
+  deleted from the App without updating the secret here (see
+  “Setting up the release-please App” above), are the most likely
+  causes; the job would have been skipped or failed to mint a token.
+  Once fixed, re-run the failed workflow from the Actions tab; it's safe
+  to retry.
 - **The tag/release gets created, but `release.yml` then fails** (e.g. a
   build failure): the release is already immutable at this point, so
   there’s no “redo.” Fix whatever broke the build (or `main`), and cut a
   new patch version. The failed tag’s GitHub Release will just exist
   without a correspondingly published, attested container — that’s a
   known, accepted consequence of immutability, not a bug.
-- **`cut-release.sh` is interrupted, or times out, while waiting on
-  `release.yml`** (~20–25 min; a crashed machine, a dropped connection,
-  or a truly stuck workflow): the release itself is unaffected — it was
-  already created before this wait began. Just run
-  `./scripts/verify-release.sh vX.Y.Z` on its own once you’re ready to
-  check on it again; it picks up wherever the run currently stands.
+- **`verify-release.sh` is interrupted, or times out** (~20–25 min; a
+  crashed machine, a dropped connection, or a truly stuck workflow): the
+  release itself is unaffected — it was already created before this
+  wait began. Just re-run
+  `./scripts/verify-release.sh vX.Y.Z` once you’re ready to check on it
+  again; it picks up wherever the run currently stands.
 
 ## Where things live
 
-- [`scripts/cut-release.sh`](../scripts/cut-release.sh) — the script
-  itself
+- [`release-please-config.json`](../release-please-config.json) /
+  [`.release-please-manifest.json`](../.release-please-manifest.json) —
+  `release-please`'s version-bump rules and current-version bookkeeping
+- [`.github/workflows/release-please.yml`](../.github/workflows/release-please.yml) —
+  runs on every push to `main`; opens/updates the release PR, then tags
+  + publishes the release once that PR is merged
+- [`CHANGELOG.md`](../CHANGELOG.md) — maintained by `release-please`;
+  don't hand-edit entries for already-released versions
 - [`scripts/verify-release.sh`](../scripts/verify-release.sh) — the
-  verification step `cut-release.sh` runs at the end (also usable
-  standalone)
+  manual post-release verification step (see “Verifying a release”
+  above)
 - [`.github/workflows/release.yml`](../.github/workflows/release.yml) —
   triggers on a pushed tag, calls `release-build.yml`
 - [`.github/workflows/release-build.yml`](../.github/workflows/release-build.yml) —
   build, SBOM, attest
 - [`Containerfile`](../Containerfile) — how the container gets built
-- [`.github/release.yml`](../.github/release.yml) — changelog
-  categorization rules for auto-generated release notes
+- [`.github/release.yml`](../.github/release.yml) — categorization rules
+  for GitHub's own auto-generated release notes; no longer the primary
+  changelog (that's `CHANGELOG.md` now), kept only as a fallback for
+  manually running `gh release create --generate-notes`
 - [`scripts/sbom/README.md`](../scripts/sbom/README.md) — how the SBOM
   itself is generated
 

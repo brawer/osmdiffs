@@ -27,15 +27,11 @@ process these fit into.
 
 - [`sbom/`](sbom/README.md): generates the Software Bill of Materials
   (SBOM) for the release container image.
-- [`cut-release.sh`](cut-release.sh): cuts a new release (bumps
-  `Cargo.toml`’s version via a PR, then creates the tagged GitHub Release
-  that triggers `.github/workflows/release.yml`, then waits for and
-  verifies the result). Run `./scripts/cut-release.sh vX.Y.Z` from an
-  up-to-date `main`.
-- [`verify-release.sh`](verify-release.sh): the verification step
-  `cut-release.sh` runs at the end — also usable standalone, e.g. to
-  double-check an older release. Run
-  `./scripts/verify-release.sh vX.Y.Z`.
+- [`verify-release.sh`](verify-release.sh): confirms a release actually
+  came out right (build-provenance and SBOM attestations exist for both
+  architectures) — the one manual step left after
+  [`release-please`](../.github/workflows/release-please.yml) merges and
+  publishes a release. Run `./scripts/verify-release.sh vX.Y.Z`.
 
 ## Testing development branches
 
