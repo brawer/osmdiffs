@@ -16,10 +16,10 @@
 # Usage:
 #   ./scripts/verify-release.sh vX.Y.Z
 #
-# This is called automatically as the last step of cut-release.sh, but is
-# also safe to run standalone, any time after a tag was pushed -- e.g. if
-# cut-release.sh didn't get to finish (the machine running it crashed,
-# the connection dropped, ...), or to double-check an older release.
+# This is the one manual step left after release-please.yml merges the
+# release PR and publishes the release (see docs/RELEASING.md) -- safe to
+# run any time after a tag was pushed, e.g. right after a release, after an
+# interrupted or dropped connection, or to double-check an older release.
 #
 # Requirements: gh (authenticated -- run `gh auth login` first), jq
 

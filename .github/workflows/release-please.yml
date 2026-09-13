@@ -1,0 +1,37 @@
+name: release-please
+
+# Maintains a continuously-updated "release PR" (version bump + CHANGELOG.md
+# entries, driven by Conventional-Commits PR titles -- see
+# docs/CONTRIBUTING.md#pr-titles-conventional-commits) and, once that PR is
+# merged, tags the resulting commit and publishes the GitHub Release. See
+# docs/RELEASING.md for the full process this fits into, including why "!"
+# means OUTPUT-SCHEMA-breaking here, not API-breaking.
+#
+# Requires a fine-grained PAT in the RELEASE_PLEASE_TOKEN secret, not the
+# default GITHUB_TOKEN: workflow runs caused by the default GITHUB_TOKEN
+# don't trigger other workflow runs (GitHub does this deliberately, to
+# prevent recursive-workflow loops -- see
+# https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#triggering-a-workflow-from-a-workflow).
+# Without a PAT, the release PR this action opens would never get
+# test.yml's "Execute unit and integration tests" run against it (that
+# workflow triggers on `pull_request`), so it could never clear the
+# required-status-check the branch ruleset demands, and could never be
+# merged. See "Setting up the release-please token" in docs/RELEASING.md
+# for how to mint that PAT.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Open/update the release PR, or publish a release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
+      with:
+        token: ${{ secrets.RELEASE_PLEASE_TOKEN }}

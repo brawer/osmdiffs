@@ -68,8 +68,9 @@ breaks the output schema*, per the rules in
 — not that some function signature changed. A `refactor!:` or `chore!:`
 that happens to rename a Parquet column is exactly as `!` as a `feat!:`
 that removes one; a `feat:` CLI flag that doesn’t touch the schema isn’t
-`!` at all. `cut-release.sh` reads these markers to *suggest* a version
-floor, but the actual version is still your call, per `RELEASING.md`.
+`!` at all. `release-please` reads these markers to determine the next
+version's bump — see “How release-please's version bumps map to this
+rule” in `RELEASING.md` for exactly how.
 
 ## Where to go next
 
