@@ -182,37 +182,49 @@ script — see the comment trail on
 [brawer/osmdiffs#562](https://github.com/brawer/osmdiffs/pull/562)
 for that walkthrough, which is what `verify-release.sh` automates.
 
-## Setting up the release-please token
+## Setting up the release-please App
 
-`release-please.yml` needs a token in the `RELEASE_PLEASE_TOKEN` repo
-secret — the default `GITHUB_TOKEN` won't work. GitHub deliberately
-doesn't let a `GITHUB_TOKEN`-authored push or PR trigger further workflow
-runs (to prevent recursive-workflow loops), which means `test.yml`'s
-`pull_request`-triggered "Execute unit and integration tests" check would
-never run against the release PR, and it could never clear the branch
-ruleset's required-status-check to be merged. A Personal Access Token
-isn't subject to that restriction.
+`release-please.yml` needs to run as a real identity, not the default
+`GITHUB_TOKEN` — GitHub deliberately doesn't let a `GITHUB_TOKEN`-authored
+push or PR trigger further workflow runs (to prevent recursive-workflow
+loops), which means `test.yml`'s `pull_request`-triggered "Execute unit
+and integration tests" check would never run against the release PR, and
+it could never clear the branch ruleset's required-status-check to be
+merged.
 
-One-time setup (repeat only if the token expires or is revoked):
+Rather than a Personal Access Token, this uses **`brawer-release-bot`**,
+an account-wide GitHub App already installed for
+[`osmviews`](https://github.com/brawer/osmviews),
+[`osmviews-rs`](https://github.com/brawer/osmviews-rs), and
+[`osmviews-py`](https://github.com/brawer/osmviews-py) the same way — an
+App's installation token is minted fresh per workflow run and expires in
+under an hour, so there's no long-lived credential to rotate the way a
+PAT would need.
 
-1. Create a **fine-grained PAT**
-   ([github.com/settings/personal-access-tokens](https://github.com/settings/personal-access-tokens/new)),
-   scoped to only the `brawer/osmdiffs` repository, with **Contents:
-   Read and write** and **Pull requests: Read and write** repository
-   permissions. Give it an expiration and put a reminder somewhere to
-   rotate it before then — a repo secret with write access is worth
-   treating with the same care as any other credential.
-2. Store it as the repo secret `RELEASE_PLEASE_TOKEN`:
+One-time setup to add `osmdiffs` to that same App's installations:
+
+1. On the App's installation page
+   (`github.com/settings/installations/<installation-id>` — find it from
+   any of the three repos above under **Settings → GitHub Apps** →
+   `brawer-release-bot` → **Configure**), add `brawer/osmdiffs` to the
+   repositories it's installed on.
+2. Set the repo **variable** `RELEASE_PLEASE_APP_CLIENT_ID` to the App's
+   Client ID (the same value already used by the other three repos —
+   visible on the App's settings page, or via `gh variable get
+   RELEASE_PLEASE_APP_CLIENT_ID --repo brawer/osmviews-rs`).
+3. Set the repo **secret** `RELEASE_PLEASE_APP_PRIVATE_KEY` to a private
+   key for the App. Secrets can't be read back, so this can't just be
+   copied from another repo: on the App's settings page, **Generate a
+   private key** (an App can hold several valid keys at once, so this
+   doesn't invalidate the other repos' key), then
    ```sh
-   gh secret set RELEASE_PLEASE_TOKEN --repo brawer/osmdiffs
+   gh secret set RELEASE_PLEASE_APP_PRIVATE_KEY --repo brawer/osmdiffs < path/to/key.pem
    ```
-   (paste the token when prompted).
+   and delete the local `.pem` afterwards.
 
-Until this secret exists, `release-please.yml` will still run (it uses
-`${{ secrets.RELEASE_PLEASE_TOKEN }}`, which is just empty/falls back to
-the default token when unset) but the PR it opens won't be mergeable —
-its required check will never appear. If a release PR is stuck showing
-no status at all for `Execute unit and integration tests`, this is why.
+Until both the variable and the secret exist, `release-please.yml` skips
+itself (`if: vars.RELEASE_PLEASE_APP_CLIENT_ID != ''`) rather than
+failing on every push to `main`.
 
 ## Rules
 
@@ -237,11 +249,13 @@ no status at all for `Execute unit and integration tests`, this is why.
   `release-please` rebases it automatically on the next push), fix it,
   and merge once green.
 - **The release PR merges, but no GitHub Release shows up**: check
-  `release-please.yml`'s run for the merge commit — a missing or
-  expired `RELEASE_PLEASE_TOKEN` (see above) is the most likely cause,
-  since the workflow would have run as the plain `GITHUB_TOKEN` and
-  quietly lost write access to create the release. Once fixed, re-run
-  the failed workflow from the Actions tab; it's safe to retry.
+  `release-please.yml`'s run for the merge commit — the App not (or no
+  longer) being installed on this repo, or the private key having been
+  deleted from the App without updating the secret here (see
+  “Setting up the release-please App” above), are the most likely
+  causes; the job would have been skipped or failed to mint a token.
+  Once fixed, re-run the failed workflow from the Actions tab; it's safe
+  to retry.
 - **The tag/release gets created, but `release.yml` then fails** (e.g. a
   build failure): the release is already immutable at this point, so
   there’s no “redo.” Fix whatever broke the build (or `main`), and cut a
