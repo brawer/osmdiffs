@@ -79,6 +79,12 @@ podman run --rm --read-only \
   memstats fields read `None` (see
   [`LOGGING.md`](LOGGING.md)), and nothing here has been validated
   running unconstrained.
+- The image runs as **UID 1000** (see `USER 1000` in the
+  [`Containerfile`](../Containerfile)), not root — a `scratch` base
+  with no `/etc/passwd` entry to name it. `/workdir` must be writable
+  by that UID on the host: `chown 1000:1000 /path/to/workdir` (or an
+  equivalent, e.g. rootless podman's uid mapping) before the first
+  run, or `import_osm` fails immediately on its first write.
 - `--run_id`: whatever identifier the scheduling system assigns this
   run (a Kubernetes Job name, a cron invocation ID, …). It becomes
   `formulation[].workflows[].uid` in the output’s embedded provenance
