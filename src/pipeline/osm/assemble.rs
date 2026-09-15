@@ -3,8 +3,8 @@ use crate::{
     geometry::{GeometryBuilder, PolygonFill, build_line, build_ring},
     make_progress_bar,
     matchers::MatchMask,
-    pipeline::EXTERNAL_SORT_CHUNK_BYTES,
     pipeline::osm::id_tagging_schema::is_area,
+    pipeline::{EXTERNAL_SORT_CHUNK_BYTES, earliest_modified},
     tables::{
         BlobTable, CoordTable, Feature, FeatureToIndex, GeometryStore, GeometryTable, RecordReader,
         RecordWriter, RelationMember, StringCounts, StringPool,
@@ -151,7 +151,14 @@ fn assemble_nodes(
 ) -> Result<RecordReader> {
     let out_path = workdir.join("osm-assemble.nodes");
     if out_path.exists() {
-        return RecordReader::open(&out_path);
+        let input_modified = osm
+            .modified()?
+            .max(prunings.keep_nodes.modified()?)
+            .max(strings.modified()?);
+        let output_modified = std::fs::metadata(&out_path)?.modified()?;
+        if output_modified >= input_modified {
+            return RecordReader::open(&out_path);
+        }
     }
 
     let progress_bar = make_progress_bar(
@@ -227,10 +234,19 @@ fn assemble_ways<'a>(
     let out_path = workdir.join("osm-assemble.ways");
     let ways_in_relations_path = workdir.join("osm-assemble.ways.geometry");
     if out_path.exists() && ways_in_relations_path.exists() {
-        return Ok(AssembledWays {
-            ways: RecordReader::open(&out_path)?,
-            ways_in_relations: GeometryTable::open(&ways_in_relations_path)?,
-        });
+        let input_modified = osm
+            .modified()?
+            .max(prunings.keep_ways.modified()?)
+            .max(prunings.relation_members.modified()?)
+            .max(prunings.coords.modified()?)
+            .max(strings.modified()?);
+        let output_paths: [&Path; 2] = [&out_path, &ways_in_relations_path];
+        if earliest_modified(&output_paths)? >= input_modified {
+            return Ok(AssembledWays {
+                ways: RecordReader::open(&out_path)?,
+                ways_in_relations: GeometryTable::open(&ways_in_relations_path)?,
+            });
+        }
     }
 
     let progress_bar = make_progress_bar(
@@ -409,11 +425,25 @@ fn assemble_leaf_relations<'a>(
         && leaf_relations_geometry_path.exists()
         && super_relations_path.exists()
     {
-        return Ok(AssembledLeafRelations {
-            leaf_relations: RecordReader::open(&leaf_relations_path)?,
-            leaf_relations_geometry: GeometryTable::open(&leaf_relations_geometry_path)?,
-            super_relations: BlobTable::open(&super_relations_path)?,
-        });
+        let input_modified = osm
+            .modified()?
+            .max(prunings.keep_relations.modified()?)
+            .max(prunings.relation_members.modified()?)
+            .max(prunings.coords.modified()?)
+            .max(strings.modified()?)
+            .max(ways.ways_in_relations.modified()?);
+        let output_paths: [&Path; 3] = [
+            &leaf_relations_path,
+            &leaf_relations_geometry_path,
+            &super_relations_path,
+        ];
+        if earliest_modified(&output_paths)? >= input_modified {
+            return Ok(AssembledLeafRelations {
+                leaf_relations: RecordReader::open(&leaf_relations_path)?,
+                leaf_relations_geometry: GeometryTable::open(&leaf_relations_geometry_path)?,
+                super_relations: BlobTable::open(&super_relations_path)?,
+            });
+        }
     }
 
     let coords = &prunings.coords;
@@ -574,7 +604,18 @@ fn assemble_super_relations(
 ) -> Result<RecordReader> {
     let super_relations_path = workdir.join("osm-assemble.super-relations");
     if super_relations_path.exists() {
-        return RecordReader::open(&super_relations_path);
+        let input_modified = prunings
+            .relation_graph
+            .modified()?
+            .max(prunings.coords.modified()?)
+            .max(strings.modified()?)
+            .max(ways.ways_in_relations.modified()?)
+            .max(leaf_relations.leaf_relations_geometry.modified()?)
+            .max(leaf_relations.super_relations.modified()?);
+        let output_modified = std::fs::metadata(&super_relations_path)?.modified()?;
+        if output_modified >= input_modified {
+            return RecordReader::open(&super_relations_path);
+        }
     }
 
     let coords = &prunings.coords;
@@ -965,6 +1006,53 @@ fn lookup_relation_member_geometry<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime};
+    use tempfile::TempDir;
+
+    fn test_data_path(filename: &str) -> PathBuf {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests");
+        path.push("test_data");
+        path.push(filename);
+        path
+    }
+
+    /// Regression test for https://github.com/brawer/osmdiffs/issues/704:
+    /// before the fix, this function's cache-skip check only asked
+    /// whether `osm-assemble.nodes` exists, never whether any of its
+    /// real inputs (the planet file, `prunings.keep_nodes`, `strings`)
+    /// have changed since -- so a workdir reused against a newer planet
+    /// file would silently keep serving output built from the old one.
+    /// Simulated here by backdating a corrupted cached output below the
+    /// (freshly touched) planet file's mtime: under the old check the
+    /// corrupted file would just get reopened (and fail to parse), under
+    /// the fix it gets detected as stale and rebuilt.
+    #[test]
+    fn assemble_nodes_rebuilds_when_the_planet_file_gets_newer() -> Result<()> {
+        let workdir = TempDir::new()?;
+        let pbf_path = workdir.path().join("planet.osm.pbf");
+        std::fs::copy(test_data_path("zugerland.osm.pbf"), &pbf_path)?;
+
+        let mut file = File::open(&pbf_path)?;
+        let mut reader = BlobReader::open(&mut file)?;
+        let progress = MultiProgress::new();
+        let prunings = Prunings::create(&mut reader, &progress, workdir.path())?;
+        let strings = assemble_strings(&prunings.strings, &progress, workdir.path())?;
+
+        let nodes = assemble_nodes(&mut reader, &prunings, &strings, &progress, workdir.path())?;
+        let real_count = nodes.len();
+
+        let nodes_path = workdir.path().join("osm-assemble.nodes");
+        std::fs::write(&nodes_path, b"not a valid RecordReader file")?;
+        let past = SystemTime::now() - Duration::from_secs(3600);
+        File::open(&nodes_path)?.set_modified(past)?;
+        File::open(&pbf_path)?.set_modified(SystemTime::now())?;
+
+        let nodes = assemble_nodes(&mut reader, &prunings, &strings, &progress, workdir.path())?;
+        assert_eq!(nodes.len(), real_count);
+
+        Ok(())
+    }
 
     #[test]
     fn ring_is_geometrically_possible_requires_at_least_four_refs() {

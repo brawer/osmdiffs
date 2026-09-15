@@ -2,7 +2,7 @@ use super::{BlobReader, decode_feature_id, encode_feature_id};
 use crate::{
     make_progress_bar,
     matchers::MatchMask,
-    pipeline::EXTERNAL_SORT_CHUNK_BYTES,
+    pipeline::{EXTERNAL_SORT_CHUNK_BYTES, earliest_modified},
     tables::{CoordTable, Edge, GraphTable, StringCounts, U64Set},
 };
 use anyhow::{Ok, Result};
@@ -204,7 +204,10 @@ fn prune_relations_pass_1<'a>(
 ) -> Result<(U64Set, GraphTable<'a>)> {
     let keep_relations_path = workdir.join("osm-prune.keep-relations");
     let relation_graph_path = workdir.join("osm-prune.relation-graph");
-    if keep_relations_path.exists() && relation_graph_path.exists() {
+    if keep_relations_path.exists()
+        && relation_graph_path.exists()
+        && earliest_modified(&[&keep_relations_path, &relation_graph_path])? >= reader.modified()?
+    {
         let keep_relations = U64Set::open(&keep_relations_path)?;
         let relations_graph = GraphTable::open(&relation_graph_path)?;
         return Ok((keep_relations, relations_graph));
@@ -292,9 +295,15 @@ fn prune_relations_pass_2<'a>(
     let rel_members_path = workdir.join("osm-prune.relation-members");
     let strings_path = workdir.join("osm-prune-rels.strings");
     if rel_members_path.exists() && strings_path.exists() {
-        let rel_members = U64Set::open(&rel_members_path)?;
-        let strings = StringCounts::open(&strings_path)?;
-        return Ok((rel_members, strings));
+        let input_modified = reader
+            .modified()?
+            .max(keep_1.modified()?)
+            .max(graph.modified()?);
+        if earliest_modified(&[&rel_members_path, &strings_path])? >= input_modified {
+            let rel_members = U64Set::open(&rel_members_path)?;
+            let strings = StringCounts::open(&strings_path)?;
+            return Ok((rel_members, strings));
+        }
     }
 
     let mut rel_members: Option<U64Set> = None;
@@ -377,11 +386,18 @@ fn prune_ways<'a>(
     let keep_coords_path = PathBuf::from(workdir).join("osm-prune.keep-coords");
     let strings_path = PathBuf::from(workdir).join("osm-prune-ways.strings");
     if keep_ways_path.exists() && keep_coords_path.exists() && strings_path.exists() {
-        return Ok(PruneWaysOutput {
-            keep_ways: U64Set::open(&keep_ways_path)?,
-            keep_coords: U64Set::open(&keep_coords_path)?,
-            strings: StringCounts::open(&strings_path)?,
-        });
+        let input_modified = reader
+            .modified()?
+            .max(relation_members.modified()?)
+            .max(rels_output.strings.modified()?);
+        let output_paths: [&Path; 3] = [&keep_ways_path, &keep_coords_path, &strings_path];
+        if earliest_modified(&output_paths)? >= input_modified {
+            return Ok(PruneWaysOutput {
+                keep_ways: U64Set::open(&keep_ways_path)?,
+                keep_coords: U64Set::open(&keep_coords_path)?,
+                strings: StringCounts::open(&strings_path)?,
+            });
+        }
     }
 
     let progress_bar = make_progress_bar(
@@ -531,14 +547,21 @@ fn prune_nodes<'a>(
     let coords_path = PathBuf::from(workdir).join("osm-prune.coords");
     let strings_path = PathBuf::from(workdir).join("osm-prune.strings");
     if keep_nodes_path.exists() && coords_path.exists() && strings_path.exists() {
-        let keep_nodes = U64Set::open(&keep_nodes_path)?;
-        let coords = CoordTable::open(&coords_path)?;
-        let strings = StringCounts::open(&strings_path)?;
-        return Ok(PruneNodesOutput {
-            keep_nodes,
-            coords,
-            strings,
-        });
+        let input_modified = reader
+            .modified()?
+            .max(keep_coords.modified()?)
+            .max(ways_output.strings.modified()?);
+        let output_paths: [&Path; 3] = [&keep_nodes_path, &coords_path, &strings_path];
+        if earliest_modified(&output_paths)? >= input_modified {
+            let keep_nodes = U64Set::open(&keep_nodes_path)?;
+            let coords = CoordTable::open(&coords_path)?;
+            let strings = StringCounts::open(&strings_path)?;
+            return Ok(PruneNodesOutput {
+                keep_nodes,
+                coords,
+                strings,
+            });
+        }
     }
 
     let progress_bar = make_progress_bar(
@@ -665,4 +688,61 @@ fn prune_nodes<'a>(
         coords,
         strings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+    use tempfile::TempDir;
+
+    fn test_data_path(filename: &str) -> PathBuf {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests");
+        path.push("test_data");
+        path.push(filename);
+        path
+    }
+
+    /// Regression test for https://github.com/brawer/osmdiffs/issues/704:
+    /// before the fix, this function's cache-skip check only asked
+    /// whether its output files exist, never whether the planet file
+    /// they were built from has changed since -- so a workdir reused
+    /// against a newer planet file would silently keep serving output
+    /// built from the old one. Simulated here by backdating a corrupted
+    /// cached output below the (freshly touched) planet file's mtime:
+    /// under the old check the corrupted file would just get reopened
+    /// (and fail), under the fix it gets detected as stale and rebuilt.
+    #[test]
+    fn prune_relations_pass_1_rebuilds_when_the_planet_file_gets_newer() -> Result<()> {
+        let workdir = TempDir::new()?;
+        let pbf_path = workdir.path().join("planet.osm.pbf");
+        std::fs::copy(test_data_path("zugerland.osm.pbf"), &pbf_path)?;
+
+        let mut file = File::open(&pbf_path)?;
+        let mut reader = BlobReader::open(&mut file)?;
+        let progress = MultiProgress::new();
+        let progress_bar = make_progress_bar(
+            &progress,
+            "test",
+            reader.count_relation_blobs() as u64,
+            "blobs",
+        );
+
+        let (keep_relations, _graph) =
+            prune_relations_pass_1(&mut reader, &progress_bar, workdir.path())?;
+        let real_count = keep_relations.len();
+
+        let keep_relations_path = workdir.path().join("osm-prune.keep-relations");
+        std::fs::write(&keep_relations_path, b"not a valid U64Set file")?;
+        let past = SystemTime::now() - Duration::from_secs(3600);
+        File::open(&keep_relations_path)?.set_modified(past)?;
+        File::open(&pbf_path)?.set_modified(SystemTime::now())?;
+
+        let (keep_relations, _graph) =
+            prune_relations_pass_1(&mut reader, &progress_bar, workdir.path())?;
+        assert_eq!(keep_relations.len(), real_count);
+
+        Ok(())
+    }
 }

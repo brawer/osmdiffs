@@ -143,7 +143,6 @@ impl<'a> BlobTable<'a> {
     }
 
     /// Returns the modification time of the backing file.
-    #[allow(unused)]
     pub fn modified(&self) -> Result<SystemTime> {
         Ok(self.file.metadata()?.modified()?)
     }

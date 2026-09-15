@@ -220,12 +220,13 @@ work, see [#682](https://github.com/brawer/osmdiffs/issues/682).)
 
 Every top-level step above is logged with its own wall-clock time and
 memory snapshot, regardless of success or failure — see
-[`docs/LOGGING.md`](LOGGING.md). Steps are meant to be memoized
-against files already in `--workdir`, so re-running the pipeline in
-the same directory skips whatever it already built (this also applies
-below the step level, e.g. within `import_atp`/`import_osm`’s own
-sub-stages) — though that memoization isn’t fully reliable yet, see
-[#704](https://github.com/brawer/osmdiffs/issues/704).
+[`docs/LOGGING.md`](LOGGING.md). Steps are memoized against files
+already in `--workdir`, so re-running the pipeline in the same
+directory skips whatever it already built — including below the step
+level, e.g. within `import_atp`/`import_osm`’s own sub-stages, each of
+which checks its own inputs' modification times, not just whether its
+output already exists (see
+[#704](https://github.com/brawer/osmdiffs/issues/704)).
 `pipeline.log` itself is uploaded — to the *internal* S3 bucket, not the
 CDN-fronted public one — at the very end of a run no matter how the run
 went (see [`upload_logs`](../src/pipeline/upload.rs)), so a failed run’s
