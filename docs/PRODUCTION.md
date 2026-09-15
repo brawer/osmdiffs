@@ -141,10 +141,9 @@ to put them behind the same [Bunny](https://bunny.net) CDN that
 account and one OpenTofu config
 ([`brawer/production`](https://github.com/brawer/production), `bunny/`).
 The CDN and its edge-cache rules for `osmdiffs` are **already
-provisioned** there — currently against a staging hostname
-(`osmdiffs.dandelis.ch`, to be moved to a permanent one later) — so this
-section is about the shape the pipeline’s uploads must take, not infra
-still to build.
+provisioned** there, against `osmdiffs.brawer.ch` — so this section is
+about the shape the pipeline’s uploads must take, not infra still to
+build.
 
 ### The `/data/` contract
 
@@ -223,8 +222,6 @@ CDN yet.
 - CORS headers on `/data/*`, needed if a browser reads the outputs
   directly —
   [brawer/production#10](https://github.com/brawer/production/issues/10).
-- The permanent public hostname (the standalone BOM's absolute URLs use
-  the staging `osmdiffs.dandelis.ch` for now; renamed at cutover).
 - A `--prune` helper for old `data/` runs — today pruning is a manual
   `aws s3 rm`.
 
