@@ -341,11 +341,9 @@ fn upload_file_with_config(
 }
 
 /// Canonical host for the absolute URLs the standalone BOM records
-/// (`externalReferences[].url`). A staging hostname during the CDN
-/// migration (see `docs/PRODUCTION.md`); renamed at cutover. The
-/// manifest itself carries only relative `resources[].path`, so it has
-/// no hostname to rename.
-const PUBLIC_HOST: &str = "https://osmdiffs.dandelis.ch";
+/// (`externalReferences[].url`). The manifest itself carries only
+/// relative `resources[].path`, so it has no hostname to rename.
+const PUBLIC_HOST: &str = "https://osmdiffs.brawer.ch";
 
 /// A file `publish` hashes, names `data/<stem>-<date>-<hash8>.<ext>`,
 /// uploads to the public bucket, and returns as a [`PublishedFile`] for

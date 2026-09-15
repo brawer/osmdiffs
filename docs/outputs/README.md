@@ -17,8 +17,7 @@ pipeline’s code, not for people using its output.)
 
 The pipeline isn’t running in production yet (see
 [`docs/TECHNICAL_DESIGN.md`](../TECHNICAL_DESIGN.md#status)), so nothing
-is being published on a schedule and the hostname below is a staging
-one that will move.
+is being published on a schedule yet.
 
 Discovery goes through one small file, a
 [Frictionless Data Package](https://datapackage.org/) descriptor at
@@ -30,7 +29,7 @@ descriptor is immutable: its name carries a date and a content hash, and
 `resources[].bytes` / `resources[].hash` (`sha256:…`) let you verify it.
 
 ```sh
-host=https://osmdiffs.dandelis.ch
+host=https://osmdiffs.brawer.ch
 curl -s "$host/data/datapackage.json" \
   | jq -r --arg h "$host" '.resources[] | "\($h)/data/\(.path)  \(.name)"'
 ```
@@ -43,5 +42,5 @@ PMTiles archives you can open right in the browser via
 `#url=<the-url>&inspectFeatures=true`) — but they’re a debugging aid,
 not a data product; build on `conflated.parquet` instead.
 
-**Don’t hardcode the hostname.** It’s staging (`osmdiffs.dandelis.ch`)
-and will change; only `datapackage.json`’s path under a host is stable.
+**Don’t hardcode the hostname.** Only `datapackage.json`’s path under a
+host is stable.
