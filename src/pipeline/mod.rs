@@ -431,6 +431,28 @@ fn last_modified(paths: &[&Path]) -> Result<SystemTime> {
     }
 }
 
+/// Returns the lowest (least recent) last modification time among all
+/// paths. If any path does not exist or cannot be accessed, an error is
+/// returned.
+///
+/// The output-side counterpart to [`last_modified`] (which takes the
+/// *highest* of several *input* mtimes): a memoized stage with more than
+/// one output file is only safe to reuse if *all* of them are at least
+/// as fresh as the inputs -- one stale file among several would silently
+/// reintroduce the gap tracked by
+/// <https://github.com/brawer/osmdiffs/issues/704>.
+pub(crate) fn earliest_modified(paths: &[&Path]) -> Result<SystemTime> {
+    if !paths.is_empty() {
+        let mut earliest = modified(paths[0])?;
+        for path in &paths[1..] {
+            earliest = earliest.min(modified(path)?);
+        }
+        Ok(earliest)
+    } else {
+        anyhow::bail!("paths should not be empty")
+    }
+}
+
 fn modified(path: &Path) -> Result<SystemTime> {
     std::fs::metadata(path)
         .with_context(|| format!("Failed to get metadata for path: {:?}", path))?
@@ -467,6 +489,33 @@ mod tests {
         assert_eq!(last_modified(&[f0.path(), f2.path(), f7.path()])?, t7);
         assert_eq!(last_modified(&[f0.path(), f7.path(), f2.path()])?, t7);
         assert_eq!(last_modified(&[f7.path(), f2.path(), f0.path()])?, t7);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_earliest_modified() -> Result<()> {
+        let f0 = NamedTempFile::new()?;
+        let f2 = NamedTempFile::new()?;
+        let f7 = NamedTempFile::new()?;
+
+        let t0 = SystemTime::now();
+        let t2 = t0.add(Duration::new(2, 0));
+        let t7 = t0.add(Duration::new(7, 0));
+
+        f0.as_file().set_modified(t0)?;
+        f2.as_file().set_modified(t2)?;
+        f7.as_file().set_modified(t7)?;
+
+        assert!(earliest_modified(&[]).is_err());
+        assert!(earliest_modified(&[Path::new("/no/such/file")]).is_err());
+
+        assert_eq!(earliest_modified(&[f0.path()])?, t0);
+        assert_eq!(earliest_modified(&[f0.path(), f2.path()])?, t0);
+        assert_eq!(earliest_modified(&[f2.path(), f0.path()])?, t0);
+        assert_eq!(earliest_modified(&[f0.path(), f2.path(), f7.path()])?, t0);
+        assert_eq!(earliest_modified(&[f7.path(), f2.path(), f0.path()])?, t0);
+        assert_eq!(earliest_modified(&[f7.path(), f0.path(), f2.path()])?, t0);
 
         Ok(())
     }

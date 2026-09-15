@@ -8,6 +8,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
+use std::time::SystemTime;
 use time::UtcDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -69,7 +70,23 @@ pub fn import_osm<'a>(
     let osm_index_path = workdir.join("osm-features.index");
     let strings_path = assemble::strings_path(workdir);
     if OsmFeatures::exists(&osm_index_path, &strings_path) {
-        return OsmFeatures::open(&osm_index_path, &strings_path);
+        let features = OsmFeatures::open(&osm_index_path, &strings_path)?;
+        // Compare against the planet PBF's own mtime, if it's still
+        // around -- a stat, not a fetch (see `fetch::fetch_planet`), so
+        // this doesn't cost the download this shortcut exists to avoid.
+        // The PBF can legitimately be gone (e.g. deleted by hand to free
+        // its ~90GB once this index was built): with nothing to compare
+        // against, there's no way to detect staleness, so this falls
+        // back to the previous existence-only behavior rather than
+        // erroring out.
+        let stale =
+            match std::fs::metadata(workdir.join(PLANET_PBF_FILENAME)).and_then(|m| m.modified()) {
+                std::result::Result::Ok(pbf_modified) => features.modified()? < pbf_modified,
+                Err(_) => false,
+            };
+        if !stale {
+            return Ok(features);
+        }
     }
 
     // Each sub-step below gets the same step/phase/elapsed_seconds/
@@ -495,6 +512,18 @@ impl<'a, R: Read + Seek + Send> BlobReader<'a, R> {
             writing_program,
             sha256: None,
         })
+    }
+}
+
+impl<'a> BlobReader<'a, File> {
+    /// Modification time of the underlying planet PBF file -- the one
+    /// real input to every `osm.prune.*`/`osm.assemble.*` stage that
+    /// reads directly from `self`, as opposed to a previous stage's own
+    /// output table. Those stages' staleness checks fold this in
+    /// alongside whichever tables they also depend on -- see
+    /// <https://github.com/brawer/osmdiffs/issues/704>.
+    pub fn modified(&self) -> Result<SystemTime> {
+        Ok(self.reader.metadata()?.modified()?)
     }
 }
 
