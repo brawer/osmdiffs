@@ -643,7 +643,7 @@ mod tests {
 
         let embedded = build_bom_for_conflated_parquet(workdir.path(), "job-1", None)?;
         let (sha256, sha512) = ("aa".repeat(32), "bb".repeat(64));
-        let url = "https://osmdiffs.dandelis.ch/data/conflated-20260304-aabbccdd.parquet";
+        let url = "https://osmdiffs.brawer.ch/data/conflated-20260304-aabbccdd.parquet";
         let standalone = build_bom_for_conflated_parquet(
             workdir.path(),
             "job-1",
@@ -669,7 +669,7 @@ mod tests {
             .expect("a distribution external reference");
         assert_eq!(
             distribution["url"],
-            "https://osmdiffs.dandelis.ch/data/conflated-20260304-aabbccdd.parquet"
+            "https://osmdiffs.brawer.ch/data/conflated-20260304-aabbccdd.parquet"
         );
 
         // Everything else is unchanged from the embedded BOM.
