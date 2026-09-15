@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.5](https://github.com/brawer/osmdiffs/compare/v0.8.4...v0.8.5) (2026-09-15)
+
+
+### 🐞 Bug Fixes
+
+* **deps:** bump rustls to 0.23.45, fixing RUSTSEC-2026-0285 ([#811](https://github.com/brawer/osmdiffs/issues/811)) ([c20d695](https://github.com/brawer/osmdiffs/commit/c20d6958bc6d15e1d94dabbe00c9f070aa45b66d))
+* give every osm.prune/osm.assemble stage a real staleness check ([#809](https://github.com/brawer/osmdiffs/issues/809)) ([75c2460](https://github.com/brawer/osmdiffs/commit/75c2460463e060563f9a54f2543a3a6dea9ee869))
+
+
+### 📚 Documentation
+
+* point at brawer.ch, drop staging-domain language ([#808](https://github.com/brawer/osmdiffs/issues/808)) ([e83fbe2](https://github.com/brawer/osmdiffs/commit/e83fbe27f7bb289550c42e3e7f7ccc9d143e6852))
+
 ## [0.8.4](https://github.com/brawer/osmdiffs/compare/v0.8.3...v0.8.4) (2026-09-13)
 
 
