@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.6](https://github.com/brawer/osmdiffs/compare/v0.8.5...v0.8.6) (2026-09-15)
+
+
+### 📚 Documentation
+
+* note the image runs as UID 1000 ([#812](https://github.com/brawer/osmdiffs/issues/812)) ([bf80100](https://github.com/brawer/osmdiffs/commit/bf8010053b55877523215c52e2b25bc8184dccfb))
+
 ## [0.8.5](https://github.com/brawer/osmdiffs/compare/v0.8.4...v0.8.5) (2026-09-15)
 
 
