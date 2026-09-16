@@ -139,6 +139,117 @@ cadence, matching how often AllThePlaces itself publishes a fresh dump
 somewhere, a scheduled GitHub Actions workflow) is future work, not
 something this repository provides today.
 
+## A first real run: Infomaniak Kubernetes (2026-09)
+
+On 2026-09-15/16, [`brawer/production`](https://github.com/brawer/production)
+(`infomaniak/` + `infomaniak-k8s/`, see that repo's README for the full
+OpenTofu setup) ran `osmdiffs:v0.8.5` end-to-end as a Kubernetes `CronJob`
+on Infomaniak Public Cloud, against the real planet — not a permanent
+deployment (the cluster was torn down again right after, per that repo's
+own cost/scope decisions), but a genuine first production-shaped run, worth
+recording here since several things differed from the Hetzner numbers above
+or aren't covered by them at all.
+
+**Real total runtime: 5h55m** (a `--cpus=6`/`--mem-limit=8g`-equivalent
+config, matching this document's own recommended minimum), against this
+document's ~2h43m Hetzner figure — more than double. Three plausible,
+**unconfirmed** contributors, most to least likely:
+
+1. The node's flavor (`a8-ram16-disk20-perf1`) is Infomaniak's entry-level
+   compute tier — the project has no access to their higher performance
+   tiers (`perf2`/`perf3`/`perf4`, checked via their API). The physical CPU
+   itself is a modern AMD EPYC-Genoa (`/proc/cpuinfo`, read via `kubectl
+   debug node/... -- chroot /host`) — not an old/slow chip — so the gap is
+   more likely oversubscription/shared-core scheduling at that tier than
+   raw silicon age.
+2. The workdir volume was Infomaniak's network-attached Cinder block
+   storage (`csi-cinder-sc-delete`), not necessarily comparable to whatever
+   local/attached storage the Hetzner sweep used - and this pipeline's
+   design leans on fast storage for its page-cache-as-scratch-space
+   pattern (see "What to watch" below).
+3. Compounding (2): the same 8GB config that's "indistinguishable from a
+   generous limit" on Hetzner's hardware sat at 97-100% of the cgroup limit
+   for multiple steps on this run (see below) - if that pushed more of the
+   working set through the (slower, per #2) volume instead of page cache,
+   it would compound with #1 rather than being an independent cause.
+
+No CPU/memory/disk sweep was repeated on this hardware - these are
+plausible explanations for a single data point, not measurements. Whoever
+next benchmarks on non-Hetzner hardware: capturing the same `--mem-limit`
+sweep this document's Hardware Sizing section did, on the target hardware,
+would turn this from a hypothesis into a number.
+
+**The "page-cache design holding up" signal (see "What to watch") held**,
+and is worth citing as a concrete example: `pipeline.log` repeatedly warned
+`memory usage at 97-100% of the cgroup limit -- at risk of being
+OOM-killed` (at `extract_conflated_layers`, `render_conflated_overview`,
+and `render_conflated_detail`), yet `rss_anon_bytes` stayed near-constant
+at ~22MB throughout all of them - the pressure was entirely reclaimable
+file-backed/page-cache memory, not heap growth, exactly as designed. Ended
+up not needed here, but worth knowing before assuming a scary-looking
+warning means real trouble: it doesn't distinguish the two, so check
+`rss_anon_bytes` vs `rss_bytes`/`cgroup_current_bytes` before reacting to
+it.
+
+**`render_conflated_detail`** (zoom 13-16 vector tiles via `tippecanoe`,
+~83 minutes on this run) and **`join_conflated_tiles`** are not swept or
+discussed elsewhere in this document. Both completed correctly and within
+what this deployment considered a reasonable timeframe; neither needed any
+tuning or investigation beyond confirming that. Treat them the same way
+this document treats `conflate` versus `import_osm` in the Hardware Sizing
+sweep - as long as a step finishes without crashing in reasonable time, its
+internals aren't this document's concern.
+
+**Kubernetes-specific gotchas, not covered by the podman invocation above**
+(all specific to running under an orchestrator with its own volume
+provisioning, not to `osmdiffs` itself):
+
+- The `chown 1000:1000 /path/to/workdir` guidance above assumes a
+  bind-mounted host directory. A Kubernetes-provisioned volume (an
+  ephemeral CSI PVC, in this deployment) mounts owned by root regardless -
+  the orchestrator-level equivalent is a pod-level
+  `securityContext.fsGroup` (any fixed value; it doesn't need to match the
+  image's actual GID, which this deployment never determined - only the
+  `UID 1000` this document already documents was checked). Omitting it
+  reproduces the same "fails immediately on its first write" failure mode
+  this document already describes for a wrong host-directory `chown`, just
+  from a different cause.
+- `active_deadline_seconds` (Kubernetes' own job-level timeout, no
+  equivalent in the bare `podman run` invocation above) needs real margin,
+  not a Hetzner-derived guess: a first attempt at 6h (Hetzner's ~2h43m
+  headlined figure plus what looked like generous buffer) killed a run
+  that was still legitimately working - actively consuming CPU and memory,
+  no crash, no error - deep into `join_conflated_tiles`. Unlike a container
+  crash, this failure mode gives no `backoff_limit` retry and no
+  indication of how much more time was actually needed: the whole Job
+  fails outright and the pod is deleted. Size this deadline off this
+  document's real 5h55m figure (on non-Hetzner-`cpx42` hardware) with
+  real margin, not the €/hour-focused Hetzner timing this document
+  otherwise emphasizes.
+- The AWS SDK (used for both `PUBLIC_S3_*`/`INTERNAL_S3_*` destinations,
+  see [`upload.rs`](../src/pipeline/upload.rs)) validates `*_REGION`
+  client-side and rejects any value with an uppercase character:
+  `invalid config: region must contain only lowercase ASCII letters,
+  digits, or '-'`. Neither example backing store this document names
+  (Bunny.net, Hetzner Object Storage) - nor, for that matter, most
+  S3-compatible object storage generally - has a real AWS-style region, so
+  it's an easy mistake to pass whatever region code or placeholder string
+  the backing store's own docs use verbatim, uppercase and all. Caught
+  only at `upload_conflated`/`upload_internal`, i.e. only once a run has
+  otherwise fully completed - budget a whole run's wall-clock time to
+  discover this the hard way if it's wrong, since nothing validates it
+  earlier.
+
+**Cost shape differs from the Hetzner model above, not just the number.**
+This deployment's managed-Kubernetes node pool needed `min_instances = 1`
+(the provider/API rejected `0`, an unrelated bug specific to that
+platform) - one node running continuously, billed by the hour regardless
+of whether a job is active, rather than Hetzner's per-run
+create-then-destroy model this document's Cost section prices. Whoever
+picks the actual production infrastructure should treat "billed
+continuously" vs. "billed per run" as a real design axis, not just compare
+hourly rates.
+
 ## Serving the outputs (CDN)
 
 Nothing serves the pipeline’s outputs to the public yet. The intent is
