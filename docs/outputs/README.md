@@ -17,11 +17,12 @@ pipeline’s code, not for people using its output.)
 
 The pipeline isn’t running in production yet (see
 [`docs/TECHNICAL_DESIGN.md`](../TECHNICAL_DESIGN.md#status)), so nothing
-is being published on a schedule yet.
+is being published on a schedule yet. But this is only a matter of
+scheduling; the update mechanism is already in place.
 
 Discovery goes through one small file, a
 [Frictionless Data Package](https://datapackage.org/) descriptor at
-**`https://<host>/data/datapackage.json`**. Fetch it (~1 KB), read
+**`https://osmdiffs.brawer.ch/data/datapackage.json`**. Fetch it (~1 KB), read
 `version` (the release date) to check for updates, and resolve each
 `resources[].path` — a bare, dated filename — against the descriptor’s
 own URL to get the actual download link. Every file except the
@@ -41,6 +42,3 @@ PMTiles archives you can open right in the browser via
 [`pmtiles.io`](https://pmtiles.io) (append
 `#url=<the-url>&inspectFeatures=true`) — but they’re a debugging aid,
 not a data product; build on `conflated.parquet` instead.
-
-**Don’t hardcode the hostname.** Only `datapackage.json`’s path under a
-host is stable.
