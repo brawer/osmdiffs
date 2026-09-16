@@ -387,3 +387,24 @@ This is Hetzner-specific pricing, from the same provider
 `scripts/test-on-hetzner` tests against — an actual production
 deployment might land on different infrastructure entirely; treat the
 euro figures as an order-of-magnitude anchor, not a quote.
+
+**Infomaniak Public Cloud, one real run (2026-09-16)**: the single clean
+full-planet run this document’s “A first real run” section describes above
+— one data point, not a sweep, but the only one available so far. In CHF
+(tax included), at rates read directly from the account’s own API:
+
+- Compute: `a8-ram16-disk20-perf1` (8 vCPU / 16GB RAM — the smallest
+  flavor covering this document’s recommended 6 vCPU / 8GB pod request
+  with headroom), `CHF 0.0374`/hour, for the run’s actual 5h55m: **≈ CHF
+  0.22**.
+- Storage: the 250GB ephemeral scratch volume (Ceph, `perf1` tier — 500
+  IOPS / 200MB/s), `CHF 0.00012`/GB/hour, for the same 5h55m: **≈ CHF
+  0.18**.
+- **≈ CHF 0.40 per run**, compute and scratch storage together — the same
+  order of magnitude as the Hetzner figure above.
+
+Not included: the Kubernetes cluster this ran on has a free control plane
+at Infomaniak, but needs at least one node running permanently regardless
+of whether a job is active — an unavoidable baseline cost this per-run
+figure doesn’t capture, and not quantified here since it depends on how
+the cluster ends up shared/scheduled, not on this pipeline.
