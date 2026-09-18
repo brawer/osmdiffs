@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.6](https://github.com/brawer/osmdiffs/compare/v0.8.5...v0.8.6) (2026-09-18)
+
+
+### 📚 Documentation
+
+* add learnings from a real Infomaniak Kubernetes run ([#817](https://github.com/brawer/osmdiffs/issues/817)) ([cd4cb88](https://github.com/brawer/osmdiffs/commit/cd4cb8883aee0fb576fa3b977f8af8d0243cce5b))
+* mark osmdiffs.brawer.ch as the final hostname ([#818](https://github.com/brawer/osmdiffs/issues/818)) ([8af7c1f](https://github.com/brawer/osmdiffs/commit/8af7c1feb4460f2440dcd5499ba25c80c7036579))
+* note the image runs as UID 1000 ([#812](https://github.com/brawer/osmdiffs/issues/812)) ([bf80100](https://github.com/brawer/osmdiffs/commit/bf8010053b55877523215c52e2b25bc8184dccfb))
+
+
+### 🚧 Maintenance
+
+* **ci:** Bump the codeql group with 3 updates ([#814](https://github.com/brawer/osmdiffs/issues/814)) ([c6c4ca5](https://github.com/brawer/osmdiffs/commit/c6c4ca5b5d6b3e62b4d17f3b9b7890b89ef24e8e))
+* **deps:** Bump rust from 1.98.0-alpine3.23 to 1.98.1-alpine3.23 ([#819](https://github.com/brawer/osmdiffs/issues/819)) ([d571233](https://github.com/brawer/osmdiffs/commit/d571233524f45c0449b06d9cdc9e69ead7ceb308))
+
 ## [0.8.5](https://github.com/brawer/osmdiffs/compare/v0.8.4...v0.8.5) (2026-09-15)
 
 
