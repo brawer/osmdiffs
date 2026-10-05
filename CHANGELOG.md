@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.8.6](https://github.com/brawer/osmdiffs/compare/v0.8.5...v0.8.6) (2026-10-05)
+
+
+### 📚 Documentation
+
+* add learnings from a real Infomaniak Kubernetes run ([#817](https://github.com/brawer/osmdiffs/issues/817)) ([cd4cb88](https://github.com/brawer/osmdiffs/commit/cd4cb8883aee0fb576fa3b977f8af8d0243cce5b))
+* mark osmdiffs.brawer.ch as the final hostname ([#818](https://github.com/brawer/osmdiffs/issues/818)) ([8af7c1f](https://github.com/brawer/osmdiffs/commit/8af7c1feb4460f2440dcd5499ba25c80c7036579))
+* note the image runs as UID 1000 ([#812](https://github.com/brawer/osmdiffs/issues/812)) ([bf80100](https://github.com/brawer/osmdiffs/commit/bf8010053b55877523215c52e2b25bc8184dccfb))
+
+
+### 🚧 Maintenance
+
+* **ci:** Bump astral-sh/setup-uv from 10.0.1 to 10.1.0 ([#816](https://github.com/brawer/osmdiffs/issues/816)) ([426560a](https://github.com/brawer/osmdiffs/commit/426560aad6ca18d00937bf0c555189c991832cfc))
+* **ci:** Bump astral-sh/setup-uv from 10.1.0 to 10.2.0 ([#823](https://github.com/brawer/osmdiffs/issues/823)) ([951e1b5](https://github.com/brawer/osmdiffs/commit/951e1b50dc0949f5fb732a6b502b9166de2efcfd))
+* **ci:** Bump taiki-e/install-action from 2.87.8 to 2.87.21 ([#821](https://github.com/brawer/osmdiffs/issues/821)) ([2826a36](https://github.com/brawer/osmdiffs/commit/2826a3628ba15fbdc00e768e32735d09c039fabe))
+* **ci:** Bump the codeql group with 3 updates ([#814](https://github.com/brawer/osmdiffs/issues/814)) ([c6c4ca5](https://github.com/brawer/osmdiffs/commit/c6c4ca5b5d6b3e62b4d17f3b9b7890b89ef24e8e))
+* **ci:** Bump the codeql group with 3 updates ([#820](https://github.com/brawer/osmdiffs/issues/820)) ([d7bad60](https://github.com/brawer/osmdiffs/commit/d7bad60e3fb0887c21e171c1ae9cdd5011b657d3))
+* **ci:** Bump the codeql group with 3 updates ([#822](https://github.com/brawer/osmdiffs/issues/822)) ([ad2a1ae](https://github.com/brawer/osmdiffs/commit/ad2a1aea2b7a7c000697f26685879502ff505a1f))
+* **deps:** Bump boto3 from 1.43.89 to 1.43.103 in /scripts in the uv group ([#824](https://github.com/brawer/osmdiffs/issues/824)) ([75b4c16](https://github.com/brawer/osmdiffs/commit/75b4c162c4eeafb41475cc6d18361e64e26308ab))
+* **deps:** Bump boto3 in /scripts in the uv group ([75b4c16](https://github.com/brawer/osmdiffs/commit/75b4c162c4eeafb41475cc6d18361e64e26308ab))
+* **deps:** Bump rust from 1.98.0-alpine3.23 to 1.98.1-alpine3.23 ([#819](https://github.com/brawer/osmdiffs/issues/819)) ([d571233](https://github.com/brawer/osmdiffs/commit/d571233524f45c0449b06d9cdc9e69ead7ceb308))
+* **deps:** Bump the cargo group with 55 updates ([#825](https://github.com/brawer/osmdiffs/issues/825)) ([1151d82](https://github.com/brawer/osmdiffs/commit/1151d82de7c99fa8f507f36f001f8f4e8db5dcd8))
+* **deps:** Bump urllib3 from 2.7.0 to 2.8.0 in /scripts ([#826](https://github.com/brawer/osmdiffs/issues/826)) ([8a7d50d](https://github.com/brawer/osmdiffs/commit/8a7d50d726c41d4f912f10a3afa8f65366fae697))
+
 ## [0.8.5](https://github.com/brawer/osmdiffs/compare/v0.8.4...v0.8.5) (2026-09-15)
 
 
