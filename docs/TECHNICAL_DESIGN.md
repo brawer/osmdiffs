@@ -179,10 +179,18 @@ graph TD
     ATP_SRC@{ shape: cloud, label: "AllThePlaces weekly dump" }
     OSM_SRC@{ shape: cloud, label: "OpenStreetMap planet" }
 
-    ATP_SRC --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
+    subgraph INPUTS [Inputs]
+        ATP_SRC
+        OSM_SRC
+    end
+    INPUTS --> FETCH_INPUTS("fetch_inputs<br/>(all in parallel)")
+    FETCH_INPUTS --> ATP_ZIP[alltheplaces.zip]
+    FETCH_INPUTS --> OSM_PBF[planet-latest.osm.pbf]
+
+    ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
     ATP_PARQUET --> COLLECT_WIKI(collect_wikidata_ids) --> WIKIDATA[alltheplaces.wikidata-ids]
 
-    OSM_SRC --> IMPORT_OSM(import_osm) --> OSM_INDEX[osm-features.index]
+    OSM_PBF --> IMPORT_OSM(import_osm) --> OSM_INDEX[osm-features.index]
 
     ATP_PARQUET --> CONFLATE(conflate)
     OSM_INDEX --> CONFLATE
@@ -210,7 +218,7 @@ graph TD
     UPLOAD_BOM --> UPLOAD_DATAPACKAGE(upload_datapackage<br/>data/datapackage.json) --> S3A
 
     classDef process fill:#fce4ec,stroke:#ad1457,stroke-width:2px,color:#4a0e28,font-weight:bold;
-    class IMPORT_ATP,COLLECT_WIKI,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SUGGEST_EDITS,RENDER_TILES,UPLOAD_TILES,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
+    class FETCH_INPUTS,IMPORT_ATP,COLLECT_WIKI,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SUGGEST_EDITS,RENDER_TILES,UPLOAD_TILES,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
 ```
 
 (Pink boxes are processing steps; plain rectangles are the files they
@@ -251,9 +259,29 @@ worth refreshing occasionally, not a guarantee — every run’s own
 [`LOGGING.md`](LOGGING.md)), so up-to-date numbers are always one log
 fetch away.
 
+- **`fetch_inputs`** ([`src/pipeline/inputs.rs`](../src/pipeline/inputs.rs))
+  — downloads every external input in parallel, before any processing
+  step runs: AllThePlaces’ latest published run
+  ([`atp/fetch.rs`](../src/pipeline/atp/fetch.rs), logged as sub-step
+  `fetch_inputs.atp`) and the OpenStreetMap planet dump
+  ([`osm/fetch.rs`](../src/pipeline/osm/fetch.rs), `fetch_inputs.osm`;
+  over plain HTTPS, a redirect straight to a well-provisioned cloud
+  object store, not BitTorrent — see
+  [#755](https://github.com/brawer/osmdiffs/pull/755) for why that
+  switch happened). Each input is hashed (SHA-256) while it streams in,
+  and its provenance written to a `*.meta.json` sidecar. If any
+  download fails, the others are cancelled and the run aborts within
+  minutes; an interrupted planet download is resumed on the next
+  attempt. An input already in `--workdir` is reused rather than
+  downloaded: when its sidecar is there along with either the raw file
+  or the artifact built from it (`alltheplaces.parquet`,
+  `osm-features.index`), so deleting the ~90 GB planet once its index
+  is built doesn’t cost a re-download. A planet `.pbf` dropped in by
+  hand without a sidecar (e.g. a regional extract for testing) is
+  accepted too. Dominated by the planet download: **~28 minutes** on
+  the cpx42 run below; the other inputs download alongside it.
 - **`import_atp`** ([`src/pipeline/atp/`](../src/pipeline/atp/)) —
-  downloads AllThePlaces’ latest published run (`fetch.rs`) and parses
-  every spider’s GeoJSON output out of the zip, in parallel, filtering
+  parses every spider’s GeoJSON output out of the AllThePlaces zip, in parallel, filtering
   out any dataset not usable for OSM by its declared license or an
   explicit `use:openstreetmap` marker (`is_usable_for_osm()` in
   [`src/pipeline/atp/mod.rs`](../src/pipeline/atp/mod.rs)), and writing
@@ -266,10 +294,7 @@ fetch away.
   tracks elsewhere, [#682](https://github.com/brawer/osmdiffs/issues/682));
   not consumed by anything yet. Not separately timed.
 - **`import_osm`** ([`src/pipeline/osm/`](../src/pipeline/osm/)) —
-  downloads the OpenStreetMap planet dump over plain HTTPS (`fetch.rs`;
-  a redirect straight to a well-provisioned cloud object store, not
-  BitTorrent — see [#755](https://github.com/brawer/osmdiffs/pull/755)
-  for why that switch happened); does a first pass over it that
+  does a first pass over the planet dump that
   decides, by tag, which nodes/ways/relations are even worth fully
   assembling, and which node coordinates and relation members they’ll
   need (`prune.rs`); builds real OGC geometry (point/line/polygon) for
@@ -284,7 +309,9 @@ fetch away.
   figure. On the newer, HTTPS-based cpx42 run, the download itself
   took **~28 minutes** — roughly 10x faster than the old BitTorrent
   baseline — with the whole step (download + SHA-256 hash + prune/
-  assemble/index-build) completing in **2h24m12s**. The two runs’
+  assemble/index-build) completing in **2h24m12s**; the download and
+  hash have since moved to `fetch_inputs`, with the hash now computed
+  while downloading instead of in a separate pass. The two runs’
   compute-heavy portions (prune/assemble/index-build) aren’t a clean
   apples-to-apples comparison, since they ran under different CPU
   counts and memory limits.

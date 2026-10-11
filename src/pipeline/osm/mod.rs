@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use time::UtcDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use super::inputs::Input;
 use crate::tables::OsmFeatures;
 
 mod assemble;
@@ -21,6 +22,9 @@ mod index;
 mod prune;
 
 use prune::Prunings;
+
+// For `pipeline::inputs`, which fetches every pipeline input up front.
+pub(super) use fetch::{OSM_PLANET_URL, fetch_planet};
 
 /// Encodes an OpenStreetMap element's `(type, id)` as a `Feature.id` --
 /// `id * 10 + 1` for nodes, `+ 2` for ways, `+ 3` for relations. The same
@@ -60,30 +64,31 @@ pub(crate) fn osm_type_str(member_type: RelationMemberType) -> &'static str {
     }
 }
 
+/// Builds (or reuses) `osm-features.index` from the planet `input`
+/// that `pipeline::inputs::fetch_inputs` already made available
+/// locally -- this step itself never touches the network.
 pub fn import_osm<'a>(
-    http_client: &reqwest::Client,
+    input: &Input<OsmMetadata>,
     progress: &MultiProgress,
     workdir: &Path,
 ) -> Result<OsmFeatures<'a>> {
     assert!(workdir.exists());
 
-    let osm_index_path = workdir.join("osm-features.index");
+    let osm_index_path = index_path(workdir);
     let strings_path = assemble::strings_path(workdir);
     if OsmFeatures::exists(&osm_index_path, &strings_path) {
         let features = OsmFeatures::open(&osm_index_path, &strings_path)?;
         // Compare against the planet PBF's own mtime, if it's still
-        // around -- a stat, not a fetch (see `fetch::fetch_planet`), so
-        // this doesn't cost the download this shortcut exists to avoid.
-        // The PBF can legitimately be gone (e.g. deleted by hand to free
-        // its ~90GB once this index was built): with nothing to compare
-        // against, there's no way to detect staleness, so this falls
-        // back to the previous existence-only behavior rather than
-        // erroring out.
-        let stale =
-            match std::fs::metadata(workdir.join(PLANET_PBF_FILENAME)).and_then(|m| m.modified()) {
-                std::result::Result::Ok(pbf_modified) => features.modified()? < pbf_modified,
-                Err(_) => false,
-            };
+        // around. The PBF can legitimately be gone (e.g. deleted by hand
+        // to free its ~90GB once this index was built -- in which case
+        // `fetch::fetch_planet` deliberately didn't download it again):
+        // with nothing to compare against, there's no way to detect
+        // staleness, so this falls back to existence-only behavior
+        // rather than erroring out.
+        let stale = match std::fs::metadata(&input.path).and_then(|m| m.modified()) {
+            std::result::Result::Ok(pbf_modified) => features.modified()? < pbf_modified,
+            Err(_) => false,
+        };
         if !stale {
             return Ok(features);
         }
@@ -93,25 +98,21 @@ pub fn import_osm<'a>(
     // memstats logging shape as this crate's top-level pipeline steps
     // (see `super::run_step`, which this reuses directly rather than a
     // second, parallel logging mechanism) -- just under a dotted name
-    // ("import_osm.fetch", not "fetch") so a log consumer can tell a
+    // ("import_osm.prune", not "prune") so a log consumer can tell a
     // sub-step from a top-level one at a glance, and so `import_osm`'s
     // own already-existing top-level start/end pair (logged by
     // whichever `run_step` call wraps this whole function, see
     // `pipeline::run_pipeline_steps`) keeps meaning "the whole step",
-    // not "the whole step minus its sub-steps". Before this, only two
-    // points inside `import_osm` were distinguishable at all --
-    // "opened OpenStreetMap planet file" (after fetch+hash+blob-scan)
-    // and the outer step's own end -- which lumps prune/assemble/
-    // index-build into one undifferentiated number; not enough
-    // resolution to tell which of those actually needs the memory a
-    // tight `--mem-limit` run runs short on (see #711's investigation,
-    // e.g. brawer/osmdiffs#711's comments for a real case where
-    // that distinction mattered).
-    let (pbf, fetch_metadata) = super::run_step("import_osm.fetch", || {
-        fetch::fetch_planet(http_client, progress, workdir)
-    })?;
+    // not "the whole step minus its sub-steps". Without these, prune/
+    // assemble/index-build would be lumped into one undifferentiated
+    // number; not enough resolution to tell which of those actually
+    // needs the memory a tight `--mem-limit` run runs short on (see
+    // brawer/osmdiffs#711's comments for a real case where that
+    // distinction mattered). Downloading the planet used to be a sub-step
+    // here too (`import_osm.fetch`); it's now `fetch_inputs.osm`.
+    let pbf = &input.path;
     let pbf_error = || format!("could not open file `{:?}`", pbf);
-    let mut file = File::open(&pbf).with_context(pbf_error)?;
+    let mut file = File::open(pbf).with_context(pbf_error)?;
     let mut reader = super::run_step("import_osm.open", || {
         BlobReader::open(&mut file).with_context(pbf_error)
     })?;
@@ -124,7 +125,7 @@ pub fn import_osm<'a>(
         replication_timestamp = replication_timestamp.as_str(),
         source = header.source.as_deref(),
         writing_program = header.writing_program.as_deref(),
-        sha256 = fetch_metadata.sha256.as_deref();
+        sha256 = input.metadata.sha256.as_deref();
         "opened OpenStreetMap planet file"
     );
 
@@ -141,6 +142,18 @@ pub fn import_osm<'a>(
         index,
         strings: assembly.strings,
     })
+}
+
+/// Path, within `workdir`, of the spatial index `import_osm` builds.
+fn index_path(workdir: &Path) -> PathBuf {
+    workdir.join("osm-features.index")
+}
+
+/// Whether `import_osm`'s output -- the index plus its string pool --
+/// exists in `workdir`. Used by `fetch::fetch_planet` to decide whether
+/// a deleted planet PBF needs downloading again.
+fn index_exists(workdir: &Path) -> bool {
+    OsmFeatures::exists(&index_path(workdir), &assemble::strings_path(workdir))
 }
 
 /// Filename, within `workdir`, that `fetch::fetch_planet` downloads the
@@ -218,8 +231,9 @@ pub(crate) fn read_cached_metadata(workdir: &Path) -> Result<OsmMetadata> {
     serde_json::from_str(&data).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
-/// Computes a fully-populated [`OsmMetadata`] for a freshly downloaded
-/// planet file at `pbf_path` -- its header (cheap, via [`read_header`])
+/// Computes a fully-populated [`OsmMetadata`] for a planet file at
+/// `pbf_path` that has no sidecar yet (e.g. a regional extract dropped
+/// into `workdir` by hand, see `fetch::fetch_planet`) -- its header (cheap, via [`read_header`])
 /// and the SHA-256 of its entire contents (not cheap: one dedicated
 /// sequential read pass over the whole file, see
 /// [`crate::utils::hash_file`]) -- and persists it to `workdir`, so a
@@ -230,8 +244,16 @@ pub(crate) fn compute_and_persist_metadata(
     workdir: &Path,
     progress: &MultiProgress,
 ) -> Result<OsmMetadata> {
-    let header = read_header(pbf_path)?;
     let sha256 = crate::utils::hash_file(pbf_path, progress, "osm.hash      ", false)?.sha256;
+    persist_metadata(pbf_path, workdir, sha256)
+}
+
+/// Builds the [`OsmMetadata`] for the planet file at `pbf_path` from its
+/// header and an already-computed `sha256` of its entire contents (e.g.
+/// hashed while downloading), and persists it to `workdir` the same way
+/// [`compute_and_persist_metadata`] does.
+fn persist_metadata(pbf_path: &Path, workdir: &Path, sha256: String) -> Result<OsmMetadata> {
+    let header = read_header(pbf_path)?;
     let metadata = OsmMetadata {
         sha256: Some(sha256),
         ..header

@@ -1,4 +1,5 @@
 use crate::make_download_bar;
+use crate::pipeline::inputs::Input;
 use crate::utils::to_hex;
 use anyhow::{Context, Ok, Result, anyhow};
 use aws_lc_rs::digest::{Context as DigestContext, SHA256};
@@ -85,15 +86,29 @@ pub struct AtpMetadata {
     pub sha256: Option<String>,
 }
 
+/// Makes the latest usable AllThePlaces run available as a local input
+/// in `workdir`, downloading it (discovered via `url`, i.e.
+/// `history.json`) only if nothing in `workdir` can stand in for it. In
+/// order:
+///
+/// 1. `alltheplaces.zip` exists: reused, with the metadata read from its
+///    sidecar -- a hard error if that sidecar is missing or unreadable,
+///    since there's no way to recover which run the zip came from.
+/// 2. The zip is gone, but its sidecar and the `alltheplaces.parquet`
+///    built from it (see `import_atp`) are both still there: only the
+///    metadata is returned, and the returned path does not exist.
+///    `import_atp` then reuses the parquet file.
+/// 3. Otherwise: downloaded, hashed while streaming, and its metadata
+///    persisted alongside.
 pub async fn fetch_atp(
     url: &str,
     client: &Client,
     progress: &MultiProgress,
     workdir: &Path,
-) -> Result<(PathBuf, AtpMetadata)> {
-    let out_path: PathBuf = workdir.join("alltheplaces.zip");
+) -> Result<Input<AtpMetadata>> {
+    let out_path: PathBuf = workdir.join(super::ATP_ZIP_FILENAME);
     let meta_json_path = workdir.join(META_JSON_FILENAME);
-    if out_path.exists() {
+    if tokio::fs::try_exists(&out_path).await? {
         let metadata = read_meta_json(&meta_json_path).await.with_context(|| {
             format!(
                 "{} exists, but its metadata could not be read from {}",
@@ -101,13 +116,27 @@ pub async fn fetch_atp(
                 meta_json_path.display()
             )
         })?;
-        return Ok((out_path, metadata));
+        return Ok(Input {
+            path: out_path,
+            metadata,
+        });
+    }
+    if tokio::fs::try_exists(workdir.join(super::ATP_PARQUET_FILENAME)).await?
+        && let Result::Ok(metadata) = read_meta_json(&meta_json_path).await
+    {
+        return Ok(Input {
+            path: out_path,
+            metadata,
+        });
     }
 
     let tmp_path = workdir.join("alltheplaces.zip.tmp");
     let metadata = download_atp(url, client, progress, &tmp_path, &meta_json_path).await?;
-    std::fs::rename(&tmp_path, &out_path)?; // atomic file system operation
-    Ok((out_path, metadata))
+    tokio::fs::rename(&tmp_path, &out_path).await?; // atomic file system operation
+    Ok(Input {
+        path: out_path,
+        metadata,
+    })
 }
 
 async fn download_atp(
@@ -368,7 +397,7 @@ mod tests {
         let client = test_client(&server);
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
         let workdir = TempDir::new()?;
-        let (path, metadata) =
+        let Input { path, metadata } =
             fetch_atp(&mock_history_url, &client, &progress, workdir.path()).await?;
         mock_history.assert_async().await;
         mock_atp_data.assert_async().await;
@@ -399,11 +428,58 @@ mod tests {
 
         // Fetching again must not hit the network a second time, and
         // must return the metadata read back from disk.
-        let (path2, metadata2) =
-            fetch_atp(&mock_history_url, &client, &progress, workdir.path()).await?;
-        assert_eq!(path2, path);
-        assert_eq!(metadata2, metadata);
+        let again = fetch_atp(&mock_history_url, &client, &progress, workdir.path()).await?;
+        assert_eq!(again.path, path);
+        assert_eq!(again.metadata, metadata);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fetch_atp_reuses_parquet_when_zip_was_deleted() -> Result<()> {
+        // The zip is gone, but its sidecar and the parquet file built
+        // from it are still there: no download (the history URL points
+        // to nothing, so any attempt would fail).
+        let workdir = TempDir::new()?;
+        let metadata = AtpMetadata {
+            run_id: "2026-03-04-15-16-17".to_string(),
+            output_url: "https://example.org/output.zip".to_string(),
+            history_url: ATP_RUN_HISTORY_URL.to_string(),
+            start_time: UtcDateTime::from_unix_timestamp(1772637377)?,
+            end_time: UtcDateTime::from_unix_timestamp(1772647377)?,
+            spiders: MIN_SPIDERS,
+            total_lines: MIN_TOTAL_LINES,
+            size_bytes: MIN_SIZE_BYTES,
+            sha256: Some("00".repeat(32)),
+        };
+        write_meta_json(&metadata, &workdir.path().join(META_JSON_FILENAME)).await?;
+        tokio::fs::write(workdir.path().join("alltheplaces.parquet"), b"").await?;
+
+        let client = Client::builder().no_proxy().build()?;
+        let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+        let input = fetch_atp(
+            "http://127.0.0.1:9/history.json",
+            &client,
+            &progress,
+            workdir.path(),
+        )
+        .await?;
+        assert_eq!(input.metadata, metadata);
+        assert!(!input.path.exists());
+
+        // Without the sidecar, the parquet file alone isn't enough: there
+        // would be no way to know which run it came from.
+        tokio::fs::remove_file(workdir.path().join(META_JSON_FILENAME)).await?;
+        assert!(
+            fetch_atp(
+                "http://127.0.0.1:9/history.json",
+                &client,
+                &progress,
+                workdir.path(),
+            )
+            .await
+            .is_err()
+        );
         Ok(())
     }
 

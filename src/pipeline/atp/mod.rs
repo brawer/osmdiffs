@@ -7,7 +7,6 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use piz::ZipArchive;
 use rayon::prelude::*;
-use reqwest::Client;
 use std::fs::{File, rename};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -18,6 +17,7 @@ use time::{
     format_description::well_known::{Iso8601, Rfc3339},
 };
 
+use super::inputs::Input;
 use crate::places::{ParquetWriter, Place};
 use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
@@ -26,24 +26,50 @@ mod wikidata_ids;
 
 // Only these two re-exported crate-wide (rather than making all of
 // `fetch` pub(crate)): provenance needs them to assemble this
-// pipeline's provenance BOM, nothing outside `atp` needs the rest of
-// fetch's API (fetch_atp, ATP_RUN_HISTORY_URL, ...).
+// pipeline's provenance BOM.
 pub(crate) use fetch::{AtpMetadata, read_cached_metadata};
+
+// For `pipeline::inputs`, which fetches every pipeline input up front;
+// nothing else outside `atp` needs the rest of fetch's API.
+pub(super) use fetch::{ATP_RUN_HISTORY_URL, fetch_atp};
 
 pub use wikidata_ids::collect_wikidata_ids;
 
-pub async fn import_atp(
-    client: &Client,
+/// Filename, within `workdir`, of the AllThePlaces dump `fetch_atp`
+/// downloads.
+const ATP_ZIP_FILENAME: &str = "alltheplaces.zip";
+
+/// Filename, within `workdir`, of the file `import_atp` builds from
+/// [`ATP_ZIP_FILENAME`].
+const ATP_PARQUET_FILENAME: &str = "alltheplaces.parquet";
+
+/// Builds (or reuses) `alltheplaces.parquet` from the AllThePlaces
+/// `input` that `pipeline::inputs::fetch_inputs` already made available
+/// locally -- this step itself never touches the network.
+///
+/// An existing `alltheplaces.parquet` is reused unless the zip is there
+/// and newer than it (i.e. was fetched again after the parquet file was
+/// built). With the zip gone, there's nothing to compare against, and
+/// `fetch_atp` deliberately didn't download it again: the parquet file
+/// is reused as is.
+pub fn import_atp(
+    input: &Input<AtpMetadata>,
     progress: &MultiProgress,
     workdir: &Path,
 ) -> Result<PathBuf> {
-    let out = workdir.join("alltheplaces.parquet");
+    let out = workdir.join(ATP_PARQUET_FILENAME);
     if out.exists() {
-        return Ok(out);
+        let stale = match std::fs::metadata(&input.path).and_then(|m| m.modified()) {
+            std::result::Result::Ok(zip_modified) => super::modified(&out)? < zip_modified,
+            Err(_) => false,
+        };
+        if !stale {
+            return Ok(out);
+        }
     }
 
-    let (input_zip, atp_metadata) =
-        fetch::fetch_atp(fetch::ATP_RUN_HISTORY_URL, client, progress, workdir).await?;
+    let input_zip = &input.path;
+    let atp_metadata = &input.metadata;
     let atp_start_time = atp_metadata
         .start_time
         .format(&Rfc3339)
@@ -70,7 +96,7 @@ pub async fn import_atp(
     let (tx, rx) = sync_channel(50_000);
     let (ra, rb) = std::thread::scope(|s| {
         let r1 = s.spawn(|| process_places(rx, progress, workdir, &out));
-        let r2 = s.spawn(|| process_zip(&input_zip, progress, tx));
+        let r2 = s.spawn(|| process_zip(input_zip, progress, tx));
         (r1.join().unwrap(), r2.join().unwrap())
     });
     ra?;

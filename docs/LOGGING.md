@@ -23,12 +23,16 @@ implementation, and
 example of a structured record (step name, phase, elapsed time, RSS/
 cgroup memory snapshot — logged at the start and end of every pipeline
 step). A step can log its own internal sub-steps the same way, under a
-dotted name (e.g. `import_osm.fetch`, `import_osm.assemble`) — not a
+dotted name (e.g. `fetch_inputs.osm`, `import_osm.assemble`) — not a
 second logging mechanism, the exact same `run_step` helper, just called
 again from inside a step for finer timing resolution than that step’s
-own start/end pair alone would give. `import_osm` does this for its
-fetch/open/prune/assemble/index-build phases; see
-[`src/pipeline/osm/mod.rs`](../src/pipeline/osm/mod.rs).
+own start/end pair alone would give. `fetch_inputs` does this for
+each input it downloads (`fetch_inputs.atp`, `fetch_inputs.osm`; these
+run concurrently, so their timings overlap, and a fetch cancelled
+because another one failed logs an `end` record plus a "cancelled"
+warning), see [`src/pipeline/inputs.rs`](../src/pipeline/inputs.rs);
+`import_osm` does it for its open/prune/assemble/index-build phases,
+see [`src/pipeline/osm/mod.rs`](../src/pipeline/osm/mod.rs).
 
 ## Where weekly-run logs end up
 

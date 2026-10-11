@@ -27,6 +27,11 @@ gave:
 | 6g | 2h27m53s | 10m17s | 2h46m28s |
 | 4g | 4h02m46s | 10m36s | 4h21m36s |
 
+(Measured before [#830](https://github.com/brawer/osmdiffs/issues/830),
+when `import_osm` still included the ~28-minute planet download and a
+separate hashing pass; both now happen in `fetch_inputs`, with the hash
+computed during the download.)
+
 **6GB is the measured floor** on this CPU count: 8g and 6g are
 indistinguishable from a comfortable 12g baseline; 4g still completes
 correctly (identical row counts, all `validate` hard checks pass — the
@@ -361,9 +366,12 @@ get started:
   cache, not heap) — if that ratio drops, something’s changed about the
   access pattern this design depends on.
 - **Step timings drifting**: `import_osm`’s own sub-steps
-  (`import_osm.fetch`/`.open`/`.prune`/`.assemble`/`.index`, logged
+  (`import_osm.open`/`.prune`/`.assemble`/`.index`, logged
   individually as of
-  [#761](https://github.com/brawer/osmdiffs/pull/761)) are worth
+  [#761](https://github.com/brawer/osmdiffs/pull/761)) and the planet
+  download (`fetch_inputs.osm`, part of `import_osm` as
+  `import_osm.fetch` before
+  [#830](https://github.com/brawer/osmdiffs/issues/830)) are worth
   watching over time as the planet grows — a slow drift is expected;
   a sudden jump on an otherwise-unchanged config is worth investigating
   the way this document’s own `--mem-limit` sweep did.
