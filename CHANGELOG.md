@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.7](https://github.com/brawer/osmdiffs/compare/v0.8.6...v0.8.7) (2026-10-11)
+
+
+### 🚧 Maintenance
+
+* **ci:** Bump taiki-e/install-action from 2.87.21 to 2.87.24 ([#827](https://github.com/brawer/osmdiffs/issues/827)) ([5a34868](https://github.com/brawer/osmdiffs/commit/5a348681103360e948abb15664554a165caee912))
+* **deps:** Bump rust from 1.98.1-alpine3.23 to 1.99.0-alpine3.23 ([#828](https://github.com/brawer/osmdiffs/issues/828)) ([41af560](https://github.com/brawer/osmdiffs/commit/41af560852f6f27f0c481439b180aa33394c8de5))
+
 ## [0.8.6](https://github.com/brawer/osmdiffs/compare/v0.8.5...v0.8.6) (2026-10-05)
 
 
