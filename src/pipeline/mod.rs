@@ -35,6 +35,7 @@ mod conflate;
 mod conflated_tiles;
 mod datapackage;
 mod edits;
+mod inputs;
 mod logging;
 mod memstats;
 mod osm;
@@ -195,11 +196,35 @@ fn run_pipeline_steps(
     progress: &indicatif::MultiProgress,
 ) -> Result<()> {
     crate::geometry::init_geospatial_stats()?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+
+    // Every external input first, in parallel, so a run that can't get
+    // its inputs fails within minutes, before any processing; every
+    // later step only reads local files. See `inputs`.
+    let inputs = run_step("fetch_inputs", || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let result = runtime.block_on(inputs::fetch_inputs(
+            http_client,
+            progress,
+            workdir,
+            &inputs::Sources::default(),
+        ));
+        // A fetch cancelled because another one failed might still have
+        // blocking work (hashing) running; don't wait for it.
+        runtime.shutdown_background();
+        result
+    })?;
+
+    // The input-anchored release timestamp (see `provenance`): its
+    // calendar date names every published `data/` object
+    // (`<stem>-<YYYYMMDD>-<hash8>.<ext>`), and it becomes the manifest's
+    // `version`. Depends only on the inputs' metadata.
+    let anchor = provenance::anchor_timestamp(&inputs.atp.metadata, &inputs.osm.metadata);
+    let date = anchor.date().to_string().replace('-', "");
+
     let atp = run_step("import_atp", || {
-        runtime.block_on(atp::import_atp(http_client, progress, workdir))
+        atp::import_atp(&inputs.atp, progress, workdir)
     })?;
     // Not consumed by anything yet -- see atp::collect_wikidata_ids for
     // what this is for.
@@ -216,19 +241,12 @@ fn run_pipeline_steps(
     // beyond) for no reason.
     let conflated = {
         let osm_features = run_step("import_osm", || {
-            osm::import_osm(http_client, progress, workdir)
+            osm::import_osm(&inputs.osm, progress, workdir)
         })?;
         run_step("conflate", || {
             conflate::conflate(&atp, &osm_features, progress, workdir, pipeline_run_id)
         })?
     };
-
-    // The input-anchored release timestamp (see `provenance`): its
-    // calendar date names every published `data/` object
-    // (`<stem>-<YYYYMMDD>-<hash8>.<ext>`), and it becomes the manifest's
-    // `version`. Available now that both inputs' metadata is in `workdir`.
-    let anchor = provenance::read_anchor(workdir)?;
-    let date = anchor.date().to_string().replace('-', "");
 
     // Each published file's manifest entry, collected as it's uploaded;
     // `datapackage.json` is built from these and uploaded last.
@@ -344,7 +362,9 @@ fn run_pipeline_steps(
 /// also calls this directly (via plain Rust module-tree visibility --
 /// this function isn't `pub`, but `osm` is a descendant module of
 /// `pipeline`, so it can see it) for its own internal sub-steps
-/// (`import_osm.fetch`, `.open`, `.prune`, `.assemble`, `.index`),
+/// (`import_osm.open`, `.prune`, `.assemble`, `.index`), as does
+/// `inputs::fetch_inputs` via [`run_step_async`] (`fetch_inputs.atp`,
+/// `.osm`),
 /// dotted-named to stay visually distinct from top-level steps in
 /// `pipeline.log` while sharing the exact same logging shape -- one
 /// mechanism, not two, and no separate parsing convention needed for
@@ -360,14 +380,63 @@ fn run_pipeline_steps(
 /// ever surface via `main()`'s default unwind on the way out of the
 /// process, never in `pipeline.log` itself.
 fn run_step<T>(name: &str, step: impl FnOnce() -> Result<T>) -> Result<T> {
-    let start = Instant::now();
-    log_snapshot(name, "start", None);
+    let guard = StepLog::start(name);
     let result = step();
-    log_snapshot(name, "end", Some(start.elapsed().as_secs_f64()));
-    if let Err(e) = &result {
-        log::error!(step = name; "{name} failed: {e:#}");
-    }
+    guard.finish(&result);
     result
+}
+
+/// [`run_step`] for an async step, e.g. one of several input fetches
+/// running concurrently (see `inputs::fetch_inputs`), with the same
+/// logging. A step whose future gets dropped before completing -- i.e.
+/// cancelled, because a sibling step failed -- still gets its "end"
+/// snapshot, plus a warning saying it was cancelled.
+async fn run_step_async<T>(
+    name: &str,
+    step: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let guard = StepLog::start(name);
+    let result = step.await;
+    guard.finish(&result);
+    result
+}
+
+/// The start/end logging shared by [`run_step`] and [`run_step_async`].
+/// Dropped without [`StepLog::finish`] means the step was cancelled.
+struct StepLog<'a> {
+    name: &'a str,
+    start: Instant,
+    finished: bool,
+}
+
+impl<'a> StepLog<'a> {
+    fn start(name: &'a str) -> Self {
+        log_snapshot(name, "start", None);
+        StepLog {
+            name,
+            start: Instant::now(),
+            finished: false,
+        }
+    }
+
+    fn finish<T>(mut self, result: &Result<T>) {
+        self.finished = true;
+        let name = self.name;
+        log_snapshot(name, "end", Some(self.start.elapsed().as_secs_f64()));
+        if let Err(e) = result {
+            log::error!(step = name; "{name} failed: {e:#}");
+        }
+    }
+}
+
+impl Drop for StepLog<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let name = self.name;
+            log_snapshot(name, "end", Some(self.start.elapsed().as_secs_f64()));
+            log::warn!(step = name; "{name} cancelled");
+        }
+    }
 }
 
 /// Above this fraction of the cgroup memory limit, [`log_snapshot`] logs

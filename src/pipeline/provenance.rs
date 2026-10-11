@@ -40,18 +40,6 @@ pub(crate) struct OutputFileRef<'a> {
     pub distribution_url: &'a str,
 }
 
-/// The input-anchored timestamp every reproducible artifact keys off:
-/// `max(AllThePlaces run start, OSM planet replication)`, read back from
-/// the metadata `import_atp`/`import_osm` left in `workdir`. See
-/// [`build_bom_for_conflated_parquet`].
-pub(crate) fn read_anchor(workdir: &Path) -> Result<UtcDateTime> {
-    let atp = pipeline::read_cached_atp_metadata(workdir)
-        .context("could not read AllThePlaces provenance")?;
-    let osm = pipeline::read_cached_metadata(workdir)
-        .context("could not read OpenStreetMap provenance")?;
-    Ok(anchor_timestamp(&atp, &osm))
-}
-
 /// Standard OSM attribution notice, distinct from the license itself:
 /// ODbL requires reproducing this in any produced/derivative work, and
 /// that requirement propagates to `conflated.parquet` the same way the
@@ -195,11 +183,14 @@ pub fn build_bom_for_conflated_parquet(
     }))
 }
 
-/// The BOM's single time anchor: the freshness of whichever input was
-/// updated most recently. Used for every timestamp in the document
-/// instead of the wall clock, so the BOM is reproducible from the cached
-/// inputs alone (see [`build_bom_for_conflated_parquet`]).
-fn anchor_timestamp(atp: &AtpMetadata, osm: &OsmMetadata) -> UtcDateTime {
+/// The input-anchored timestamp every reproducible artifact keys off:
+/// `max(AllThePlaces run start, OSM planet replication)`, i.e. the
+/// freshness of whichever input was updated most recently. The BOM uses
+/// it for every timestamp in the document instead of the wall clock, so
+/// the BOM is reproducible from the cached inputs alone (see
+/// [`build_bom_for_conflated_parquet`]); `pipeline::run_pipeline_steps`
+/// uses its date to name every published file.
+pub(crate) fn anchor_timestamp(atp: &AtpMetadata, osm: &OsmMetadata) -> UtcDateTime {
     atp.start_time.max(osm.replication_timestamp)
 }
 

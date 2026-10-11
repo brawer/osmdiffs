@@ -67,7 +67,7 @@ pub struct PublishedFile {
 }
 
 /// Builds the descriptor. `anchor` is the pipeline's input-anchored
-/// timestamp (`provenance::read_anchor`): `version` is its calendar
+/// timestamp (`provenance::anchor_timestamp`): `version` is its calendar
 /// date, `created` its full RFC 3339 form.
 pub fn build_datapackage(
     workdir: &std::path::Path,
