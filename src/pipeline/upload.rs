@@ -356,11 +356,6 @@ struct Publish {
     ext: &'static str,
     title: &'static str,
     description: &'static str,
-    /// Frictionless resource `type`. `"file"` for everything here: the
-    /// GeoParquet's WKB geometry columns don't fit a Frictionless Table
-    /// Schema, and the PMTiles are opaque binary -- consumers use a
-    /// GeoParquet / PMTiles reader, not Frictionless's own table parser.
-    frictionless_type: &'static str,
     /// Frictionless `format` (bare, e.g. `"parquet"`).
     format: &'static str,
     /// Media type -- also the S3 `Content-Type`.
@@ -377,7 +372,6 @@ const CONFLATED: Publish = Publish {
     ext: "parquet",
     title: "Conflated AllThePlaces/OpenStreetMap dataset (GeoParquet)",
     description: "This dated object is immutable; the manifest's version is what advances.",
-    frictionless_type: "file",
     format: "parquet",
     mediatype: "application/vnd.apache.parquet",
     describes: None,
@@ -391,7 +385,6 @@ const CONFLATED_TILES: Publish = Publish {
     title: "conflated.pmtiles \u{2014} visualization of conflated.parquet",
     description: "Debugging aid for reviewing the matching step. Not a data product; \
         structure may change, or production may stop, without notice.",
-    frictionless_type: "file",
     format: "pmtiles",
     mediatype: "application/vnd.pmtiles",
     describes: None,
@@ -405,7 +398,6 @@ const EDITS_TILES: Publish = Publish {
     title: "edits.pmtiles \u{2014} visualization of suggested edits",
     description: "Debugging aid. Not a data product; may change, or stop being produced, \
         without notice.",
-    frictionless_type: "file",
     format: "pmtiles",
     mediatype: "application/vnd.pmtiles",
     describes: None,
@@ -436,7 +428,6 @@ fn publish(
         path: basename,
         title: spec.title,
         description: spec.description,
-        frictionless_type: spec.frictionless_type,
         format: spec.format,
         mediatype: spec.mediatype,
         bytes: digest.bytes,
@@ -515,7 +506,6 @@ pub fn upload_conflated_bom(
         title: "CycloneDX 1.7 provenance BOM",
         description: "Provenance for conflated.parquet: pipeline version, the two inputs, \
             and the Parquet's own SHA-256/512.",
-        frictionless_type: "json",
         format: "json",
         mediatype: "application/vnd.cyclonedx+json; version=1.7",
         bytes: digest.bytes,

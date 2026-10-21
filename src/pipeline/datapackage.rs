@@ -51,8 +51,6 @@ pub struct PublishedFile {
     pub path: String,
     pub title: &'static str,
     pub description: &'static str,
-    /// Frictionless resource `type` (`"file"` / `"json"`).
-    pub frictionless_type: &'static str,
     pub format: &'static str,
     pub mediatype: &'static str,
     pub bytes: u64,
@@ -117,7 +115,6 @@ fn resource(f: &PublishedFile) -> Value {
     let mut r = json!({
         "name": f.name,
         "path": f.path,
-        "type": f.frictionless_type,
         "title": f.title,
         "description": f.description,
         "format": f.format,
@@ -163,7 +160,6 @@ mod tests {
                 path: "conflated-20260901-a1b2c3d4.parquet".to_string(),
                 title: "Conflated AllThePlaces/OpenStreetMap dataset (GeoParquet)",
                 description: "This dated object is immutable; the manifest's version advances.",
-                frictionless_type: "file",
                 format: "parquet",
                 mediatype: "application/vnd.apache.parquet",
                 bytes: 786_432_000,
@@ -176,7 +172,6 @@ mod tests {
                 path: "conflated-20260901-a1b2c3d4.cdx.json".to_string(),
                 title: "CycloneDX 1.7 provenance BOM",
                 description: "Provenance for conflated.parquet.",
-                frictionless_type: "json",
                 format: "json",
                 mediatype: "application/vnd.cyclonedx+json; version=1.7",
                 bytes: 4096,
@@ -227,6 +222,9 @@ mod tests {
             );
         }
         assert_eq!(resources[1]["describes"], "conflated");
+        // Data Package v2 only allows "table" as a resource `type`, and
+        // none of these files is tabular, so no resource has one.
+        assert!(resources.iter().all(|r| r.get("type").is_none()));
         assert!(resources[0].get("describes").is_none());
         // sha512 is an internal field, never serialized.
         assert!(resources[0].get("sha512").is_none());
