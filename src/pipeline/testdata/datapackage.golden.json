@@ -21,8 +21,7 @@
       "mediatype": "application/vnd.apache.parquet",
       "name": "conflated",
       "path": "conflated-20260901-a1b2c3d4.parquet",
-      "title": "Conflated AllThePlaces/OpenStreetMap dataset (GeoParquet)",
-      "type": "file"
+      "title": "Conflated AllThePlaces/OpenStreetMap dataset (GeoParquet)"
     },
     {
       "bytes": 4096,
@@ -33,8 +32,7 @@
       "mediatype": "application/vnd.cyclonedx+json; version=1.7",
       "name": "bom",
       "path": "conflated-20260901-a1b2c3d4.cdx.json",
-      "title": "CycloneDX 1.7 provenance BOM",
-      "type": "json"
+      "title": "CycloneDX 1.7 provenance BOM"
     }
   ],
   "sources": [
