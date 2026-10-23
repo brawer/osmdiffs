@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.7](https://github.com/brawer/osmdiffs/compare/v0.8.6...v0.8.7) (2026-10-23)
+
+
+### 🐞 Bug Fixes
+
+* **deps:** Bump rustls and webpki crates for security advisories ([#839](https://github.com/brawer/osmdiffs/issues/839)) ([d19072c](https://github.com/brawer/osmdiffs/commit/d19072c41f40d191be55f3b21f0e7b8a13ae62bc))
+* drop resource type from datapackage.json ([6b40600](https://github.com/brawer/osmdiffs/commit/6b40600fc835717289a7ca4acde371ef032f4c83))
+* **pipeline:** Drop resource type from datapackage.json ([#838](https://github.com/brawer/osmdiffs/issues/838)) ([6b40600](https://github.com/brawer/osmdiffs/commit/6b40600fc835717289a7ca4acde371ef032f4c83))
+
+
+### 🚧 Maintenance
+
+* **ci:** Bump actions/upload-artifact from 7.0.1 to 7.0.2 ([#832](https://github.com/brawer/osmdiffs/issues/832)) ([0fb543e](https://github.com/brawer/osmdiffs/commit/0fb543eb03635b96fac99998cb59aa6aa0ea9209))
+* **ci:** Bump astral-sh/setup-uv from 10.2.0 to 10.3.0 ([#835](https://github.com/brawer/osmdiffs/issues/835)) ([12e7e77](https://github.com/brawer/osmdiffs/commit/12e7e77a61efb769f6d24725898f644a1fa9e639))
+* **ci:** Bump ossf/scorecard-action from 2.4.4 to 2.5.0 ([#833](https://github.com/brawer/osmdiffs/issues/833)) ([a4e45af](https://github.com/brawer/osmdiffs/commit/a4e45af9db55e7a93578efba72ae78f4fdb5380f))
+* **ci:** Bump taiki-e/install-action from 2.87.21 to 2.87.24 ([#827](https://github.com/brawer/osmdiffs/issues/827)) ([5a34868](https://github.com/brawer/osmdiffs/commit/5a348681103360e948abb15664554a165caee912))
+* **ci:** Bump taiki-e/install-action from 2.87.24 to 2.87.27 ([#836](https://github.com/brawer/osmdiffs/issues/836)) ([6169d3b](https://github.com/brawer/osmdiffs/commit/6169d3bffaecbe2add714fbdb82051a1016bc7b5))
+* **ci:** Bump the codeql group across 1 directory with 3 updates ([#834](https://github.com/brawer/osmdiffs/issues/834)) ([8238469](https://github.com/brawer/osmdiffs/commit/823846993b798e7c327f970f0dee040024359cec))
+* **deps:** Bump rust from 1.98.1-alpine3.23 to 1.99.0-alpine3.23 ([#828](https://github.com/brawer/osmdiffs/issues/828)) ([41af560](https://github.com/brawer/osmdiffs/commit/41af560852f6f27f0c481439b180aa33394c8de5))
+* **deps:** Bump rust from 1.99.0-alpine3.23 to 1.99.1-alpine3.23 ([#837](https://github.com/brawer/osmdiffs/issues/837)) ([9cecbaa](https://github.com/brawer/osmdiffs/commit/9cecbaa6318ebb34d7d262d6790c1ba435933205))
+* **pipeline:** Fetch all inputs up front, in parallel ([#831](https://github.com/brawer/osmdiffs/issues/831)) ([6d5402c](https://github.com/brawer/osmdiffs/commit/6d5402c539eb9f0d49ec46c4568d3384818805a4)), closes [#830](https://github.com/brawer/osmdiffs/issues/830)
+
 ## [0.8.6](https://github.com/brawer/osmdiffs/compare/v0.8.5...v0.8.6) (2026-10-05)
 
 
