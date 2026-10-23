@@ -1,4 +1,7 @@
-use super::{MatchMask, Matcher, OsmCandidate, geo_point_distance_score, parse_wikidata_id};
+use super::{
+    MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
+    parse_wikidata_id,
+};
 use crate::places::Place;
 use geo::Centroid;
 use s2::{cell::Cell, cellid::CellID, point::Point};
@@ -122,6 +125,18 @@ fn token_sort_ratio(a: &str, b: &str) -> f64 {
 static REQUIRE_ATP_WIKIDATA: LazyLock<bool> =
     LazyLock::new(|| std::env::var("OSMDIFFS_BRAND_REQUIRE_ATP_WIKIDATA").as_deref() == Ok("1"));
 
+/// With `OSMDIFFS_ADDR_CHECK_BEYOND_M=<meters>`, candidates farther
+/// than that need a matching street address (street and house number).
+/// `OSMDIFFS_ADDR_CHECK_SCOPE=all` applies this to `brand:wikidata`
+/// matches too; by default only to `brand`/`name` matches.
+static ADDR_CHECK_BEYOND_M: LazyLock<Option<f64>> = LazyLock::new(|| {
+    std::env::var("OSMDIFFS_ADDR_CHECK_BEYOND_M")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+});
+static ADDR_CHECK_ALL: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("OSMDIFFS_ADDR_CHECK_SCOPE").as_deref() == Ok("all"));
+
 /// Score factor for a match found through the `brand` tag only, so a
 /// `brand:wikidata` match at the same distance always wins.
 const BRAND_TAG_FACTOR: f64 = 0.99;
@@ -142,6 +157,7 @@ pub struct PoiMatcher {
     brand_wikidata: Option<u64>,
     brand: Option<String>,
     mode: BrandMode,
+    atp_addr_tags: Vec<(String, String)>,
 }
 
 impl PoiMatcher {
@@ -174,7 +190,18 @@ impl PoiMatcher {
             brand_wikidata,
             brand,
             mode,
+            atp_addr_tags: tags()
+                .filter(|(k, _)| k.starts_with("addr:"))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         })
+    }
+
+    fn atp_addr_tags_ref(&self) -> Vec<(&str, &str)> {
+        self.atp_addr_tags
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
     }
 
     /// How well `candidate` agrees on brand: 1.0 for equal
@@ -249,6 +276,16 @@ impl Matcher for PoiMatcher {
         let Some(centroid) = geometry.centroid() else {
             return 0.0;
         };
+        if let Some(limit) = *ADDR_CHECK_BEYOND_M
+            && (factor < 1.0 || *ADDR_CHECK_ALL)
+            && geo_point_distance(&self.center, &centroid) > limit
+        {
+            let osm_tags: Vec<(&str, &str)> = candidate.tags().collect();
+            let confirmed = address::osm_address_in_atp_text(&self.atp_addr_tags_ref(), &osm_tags);
+            if !confirmed {
+                return 0.0;
+            }
+        }
         factor * geo_point_distance_score(&self.center, &centroid, 400.0)
     }
 }
