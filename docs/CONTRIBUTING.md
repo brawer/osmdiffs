@@ -8,6 +8,23 @@ there’s no such thing as too small a
 Please be kind to each other and to maintainers; see our
 [Code of Conduct](https://github.com/brawer/osmdiffs/blob/main/docs/CODE_OF_CONDUCT.md).
 
+## Prerequisites
+
+Besides a Rust toolchain (the version is pinned in
+[`rust-toolchain.toml`](https://github.com/brawer/osmdiffs/blob/main/rust-toolchain.toml),
+so `rustup` picks it up automatically), building `osmdiffs` needs the
+Protocol Buffers compiler, `protoc`:
+[`build.rs`](https://github.com/brawer/osmdiffs/blob/main/build.rs)
+runs it to generate Rust code from `.proto` files, so `cargo build`
+fails without it.
+
+```sh
+sudo apt-get install protobuf-compiler   # Debian, Ubuntu
+brew install protobuf                    # macOS
+```
+
+Run `protoc --version` to check that it’s on your `PATH`.
+
 ## Before opening a Pull Request
 
 ```sh
