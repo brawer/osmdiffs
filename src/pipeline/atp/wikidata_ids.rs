@@ -13,6 +13,7 @@
 //! actually tracks keeps that signal meaningful. See
 //! brawer/osmdiffs#682.
 
+use crate::matchers::parse_wikidata_ids;
 use crate::places::PlaceReader;
 use crate::tables::U64Set;
 use anyhow::Result;
@@ -25,18 +26,6 @@ use std::path::{Path, PathBuf};
 /// not a business/brand/network).
 pub fn is_wikidata_key(key: &str) -> bool {
     key == "wikidata" || (key.ends_with(":wikidata") && key != "species:wikidata")
-}
-
-/// Parses `;`-separated Wikidata QIDs out of a tag value -- OSM's
-/// established convention for multi-valued tags, e.g. `"Q123;Q813"`.
-pub fn parse_wikidata_ids(value: &str) -> impl Iterator<Item = u64> + '_ {
-    value.split(';').filter_map(|part| {
-        let trimmed = part.trim();
-        let digits = trimmed
-            .strip_prefix('Q')
-            .or_else(|| trimmed.strip_prefix('q'))?;
-        digits.parse::<u64>().ok()
-    })
 }
 
 /// Scans `atp` (`alltheplaces.parquet`) for Wikidata IDs and writes them

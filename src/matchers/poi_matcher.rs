@@ -1,21 +1,27 @@
-use super::{MatchMask, Matcher, OsmCandidate, geo_point_distance_score, parse_wikidata_id};
+use super::{MatchMask, Matcher, OsmCandidate, geo_point_distance_score, parse_wikidata_ids};
 use crate::places::Place;
 use geo::Centroid;
 use s2::{cell::Cell, cellid::CellID, point::Point};
 
-/// Finds the first `brand:wikidata` tag in `tags` and parses its value.
+/// Finds the first `brand:wikidata` tag in `tags` and parses its
+/// value, which may list several `;`-separated IDs -- e.g. a car
+/// dealer tagged `brand=BMW;Mini`, `brand:wikidata=Q26678;Q116232`.
 /// Shared by `for_place` and `score_osm_candidate` -- same lookup, two
 /// different tag representations (`Place.tags` and
 /// `OsmCandidate::tags()`).
-fn find_brand_wikidata<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<u64> {
+fn find_brand_wikidata<'a>(
+    tags: impl Iterator<Item = (&'a str, &'a str)>,
+) -> impl Iterator<Item = u64> + 'a {
     tags.into_iter()
         .find(|&(k, _)| k == "brand:wikidata")
-        .and_then(|(_, v)| parse_wikidata_id(v))
+        .into_iter()
+        .flat_map(|(_, v)| parse_wikidata_ids(v))
 }
 
 pub struct PoiMatcher {
     center: Point,
-    brand_wikidata: u64,
+    /// Usually a single ID; see [find_brand_wikidata].
+    brand_wikidata: Vec<u64>,
 }
 
 impl PoiMatcher {
@@ -28,7 +34,10 @@ impl PoiMatcher {
             return None;
         }
         let tags = place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-        let brand_wikidata = find_brand_wikidata(tags)?;
+        let brand_wikidata: Vec<u64> = find_brand_wikidata(tags).collect();
+        if brand_wikidata.is_empty() {
+            return None;
+        }
         let center = Cell::from(CellID(place.s2_cell_id)).center();
         Some(PoiMatcher {
             center,
@@ -41,7 +50,7 @@ impl Matcher for PoiMatcher {
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64 {
         // Cheap check first: only decode the (potentially large) geometry
         // for candidates that actually match on brand.
-        if find_brand_wikidata(candidate.tags()) != Some(self.brand_wikidata) {
+        if !find_brand_wikidata(candidate.tags()).any(|id| self.brand_wikidata.contains(&id)) {
             return 0.0;
         }
         let Result::Ok(geometry) = candidate.geometry() else {
@@ -193,6 +202,8 @@ mod tests {
             "clothes",
             "Q60381703",
             "kiosk",
+            "Q706421; Q60381703",
+            "Q1;Q2",
         ];
         let pool = StringPool::create(
             strings.iter().map(|s| s.to_string()),
@@ -247,5 +258,33 @@ mod tests {
         assert!(ch_clothes_matcher.score_osm_candidate(&kiosk_candidate) == 0.0);
         assert!(ch_kiosk_matcher.score_osm_candidate(&clothes_candidate) == 0.0);
         assert!(ch_kiosk_matcher.score_osm_candidate(&kiosk_candidate) > 0.5);
+
+        // A multi-brand OSM feature matches each of its brands.
+        for (matcher, s2_cell_id) in [
+            (&ch_clothes_matcher, CH_CLOTHES_OSM.s2_cell_id),
+            (&ch_kiosk_matcher, CH_KIOSK_OSM.s2_cell_id),
+        ] {
+            let multi_feature = make_feature(
+                &[
+                    ("brand:wikidata", "Q706421; Q60381703"),
+                    ("shop", "clothes"),
+                ],
+                s2_cell_id,
+            );
+            let multi_candidate = OsmCandidate {
+                feature: &multi_feature,
+                strings: &pool,
+            };
+            assert!(matcher.score_osm_candidate(&multi_candidate) > 0.5);
+        }
+        let other_feature = make_feature(
+            &[("brand:wikidata", "Q1;Q2"), ("shop", "clothes")],
+            CH_KIOSK_OSM.s2_cell_id,
+        );
+        let other_candidate = OsmCandidate {
+            feature: &other_feature,
+            strings: &pool,
+        };
+        assert_eq!(ch_kiosk_matcher.score_osm_candidate(&other_candidate), 0.0);
     }
 }
