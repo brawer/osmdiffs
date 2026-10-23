@@ -328,12 +328,20 @@ fn geo_point_distance_score(pt: &Point, geo_pt: &geo::Point<f64>, max_meters: f6
     }
 }
 
-fn parse_wikidata_id(s: &str) -> Option<u64> {
+/// Parses one Wikidata QID such as `Q123`, ignoring surrounding whitespace.
+pub(crate) fn parse_wikidata_id(s: &str) -> Option<u64> {
     let trimmed = s.trim();
     let digits = trimmed
         .strip_prefix('Q')
         .or_else(|| trimmed.strip_prefix('q'))?;
     digits.parse::<u64>().ok()
+}
+
+/// Parses `;`-separated Wikidata QIDs out of a tag value -- OSM's
+/// established convention for multi-valued tags, e.g. `"Q123;Q813"`.
+/// Parts that are not QIDs are skipped.
+pub(crate) fn parse_wikidata_ids(value: &str) -> impl Iterator<Item = u64> + '_ {
+    value.split(';').filter_map(parse_wikidata_id)
 }
 
 #[cfg(test)]
