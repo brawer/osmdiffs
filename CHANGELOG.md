@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.8.8](https://github.com/brawer/osmdiffs/compare/v0.8.7...v0.8.8) (2026-10-24)
+
+
+### 🆕 Enhancements
+
+* compute denylist of ATP switchboard phone numbers ([#844](https://github.com/brawer/osmdiffs/issues/844)) ([b1ef57f](https://github.com/brawer/osmdiffs/commit/b1ef57feec311433b5f58cd4141133aed6fc8bbd))
+* compute nondescript email addresses from AllThePlaces ([#846](https://github.com/brawer/osmdiffs/issues/846)) ([b38b49e](https://github.com/brawer/osmdiffs/commit/b38b49e8773f03da72f2643e84919e8e410f0c16))
+
+
+### 🐞 Bug Fixes
+
+* **matchers:** match multi-valued brand:wikidata tags ([#842](https://github.com/brawer/osmdiffs/issues/842)) ([e883f63](https://github.com/brawer/osmdiffs/commit/e883f63d6738a717c40140b161e8411029b06581))
+* **matchers:** treat bike-share stations as street furniture ([#843](https://github.com/brawer/osmdiffs/issues/843)) ([c298614](https://github.com/brawer/osmdiffs/commit/c298614fcf556592b63bc7803476ef0550508d43))
+
+
+### 📚 Documentation
+
+* list protoc as a build prerequisite in CONTRIBUTING.md ([#840](https://github.com/brawer/osmdiffs/issues/840)) ([5eb4d45](https://github.com/brawer/osmdiffs/commit/5eb4d454478b9edf3a6597c3593c1cf28127ef23))
+
+
+### 🚧 Maintenance
+
+* rename phone denylist to nondescript phones ([#845](https://github.com/brawer/osmdiffs/issues/845)) ([f30f130](https://github.com/brawer/osmdiffs/commit/f30f13044d442cb2a2713d7a83b1891bbd9eb533))
+
 ## [0.8.7](https://github.com/brawer/osmdiffs/compare/v0.8.6...v0.8.7) (2026-10-23)
 
 
