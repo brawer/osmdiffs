@@ -60,8 +60,11 @@ fn test_pipeline() -> Result<()> {
         "conflated.pmtiles was not produced"
     );
     assert!(
-        workdir.path().join("alltheplaces.phone-denylist").exists(),
-        "alltheplaces.phone-denylist was not produced"
+        workdir
+            .path()
+            .join("alltheplaces.nondescript-phones")
+            .exists(),
+        "alltheplaces.nondescript-phones was not produced"
     );
     assert_publish_artifacts(workdir.path())?;
 

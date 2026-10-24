@@ -188,7 +188,7 @@ graph TD
     FETCH_INPUTS --> OSM_PBF[planet-latest.osm.pbf]
 
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
-    IMPORT_ATP --> PHONE_DENYLIST[alltheplaces.phone-denylist]
+    IMPORT_ATP --> NONDESCRIPT_PHONES[alltheplaces.nondescript-phones]
     ATP_PARQUET --> COLLECT_WIKI(collect_wikidata_ids) --> WIKIDATA[alltheplaces.wikidata-ids]
 
     OSM_PBF --> IMPORT_OSM(import_osm) --> OSM_INDEX[osm-features.index]
@@ -224,7 +224,7 @@ graph TD
 
 (Pink boxes are processing steps; plain rectangles are the files they
 read or write. `alltheplaces.wikidata-ids` and
-`alltheplaces.phone-denylist` have no outgoing edge above: nothing
+`alltheplaces.nondescript-phones` have no outgoing edge above: nothing
 consumes them yet, they’re generated on behalf of planned future
 work, see [#682](https://github.com/brawer/osmdiffs/issues/682) for
 the former; the latter is for using phone numbers as a matching signal.)
@@ -292,11 +292,11 @@ fetch away.
   (see [`src/places/`](../src/places/)). While writing, it also
   external-sorts every (phone or fax number, location) pair by number
   and, in one streaming pass, writes the numbers whose places span at
-  least 1 km to `alltheplaces.phone-denylist`, a `U64Set`
-  ([`phone_denylist.rs`](../src/pipeline/atp/phone_denylist.rs)):
+  least 1 km to `alltheplaces.nondescript-phones`, a `U64Set`
+  ([`nondescript_phones.rs`](../src/pipeline/atp/nondescript_phones.rs)):
   hotlines and switchboards that say nothing about which place a
-  feature is. Numbers shared only by features at the same site stay
-  usable; see
+  feature is, so a match on them should add little confidence.
+  Numbers shared only by features at the same site stay usable; see
   [`notes/2026-10-24-shared-phone-numbers.md`](notes/2026-10-24-shared-phone-numbers.md)
   for how common either kind of sharing is, and why. **~3 minutes.**
 - **`collect_wikidata_ids`**
