@@ -1,7 +1,9 @@
-//! Finds phone and fax numbers that AllThePlaces lists for places far
-//! apart from each other -- hotlines, call centers, central
-//! switchboards -- and writes them to a [U64Set] on disk, so that
-//! matching can ignore them as a signal.
+//! Finds *nondescript* phone and fax numbers: those that AllThePlaces
+//! lists for places far apart from each other, such as hotlines, call
+//! centers and central switchboards. Writes them to a [U64Set] on disk,
+//! so that matching can give them less weight as a signal. A
+//! nondescript number is no reason against a match; it just doesn't
+//! make one more likely.
 //!
 //! Many chains give every branch the same number (all 25,933 HDFC Bank
 //! branches in India share one; FedEx uses one for 14,611 locations).
@@ -14,16 +16,16 @@
 //! quarters of those were co-located; the far-apart ones affected about
 //! 11% of features with a number.
 //!
-//! A number is denied if the S2 latitude/longitude rectangle around
+//! A number is nondescript if the S2 latitude/longitude rectangle around
 //! every place carrying it, across all spiders, has a diagonal of at
-//! least [MIN_SWITCHBOARD_SPREAD_METERS]. The diagonal is never shorter
+//! least [MIN_NONDESCRIPT_SPREAD_METERS]. The diagonal is never shorter
 //! than the largest distance between two of the places (and at most
 //! about 1.4 times it), which is precise enough for this threshold.
 //!
 //! Computed on the side while `import_atp` writes `alltheplaces.parquet`:
 //! one [Sighting] per (place, number) goes into an external sort by
 //! number, and a single streaming pass over the sorted sightings finds
-//! the switchboards. Not consumed by anything yet; phone numbers are a
+//! the nondescript numbers. Not consumed by anything yet; phone numbers are a
 //! planned matching signal.
 
 use anyhow::Result;
@@ -36,16 +38,16 @@ use std::sync::LazyLock;
 use crate::places::{Place, PlaceReader};
 use crate::tables::U64Set;
 
-/// Filename, within `workdir`, of the denylist written by
-/// [write_denylist].
-pub const PHONE_DENYLIST_FILENAME: &str = "alltheplaces.phone-denylist";
+/// Filename, within `workdir`, of the set written by
+/// [write_nondescript_phones].
+pub const NONDESCRIPT_PHONES_FILENAME: &str = "alltheplaces.nondescript-phones";
 
 /// Places carrying the same number whose bounding box diagonal is at
-/// least this long make that number a switchboard.
-pub const MIN_SWITCHBOARD_SPREAD_METERS: f64 = 1000.0;
+/// least this long make that number nondescript.
+pub const MIN_NONDESCRIPT_SPREAD_METERS: f64 = 1000.0;
 
-static MIN_SWITCHBOARD_SPREAD: LazyLock<ChordAngle> =
-    LazyLock::new(|| crate::matchers::meters_to_chord_angle(MIN_SWITCHBOARD_SPREAD_METERS));
+static MIN_NONDESCRIPT_SPREAD: LazyLock<ChordAngle> =
+    LazyLock::new(|| crate::matchers::meters_to_chord_angle(MIN_NONDESCRIPT_SPREAD_METERS));
 
 /// Tag keys whose values may hold phone or fax numbers. Phone and fax
 /// share one key space: in ATP, thousands of numbers show up as a phone
@@ -131,7 +133,7 @@ pub fn sightings(place: &Place) -> Vec<Sighting> {
 }
 
 /// External sorter for [Sighting]s. Feed it with [Self::sort], then
-/// stream the result through [find_switchboards].
+/// stream the result through [find_nondescript].
 pub fn sorter(
     workdir: &Path,
     chunk_bytes: usize,
@@ -147,8 +149,8 @@ pub fn sorter(
 
 /// Streams over sightings sorted by number and returns, in ascending
 /// order, every number whose places are spread out over at least
-/// [MIN_SWITCHBOARD_SPREAD_METERS].
-pub fn find_switchboards<E>(
+/// [MIN_NONDESCRIPT_SPREAD_METERS].
+pub fn find_nondescript<E>(
     sorted: impl Iterator<Item = std::result::Result<Sighting, E>>,
 ) -> std::result::Result<Vec<u64>, E> {
     struct Group {
@@ -178,12 +180,12 @@ pub fn find_switchboards<E>(
             *rect = &*rect + &LatLng::from(CellID(s.s2_cell_id));
         }
 
-        fn is_switchboard(&self) -> bool {
+        fn is_nondescript(&self) -> bool {
             let Some(rect) = &self.rect else {
                 return false;
             };
             let diagonal = Point::from(rect.lo()).chordangle(&Point::from(rect.hi()));
-            diagonal >= *MIN_SWITCHBOARD_SPREAD
+            diagonal >= *MIN_NONDESCRIPT_SPREAD
         }
     }
 
@@ -195,7 +197,7 @@ pub fn find_switchboards<E>(
             Some(g) if g.phone == s.phone => g.add(&s),
             _ => {
                 if let Some(g) = group.replace(Group::new(&s))
-                    && g.is_switchboard()
+                    && g.is_nondescript()
                 {
                     result.push(g.phone);
                 }
@@ -203,18 +205,18 @@ pub fn find_switchboards<E>(
         }
     }
     if let Some(g) = group
-        && g.is_switchboard()
+        && g.is_nondescript()
     {
         result.push(g.phone);
     }
     Ok(result)
 }
 
-/// Builds the denylist from an existing `alltheplaces.parquet`, for a
-/// workdir where that file is reused but the denylist is missing or
-/// stale -- e.g. one from before this denylist existed, whose zip may
+/// Builds the nondescript phones from an existing `alltheplaces.parquet`,
+/// for a workdir where that file is reused but the set is missing or
+/// stale -- e.g. one from before this set existed, whose zip may
 /// already have been deleted. `import_atp` otherwise builds the
-/// denylist while writing the parquet file, without this extra read.
+/// set while writing the parquet file, without this extra read.
 pub fn build_from_parquet(parquet: &Path, workdir: &Path, out: &Path) -> Result<()> {
     let reader = PlaceReader::open(parquet)?;
     // Sole external sort in this step, so it gets the full budget.
@@ -234,21 +236,21 @@ pub fn build_from_parquet(parquet: &Path, workdir: &Path, out: &Path) -> Result<
         .map(std::io::Result::Ok);
     let sorted = sorter.sort_by(input, Sighting::cmp)?;
     read_result?;
-    write_denylist(find_switchboards(sorted)?, workdir, out)
+    write_nondescript_phones(find_nondescript(sorted)?, workdir, out)
 }
 
-/// Writes `switchboards` to `out` as a [U64Set].
-pub fn write_denylist(switchboards: Vec<u64>, workdir: &Path, out: &Path) -> Result<()> {
-    let count = switchboards.len();
+/// Writes `nondescript` to `out` as a [U64Set].
+pub fn write_nondescript_phones(nondescript: Vec<u64>, workdir: &Path, out: &Path) -> Result<()> {
+    let count = nondescript.len();
     // The list is small (tens of thousands of numbers worldwide) and
     // already sorted, so one exactly sized chunk is enough; there's no
     // need to claim the pipeline's whole external-sort budget for it.
     let chunk_bytes = count.max(1) * size_of::<u64>();
-    U64Set::create(switchboards.into_iter(), workdir, out, chunk_bytes)?;
+    U64Set::create(nondescript.into_iter(), workdir, out, chunk_bytes)?;
     log::info!(
         count = count,
         path = out.display().to_string();
-        "import_atp: wrote phone denylist"
+        "import_atp: wrote nondescript phones"
     );
     Ok(())
 }
@@ -343,20 +345,17 @@ mod tests {
         }
     }
 
-    fn switchboards(mut sightings: Vec<Sighting>) -> Vec<u64> {
+    fn nondescript(mut sightings: Vec<Sighting>) -> Vec<u64> {
         sightings.sort();
-        find_switchboards(sightings.into_iter().map(std::result::Result::<_, ()>::Ok)).unwrap()
+        find_nondescript(sightings.into_iter().map(std::result::Result::<_, ()>::Ok)).unwrap()
     }
 
     #[test]
-    fn test_find_switchboards() {
-        assert_eq!(switchboards(vec![]), Vec::<u64>::new());
+    fn test_find_nondescript() {
+        assert_eq!(nondescript(vec![]), Vec::<u64>::new());
 
-        // A single place is never a switchboard.
-        assert_eq!(
-            switchboards(vec![sighting(1, 8.5, 47.3)]),
-            Vec::<u64>::new()
-        );
+        // A single place is never nondescript.
+        assert_eq!(nondescript(vec![sighting(1, 8.5, 47.3)]), Vec::<u64>::new());
 
         let zurich = (8.5417, 47.3769);
         let bern = (7.4474, 46.9480);
@@ -366,20 +365,20 @@ mod tests {
         let oerlikon = (8.5417, 47.3904);
 
         assert_eq!(
-            switchboards(vec![
-                // Same site, listed three times: not a switchboard.
+            nondescript(vec![
+                // Same site, listed three times: not nondescript.
                 sighting(10, zurich.0, zurich.1),
                 sighting(10, zurich.0, zurich.1),
                 sighting(10, next_door.0, next_door.1),
-                // Zürich and Bern: a switchboard.
+                // Zürich and Bern: nondescript.
                 sighting(20, zurich.0, zurich.1),
                 sighting(20, bern.0, bern.1),
-                // 1.5 km apart: a switchboard.
+                // 1.5 km apart: nondescript.
                 sighting(30, zurich.0, zurich.1),
                 sighting(30, oerlikon.0, oerlikon.1),
                 // Just once.
                 sighting(40, bern.0, bern.1),
-                // Last group in the stream is a switchboard too.
+                // Last group in the stream is nondescript too.
                 sighting(50, next_door.0, next_door.1),
                 sighting(50, bern.0, bern.1),
                 sighting(50, zurich.0, zurich.1),
@@ -404,7 +403,7 @@ mod tests {
         writer.write(place(7.4474, 46.9480, &[("phone", "+41 31 321 21 11")]))?;
         writer.close()?;
 
-        let out = workdir.path().join(PHONE_DENYLIST_FILENAME);
+        let out = workdir.path().join(NONDESCRIPT_PHONES_FILENAME);
         build_from_parquet(&parquet, workdir.path(), &out)?;
         let set = U64Set::open(&out)?;
         assert_eq!(set.iter().collect::<Vec<u64>>(), [41444177777]);
@@ -412,13 +411,13 @@ mod tests {
     }
 
     #[test]
-    fn test_find_switchboards_propagates_errors() {
+    fn test_find_nondescript_propagates_errors() {
         let input = vec![Ok(sighting(1, 8.5, 47.3)), Err("broken")];
-        assert_eq!(find_switchboards(input.into_iter()), Err("broken"));
+        assert_eq!(find_nondescript(input.into_iter()), Err("broken"));
     }
 
     #[test]
-    fn test_sort_and_write_denylist() -> Result<()> {
+    fn test_sort_and_write_nondescript_phones() -> Result<()> {
         let workdir = tempfile::tempdir()?;
         let sorter = sorter(workdir.path(), 1024)?;
         let input = vec![
@@ -428,11 +427,11 @@ mod tests {
             sighting(18004633339, -87.6, 41.8),
         ];
         let sorted = sorter.sort(input.into_iter().map(std::io::Result::Ok))?;
-        let found = find_switchboards(sorted)?;
+        let found = find_nondescript(sorted)?;
         assert_eq!(found, [41444177777]);
 
-        let out = workdir.path().join(PHONE_DENYLIST_FILENAME);
-        write_denylist(found, workdir.path(), &out)?;
+        let out = workdir.path().join(NONDESCRIPT_PHONES_FILENAME);
+        write_nondescript_phones(found, workdir.path(), &out)?;
         let set = U64Set::open(&out)?;
         assert!(set.contains(41444177777));
         assert!(!set.contains(18004633339));

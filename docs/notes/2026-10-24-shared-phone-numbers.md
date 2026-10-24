@@ -1,10 +1,12 @@
-# Shared phone numbers in AllThePlaces, and the switchboard denylist
+# Shared phone numbers in AllThePlaces, and nondescript phones
 
-Investigation note behind `alltheplaces.phone-denylist`
-([`src/pipeline/atp/phone_denylist.rs`](../../src/pipeline/atp/phone_denylist.rs)),
+Investigation note behind `alltheplaces.nondescript-phones`
+([`src/pipeline/atp/nondescript_phones.rs`](../../src/pipeline/atp/nondescript_phones.rs)),
 written for a planned phone/fax matching signal. The question was how
 often several ATP features share one number, and which kind of sharing
-makes a number useless for matching.
+makes a number *nondescript*: it doesn't describe one place, so a match
+on it should add little or no confidence. It is no reason against a
+match, though.
 
 ## Method
 
@@ -44,7 +46,7 @@ Volkswagen, BMW, Ford, Toyota and Audi look the same), a shop plus its
 ATM or fuel station, Staples, Intermarché. The number is still a
 correct local identifier. It points to the right place; it just can't
 tell the co-located features apart, which is a job for brand matching.
-**These numbers must not be denied**, or the phone signal would be lost
+**These numbers must not be marked nondescript**, or the phone signal would be lost
 for almost a quarter of all features with a number.
 
 **Hotlines and switchboards (spread ≥ 1 km).** A few numbers dominate:
@@ -60,7 +62,7 @@ the top 30 cover 111k features.
 - Switzerland: BP `+41 848 848 490` × 142 (and × 30 in `shell`),
   H&M × 76, MediaMarkt × 44, Stadt Zürich `+41 44 417 77 77` × 179
 
-These say nothing about which place a feature is, so they are denied.
+These say nothing about which place a feature is, so they are nondescript.
 
 ## Across spiders
 
@@ -81,7 +83,7 @@ rule, so cross-spider sharing needs no separate treatment.
 
 ## The rule, and what it does in the pipeline
 
-A number is denied when the bounding rectangle of all places carrying
+A number is nondescript when the bounding rectangle of all places carrying
 it, across all spiders, has a diagonal of at least 1 km. The diagonal
 is between 1 and about 1.4 times the largest pairwise distance, which
 is precise enough for this threshold, and it doesn't depend on the order
@@ -90,11 +92,11 @@ of (number, S2 cell) pairs and one streaming pass, while it writes
 `alltheplaces.parquet`. The pipeline reads only numbers in `+`
 international format, which is how ATP writes almost all of them.
 
-On the same ATP run, the pipeline denies 20,011 numbers. That affects
+On the same ATP run, the pipeline marks 20,011 numbers as nondescript. That affects
 181,698 of the 1,749,943 imported features with a number (10.4%), close
-to the 11.2% above. On the Swiss subset, it denies 55 numbers (5.6% of
+to the 11.2% above. On the Swiss subset, it marks 55 numbers (5.6% of
 features with a number). `import_atp` took the same time with and
-without the denylist (about 105 s worldwide).
+without this step (about 105 s worldwide).
 
 ## Caveats
 
@@ -102,8 +104,8 @@ without the denylist (about 105 s worldwide).
   (in `axa_fr`, `carrefour_fr`, `franprix_fr`). The spread rule catches
   this one, but a placeholder used at a single site would not be caught.
 - Regional switchboards with a spread of only a few km (a city's central
-  number, a bank's regional office) are denied too. That is intended:
+  number, a bank's regional office) are nondescript too. That is intended:
   within a few km, the number no longer points to one place.
 - Hotlines in spiders the pipeline drops for licensing reasons don't
-  contribute to the denylist. An OSM object tagged with such a hotline
-  wouldn't be denied on that basis.
+  contribute. An OSM object tagged with such a hotline wouldn't be
+  recognized as nondescript on that basis.
