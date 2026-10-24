@@ -22,6 +22,7 @@ use crate::places::{ParquetWriter, Place};
 use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
 mod fetch;
+mod nondescript;
 mod wikidata_ids;
 
 // Only these two re-exported crate-wide (rather than making all of
@@ -45,13 +46,18 @@ const ATP_PARQUET_FILENAME: &str = "alltheplaces.parquet";
 
 /// Builds (or reuses) `alltheplaces.parquet` from the AllThePlaces
 /// `input` that `pipeline::inputs::fetch_inputs` already made available
-/// locally -- this step itself never touches the network.
+/// locally -- this step itself never touches the network. On the side,
+/// it also writes `alltheplaces.nondescript-phones` and
+/// `alltheplaces.nondescript-emails`, the phone numbers and email
+/// addresses ATP lists for places far apart (see `nondescript`).
 ///
 /// An existing `alltheplaces.parquet` is reused unless the zip is there
 /// and newer than it (i.e. was fetched again after the parquet file was
 /// built). With the zip gone, there's nothing to compare against, and
 /// `fetch_atp` deliberately didn't download it again: the parquet file
-/// is reused as is.
+/// is reused as is. When the parquet file is reused but a nondescript
+/// file is missing or older than the zip, those files alone are rebuilt
+/// from the parquet file, which doesn't need the zip.
 pub fn import_atp(
     input: &Input<AtpMetadata>,
     progress: &MultiProgress,
@@ -59,11 +65,23 @@ pub fn import_atp(
 ) -> Result<PathBuf> {
     let out = workdir.join(ATP_PARQUET_FILENAME);
     if out.exists() {
-        let stale = match std::fs::metadata(&input.path).and_then(|m| m.modified()) {
-            std::result::Result::Ok(zip_modified) => super::modified(&out)? < zip_modified,
-            Err(_) => false,
+        let zip_modified = std::fs::metadata(&input.path)
+            .and_then(|m| m.modified())
+            .ok();
+        let is_stale = |path: &Path| -> Result<bool> {
+            Ok(match zip_modified {
+                Some(zip_modified) => super::modified(path)? < zip_modified,
+                None => false,
+            })
         };
-        if !stale {
+        if !is_stale(&out)? {
+            let mut rebuild = false;
+            for path in nondescript::paths(workdir) {
+                rebuild |= !path.exists() || is_stale(&path)?;
+            }
+            if rebuild {
+                nondescript::build_from_parquet(&out, workdir)?;
+            }
             return Ok(out);
         }
     }
@@ -137,13 +155,43 @@ fn process_places(
     bar.set_prefix("atp.write     ");
     bar.set_message("features");
 
-    for place in sorted {
-        writer.write(place?)?;
-        bar.inc(1);
-    }
+    // While writing the places, feed their phone numbers and email
+    // addresses into a second external sort, for the nondescript values.
+    // The first sort is merging by now and holds no chunk buffer of its
+    // own, so this one gets the full budget too.
+    let nondescript_sorter =
+        nondescript::sorter(workdir, crate::pipeline::EXTERNAL_SORT_CHUNK_BYTES)?;
+    let mut write_result: Result<()> = Ok(());
+    let sightings = sorted
+        .map_while(|place| {
+            let place = match place {
+                std::result::Result::Ok(place) => place,
+                Err(err) => {
+                    write_result = Err(err.into());
+                    return None;
+                }
+            };
+            let sightings = nondescript::sightings(&place);
+            if let Err(err) = writer.write(place) {
+                write_result = Err(err);
+                return None;
+            }
+            bar.inc(1);
+            Some(sightings)
+        })
+        .flatten()
+        .map(std::io::Result::Ok);
+    // `sort_by` with a named comparison, not `sort`: the latter's return
+    // type captures the input iterator's type, and with it the borrows
+    // of `writer` and `write_result` that we need back right below.
+    let sorted_sightings = nondescript_sorter.sort_by(sightings, nondescript::Sighting::cmp)?;
+    write_result?;
     writer.close()?;
     rename(&tmp, out)?;
     bar.finish_with_message(format!("{} features", num_features));
+
+    let found = nondescript::find_nondescript(sorted_sightings)?;
+    nondescript::write(&found, workdir)?;
 
     log::info!(
         path = out.display().to_string(),
@@ -589,6 +637,38 @@ mod tests {
         assert_eq!(counts["misenso_ch"], 3);
         assert_eq!(counts["tchibo"], 1);
         assert_eq!(counts["winterthur_ch"], 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_atp_rebuilds_missing_nondescript_files() -> Result<()> {
+        let testdata = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data");
+        let workdir = tempfile::tempdir()?;
+        let zip = workdir.path().join(ATP_ZIP_FILENAME);
+        std::fs::copy(testdata.join(ATP_ZIP_FILENAME), &zip)?;
+        let input = Input {
+            path: zip.clone(),
+            metadata: read_cached_metadata(&testdata)?,
+        };
+        let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+        let phones = nondescript::Signal::Phone.path(workdir.path());
+        let emails = nondescript::Signal::Email.path(workdir.path());
+
+        let parquet = import_atp(&input, &progress, workdir.path())?;
+        assert!(parquet.exists());
+        assert!(phones.exists());
+        assert!(emails.exists());
+
+        // A workdir from before the nondescript emails existed, whose zip
+        // was deleted after the parquet file was built: they get rebuilt
+        // from the parquet file, without the zip.
+        std::fs::remove_file(&emails)?;
+        std::fs::remove_file(&zip)?;
+        let parquet_modified = super::super::modified(&parquet)?;
+        assert_eq!(import_atp(&input, &progress, workdir.path())?, parquet);
+        assert!(phones.exists());
+        assert!(emails.exists());
+        assert_eq!(super::super::modified(&parquet)?, parquet_modified);
         Ok(())
     }
 
