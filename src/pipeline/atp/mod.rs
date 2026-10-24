@@ -22,6 +22,7 @@ use crate::places::{ParquetWriter, Place};
 use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
 mod fetch;
+mod phone_denylist;
 mod wikidata_ids;
 
 // Only these two re-exported crate-wide (rather than making all of
@@ -33,6 +34,7 @@ pub(crate) use fetch::{AtpMetadata, read_cached_metadata};
 // nothing else outside `atp` needs the rest of fetch's API.
 pub(super) use fetch::{ATP_RUN_HISTORY_URL, fetch_atp};
 
+pub use phone_denylist::PHONE_DENYLIST_FILENAME;
 pub use wikidata_ids::collect_wikidata_ids;
 
 /// Filename, within `workdir`, of the AllThePlaces dump `fetch_atp`
@@ -45,25 +47,38 @@ const ATP_PARQUET_FILENAME: &str = "alltheplaces.parquet";
 
 /// Builds (or reuses) `alltheplaces.parquet` from the AllThePlaces
 /// `input` that `pipeline::inputs::fetch_inputs` already made available
-/// locally -- this step itself never touches the network.
+/// locally -- this step itself never touches the network. On the side,
+/// it also writes `alltheplaces.phone-denylist`, the phone numbers ATP
+/// lists for places far apart (see `phone_denylist`).
 ///
 /// An existing `alltheplaces.parquet` is reused unless the zip is there
 /// and newer than it (i.e. was fetched again after the parquet file was
 /// built). With the zip gone, there's nothing to compare against, and
 /// `fetch_atp` deliberately didn't download it again: the parquet file
-/// is reused as is.
+/// is reused as is. When the parquet file is reused but the denylist is
+/// missing or older than the zip, the denylist alone is rebuilt from
+/// the parquet file, which doesn't need the zip.
 pub fn import_atp(
     input: &Input<AtpMetadata>,
     progress: &MultiProgress,
     workdir: &Path,
 ) -> Result<PathBuf> {
     let out = workdir.join(ATP_PARQUET_FILENAME);
+    let denylist = workdir.join(PHONE_DENYLIST_FILENAME);
     if out.exists() {
-        let stale = match std::fs::metadata(&input.path).and_then(|m| m.modified()) {
-            std::result::Result::Ok(zip_modified) => super::modified(&out)? < zip_modified,
-            Err(_) => false,
+        let zip_modified = std::fs::metadata(&input.path)
+            .and_then(|m| m.modified())
+            .ok();
+        let is_stale = |path: &Path| -> Result<bool> {
+            Ok(match zip_modified {
+                Some(zip_modified) => super::modified(path)? < zip_modified,
+                None => false,
+            })
         };
-        if !stale {
+        if !is_stale(&out)? {
+            if !denylist.exists() || is_stale(&denylist)? {
+                phone_denylist::build_from_parquet(&out, workdir, &denylist)?;
+            }
             return Ok(out);
         }
     }
@@ -95,7 +110,7 @@ pub fn import_atp(
     // https://dev.to/sgchris/scoped-threads-with-stdthreadscope-in-rust-163-48f9
     let (tx, rx) = sync_channel(50_000);
     let (ra, rb) = std::thread::scope(|s| {
-        let r1 = s.spawn(|| process_places(rx, progress, workdir, &out));
+        let r1 = s.spawn(|| process_places(rx, progress, workdir, &out, &denylist));
         let r2 = s.spawn(|| process_zip(input_zip, progress, tx));
         (r1.join().unwrap(), r2.join().unwrap())
     });
@@ -110,6 +125,7 @@ fn process_places(
     progress: &MultiProgress,
     workdir: &Path,
     out: &Path,
+    denylist: &Path,
 ) -> Result<()> {
     let mut tmp = PathBuf::from(out);
     tmp.add_extension("tmp");
@@ -137,13 +153,42 @@ fn process_places(
     bar.set_prefix("atp.write     ");
     bar.set_message("features");
 
-    for place in sorted {
-        writer.write(place?)?;
-        bar.inc(1);
-    }
+    // While writing the places, feed their phone numbers into a second
+    // external sort, by number, for the phone denylist. The first sort
+    // is merging by now and holds no chunk buffer of its own, so this
+    // one gets the full budget too.
+    let phone_sorter = phone_denylist::sorter(workdir, crate::pipeline::EXTERNAL_SORT_CHUNK_BYTES)?;
+    let mut write_result: Result<()> = Ok(());
+    let sightings = sorted
+        .map_while(|place| {
+            let place = match place {
+                std::result::Result::Ok(place) => place,
+                Err(err) => {
+                    write_result = Err(err.into());
+                    return None;
+                }
+            };
+            let sightings = phone_denylist::sightings(&place);
+            if let Err(err) = writer.write(place) {
+                write_result = Err(err);
+                return None;
+            }
+            bar.inc(1);
+            Some(sightings)
+        })
+        .flatten()
+        .map(std::io::Result::Ok);
+    // `sort_by` with a named comparison, not `sort`: the latter's return
+    // type captures the input iterator's type, and with it the borrows
+    // of `writer` and `write_result` that we need back right below.
+    let sorted_sightings = phone_sorter.sort_by(sightings, phone_denylist::Sighting::cmp)?;
+    write_result?;
     writer.close()?;
     rename(&tmp, out)?;
     bar.finish_with_message(format!("{} features", num_features));
+
+    let switchboards = phone_denylist::find_switchboards(sorted_sightings)?;
+    phone_denylist::write_denylist(switchboards, workdir, denylist)?;
 
     log::info!(
         path = out.display().to_string(),
@@ -589,6 +634,35 @@ mod tests {
         assert_eq!(counts["misenso_ch"], 3);
         assert_eq!(counts["tchibo"], 1);
         assert_eq!(counts["winterthur_ch"], 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_atp_rebuilds_missing_phone_denylist() -> Result<()> {
+        let testdata = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data");
+        let workdir = tempfile::tempdir()?;
+        let zip = workdir.path().join(ATP_ZIP_FILENAME);
+        std::fs::copy(testdata.join(ATP_ZIP_FILENAME), &zip)?;
+        let input = Input {
+            path: zip.clone(),
+            metadata: read_cached_metadata(&testdata)?,
+        };
+        let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+        let denylist = workdir.path().join(PHONE_DENYLIST_FILENAME);
+
+        let parquet = import_atp(&input, &progress, workdir.path())?;
+        assert!(parquet.exists());
+        assert!(denylist.exists());
+
+        // A workdir from before the denylist existed, whose zip was
+        // deleted after the parquet file was built: the denylist gets
+        // rebuilt from the parquet file, without the zip.
+        std::fs::remove_file(&denylist)?;
+        std::fs::remove_file(&zip)?;
+        let parquet_modified = super::super::modified(&parquet)?;
+        assert_eq!(import_atp(&input, &progress, workdir.path())?, parquet);
+        assert!(denylist.exists());
+        assert_eq!(super::super::modified(&parquet)?, parquet_modified);
         Ok(())
     }
 
