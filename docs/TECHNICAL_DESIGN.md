@@ -189,6 +189,7 @@ graph TD
 
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
     IMPORT_ATP --> NONDESCRIPT_PHONES[alltheplaces.nondescript-phones]
+    IMPORT_ATP --> NONDESCRIPT_EMAILS[alltheplaces.nondescript-emails]
     ATP_PARQUET --> COLLECT_WIKI(collect_wikidata_ids) --> WIKIDATA[alltheplaces.wikidata-ids]
 
     OSM_PBF --> IMPORT_OSM(import_osm) --> OSM_INDEX[osm-features.index]
@@ -223,11 +224,13 @@ graph TD
 ```
 
 (Pink boxes are processing steps; plain rectangles are the files they
-read or write. `alltheplaces.wikidata-ids` and
-`alltheplaces.nondescript-phones` have no outgoing edge above: nothing
-consumes them yet, they’re generated on behalf of planned future
-work, see [#682](https://github.com/brawer/osmdiffs/issues/682) for
-the former; the latter is for using phone numbers as a matching signal.)
+read or write. `alltheplaces.wikidata-ids`,
+`alltheplaces.nondescript-phones` and `alltheplaces.nondescript-emails`
+have no outgoing edge above: nothing consumes them yet, they’re
+generated on behalf of planned future work, see
+[#682](https://github.com/brawer/osmdiffs/issues/682) for the first;
+the other two are for using phone numbers and email addresses as
+matching signals.)
 
 Every top-level step above is logged with its own wall-clock time and
 memory snapshot, regardless of success or failure — see
@@ -290,14 +293,19 @@ fetch away.
   [`src/pipeline/atp/mod.rs`](../src/pipeline/atp/mod.rs)), and writing
   the rest out as `alltheplaces.parquet`, sorted for spatial locality
   (see [`src/places/`](../src/places/)). While writing, it also
-  external-sorts every (phone or fax number, location) pair by number
-  and, in one streaming pass, writes the numbers whose places span at
-  least 1 km to `alltheplaces.nondescript-phones`, a `U64Set`
-  ([`nondescript_phones.rs`](../src/pipeline/atp/nondescript_phones.rs)):
-  hotlines and switchboards that say nothing about which place a
-  feature is, so a match on them should add little confidence.
-  Numbers shared only by features at the same site stay usable; see
+  external-sorts every (phone or fax number, location) and (email
+  address, location) pair by value and, in one streaming pass, writes
+  the values whose places span at least 1 km to
+  `alltheplaces.nondescript-phones` and
+  `alltheplaces.nondescript-emails`, two `U64Set`s
+  ([`nondescript/`](../src/pipeline/atp/nondescript/); emails are
+  stored as a 64-bit hash): hotlines, switchboards and central or
+  regional mailboxes that say nothing about which place a feature is,
+  so a match on them should add little confidence. Values shared only
+  by features at the same site stay usable; see
   [`notes/2026-10-24-shared-phone-numbers.md`](notes/2026-10-24-shared-phone-numbers.md)
+  and
+  [`notes/2026-10-24-shared-email-addresses.md`](notes/2026-10-24-shared-email-addresses.md)
   for how common either kind of sharing is, and why. **~3 minutes.**
 - **`collect_wikidata_ids`**
   ([`src/pipeline/atp/wikidata_ids.rs`](../src/pipeline/atp/wikidata_ids.rs)) — extracts
