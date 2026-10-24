@@ -71,7 +71,11 @@ impl MatchMask {
             ("amenity", "arts_centre") => Self::SHOP.0,
             ("amenity", "bank") => Self::SHOP.0,
             ("amenity", "bench") => Self::STREET_FURNITURE.0,
-            ("amenity", "bicycle_rental") => Self::SHOP.0,
+            // Bike-share docking stations and drop-off points sit close
+            // together and are often all named after their operator, so
+            // treat them as small street furniture, not as shops. A
+            // staffed rental shop (`bicycle_rental=shop`) is still a shop.
+            ("amenity", "bicycle_rental") => Self::STREET_FURNITURE.0,
             ("amenity", "bbq") => Self::STREET_FURNITURE.0,
             ("amenity", "bicycle_repair_station") => Self::STREET_FURNITURE.0,
             ("amenity", "bureau_de_change") => Self::SHOP.0,
@@ -114,6 +118,8 @@ impl MatchMask {
             ("barrier", "gate") => Self::STREET_FURNITURE.0,
             ("barrier", "hedge") => Self::SHRUBBERY.0,
             ("barrier", "stile") => Self::STREET_FURNITURE.0,
+
+            ("bicycle_rental", "shop") => Self::SHOP.0,
 
             ("emergency", "acess_point") => Self::STREET_FURNITURE.0,
             ("emergency", "assembly_point") => Self::STREET_FURNITURE.0,
@@ -359,6 +365,18 @@ mod tests {
         mask.add_tag("amenity", "bench");
         mask.add_tag("shop", "yes");
         assert!(match_distance(&mask) == match_distance(&MatchMask::SHOP));
+
+        let mut docking_station = MatchMask::default();
+        docking_station.add_tag("amenity", "bicycle_rental");
+        docking_station.add_tag("bicycle_rental", "docking_station");
+        assert_eq!(docking_station, MatchMask::STREET_FURNITURE);
+        assert!(match_distance(&docking_station) == match_distance(&MatchMask::SHRUBBERY));
+
+        let mut rental_shop = MatchMask::default();
+        rental_shop.add_tag("amenity", "bicycle_rental");
+        rental_shop.add_tag("bicycle_rental", "shop");
+        assert!(rental_shop.intersects(&MatchMask::SHOP));
+        assert!(match_distance(&rental_shop) == match_distance(&MatchMask::SHOP));
     }
 
     const WKB_OPTS: WriteOptions = WriteOptions {
