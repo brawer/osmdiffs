@@ -1,3 +1,4 @@
+use super::contact::{AtpContacts, CONTACT_FACTOR, CONTACT_MODE, category_factor, main_category};
 use super::{
     MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
     parse_wikidata_ids,
@@ -124,6 +125,24 @@ static ADDR_CHECK_BEYOND_M: LazyLock<Option<f64>> = LazyLock::new(|| {
 static ADDR_CHECK_ALL: LazyLock<bool> =
     LazyLock::new(|| std::env::var("OSMDIFFS_ADDR_CHECK_SCOPE").as_deref() == Ok("all"));
 
+/// With `OSMDIFFS_POI_MASKS=wide`, restaurants, lodging, schools and
+/// fuel stations get a matcher too, not only shops.
+static WIDE_MASKS: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("OSMDIFFS_POI_MASKS").as_deref() == Ok("wide"));
+
+/// With `OSMDIFFS_CONTACT_ONLY=1`, brand tags are ignored on both
+/// sides, so only phone and email can match. For measuring how often
+/// contact evidence alone finds the feature `brand:wikidata` finds.
+static CONTACT_ONLY: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("OSMDIFFS_CONTACT_ONLY").as_deref() == Ok("1"));
+
+/// With `OSMDIFFS_CONTACT_TIEBREAK=1`, a `brand:wikidata` match whose
+/// phone or email also agrees gets [TIEBREAK_BONUS] on top, so it wins
+/// over a same-brand candidate at about the same distance.
+static CONTACT_TIEBREAK: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("OSMDIFFS_CONTACT_TIEBREAK").as_deref() == Ok("1"));
+const TIEBREAK_BONUS: f64 = 0.05;
+
 /// Score factor for a match found through the `brand` tag only, so a
 /// `brand:wikidata` match at the same distance always wins.
 const BRAND_TAG_FACTOR: f64 = 0.99;
@@ -146,6 +165,11 @@ pub struct PoiMatcher {
     brand: Option<String>,
     mode: BrandMode,
     atp_addr_tags: Vec<(String, String)>,
+    /// Descriptive phone numbers and emails; empty unless contact
+    /// matching is on.
+    contacts: AtpContacts,
+    /// Main category as `key=value`, for contact matches.
+    category: Option<String>,
 }
 
 impl PoiMatcher {
@@ -157,19 +181,42 @@ impl PoiMatcher {
     }
 
     pub fn for_place_with_mode(place: &Place, mode: BrandMode) -> Option<PoiMatcher> {
-        if !place.mask.intersects(&MatchMask::SHOP) {
+        let allowed = if *WIDE_MASKS {
+            MatchMask(
+                MatchMask::SHOP.0
+                    | MatchMask::RESTAURANT.0
+                    | MatchMask::LODGING.0
+                    | MatchMask::SCHOOL.0
+                    | MatchMask::FUEL.0,
+            )
+        } else {
+            MatchMask::SHOP
+        };
+        if !place.mask.intersects(&allowed) {
             return None;
         }
         let tags = || place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-        let brand_wikidata: Vec<u64> = find_brand_wikidata(tags()).collect();
-        let brand = if mode == BrandMode::Wikidata {
+        let brand_wikidata: Vec<u64> = if *CONTACT_ONLY {
+            Vec::new()
+        } else {
+            find_brand_wikidata(tags()).collect()
+        };
+        let contacts = if CONTACT_MODE.enabled() {
+            AtpContacts::from_tags(tags())
+        } else {
+            AtpContacts::default()
+        };
+        let brand = if mode == BrandMode::Wikidata || *CONTACT_ONLY {
             None
         } else {
             find_tag(tags(), "brand")
                 .map(normalize_brand)
                 .filter(|b| !b.is_empty())
         };
-        if brand_wikidata.is_empty() && (brand.is_none() || *REQUIRE_ATP_WIKIDATA) {
+        if brand_wikidata.is_empty()
+            && (brand.is_none() || *REQUIRE_ATP_WIKIDATA)
+            && contacts.is_empty()
+        {
             return None;
         }
         let center = Cell::from(CellID(place.s2_cell_id)).center();
@@ -182,6 +229,8 @@ impl PoiMatcher {
                 .filter(|(k, _)| k.starts_with("addr:"))
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            category: main_category(tags()),
+            contacts,
         })
     }
 
@@ -222,6 +271,36 @@ impl PoiMatcher {
         if ok { BRAND_TAG_FACTOR } else { 0.0 }
     }
 
+    /// Whether both sides have `brand:wikidata` and share no ID.
+    fn brand_vetoed(&self, candidate: &OsmCandidate) -> bool {
+        if self.brand_wikidata.is_empty() || *CONTACT_ONLY {
+            return false;
+        }
+        let mut osm = find_brand_wikidata(candidate.tags()).peekable();
+        osm.peek().is_some() && !osm.any(|id| self.brand_wikidata.contains(&id))
+    }
+
+    /// Adds phone and email evidence to `brand_factor`'s result.
+    fn with_contacts(&self, factor: f64, candidate: &OsmCandidate) -> f64 {
+        if self.contacts.is_empty() {
+            return factor;
+        }
+        if factor >= 1.0 {
+            if *CONTACT_TIEBREAK && self.contacts.agrees(candidate.tags()) {
+                return factor + TIEBREAK_BONUS;
+            }
+            return factor;
+        }
+        if factor > 0.0 || self.brand_vetoed(candidate) {
+            return factor;
+        }
+        if !self.contacts.agrees(candidate.tags()) {
+            return 0.0;
+        }
+        let osm_category = main_category(candidate.tags());
+        CONTACT_FACTOR * category_factor(self.category.as_deref(), osm_category.as_deref())
+    }
+
     /// Compares the ATP brand against a normalized OSM string; `multi`
     /// allows `;`-separated values (OSM `brand`, not `name`).
     fn brand_matches(&self, osm: &str, multi: bool) -> bool {
@@ -247,7 +326,7 @@ impl Matcher for PoiMatcher {
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64 {
         // Cheap check first: only decode the (potentially large) geometry
         // for candidates that actually match on brand.
-        let factor = self.brand_factor(candidate);
+        let factor = self.with_contacts(self.brand_factor(candidate), candidate);
         if factor == 0.0 {
             return 0.0;
         }

@@ -45,6 +45,7 @@ pub fn conflate(
         return Ok(out_path);
     }
 
+    crate::matchers::contact::load_nondescript(workdir);
     let atp_reader = PlaceReader::open(atp)?;
     let num_atp_features = atp_reader.total_rows() as u64;
     let producer_progress =
@@ -151,6 +152,7 @@ fn produce_rows(
     }
 
     progress_bar.finish();
+    crate::matchers::contact::log_stats();
     log::info!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
         atp_features_processed = atp_features_processed.load(Ordering::Relaxed),

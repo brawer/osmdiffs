@@ -42,8 +42,8 @@ use crate::tables::U64Set;
 mod emails;
 mod phones;
 
-use emails::{is_email_key, parse_emails};
-use phones::{is_phone_key, parse_phone_numbers};
+pub(crate) use emails::{email_hash, is_email_key, normalize_email, parse_emails};
+pub(crate) use phones::{is_phone_key, parse_phone_numbers};
 
 /// Places carrying the same value whose bounding box diagonal is at
 /// least this long make that value nondescript.

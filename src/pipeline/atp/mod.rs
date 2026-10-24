@@ -22,7 +22,7 @@ use crate::places::{ParquetWriter, Place};
 use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
 mod fetch;
-mod nondescript;
+pub(crate) mod nondescript;
 mod wikidata_ids;
 
 // Only these two re-exported crate-wide (rather than making all of

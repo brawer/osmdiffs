@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 use wkb::reader::read_wkb;
 
 mod address;
+pub mod contact;
 mod poi_matcher;
 
 /// Mean Earth radius, in meters -- used throughout this module to turn
@@ -71,6 +72,8 @@ impl MatchMask {
         self.0 |= match (key, value) {
             ("amenity", "arts_centre") => Self::SHOP.0,
             ("amenity", "bank") => Self::SHOP.0,
+            ("amenity", "bar") => Self::RESTAURANT.0,
+            ("amenity", "biergarten") => Self::RESTAURANT.0,
             ("amenity", "bench") => Self::STREET_FURNITURE.0,
             // Bike-share docking stations and drop-off points sit close
             // together and are often all named after their operator, so
@@ -80,12 +83,20 @@ impl MatchMask {
             ("amenity", "bbq") => Self::STREET_FURNITURE.0,
             ("amenity", "bicycle_repair_station") => Self::STREET_FURNITURE.0,
             ("amenity", "bureau_de_change") => Self::SHOP.0,
+            ("amenity", "cafe") => Self::RESTAURANT.0,
+            ("amenity", "car_rental") => Self::SHOP.0,
+            ("amenity", "cinema") => Self::SHOP.0,
+            ("amenity", "clinic") => Self::SHOP.0,
+            ("amenity", "college") => Self::SCHOOL.0,
             ("amenity", "childcare") => Self::SCHOOL.0,
             ("amenity", "dentist") => Self::SHOP.0,
+            ("amenity", "doctors") => Self::SHOP.0,
             ("amenity", "drinking_water") => Self::STREET_FURNITURE.0,
             ("amenity", "driving_school") => Self::SCHOOL.0,
             ("amenity", "charging_station") => Self::FUEL.0,
             ("amenity", "ferry_terminal") => Self::TRANSIT.0,
+            ("amenity", "fast_food") => Self::RESTAURANT.0,
+            ("amenity", "food_court") => Self::RESTAURANT.0,
             ("amenity", "fountain") => Self::STREET_FURNITURE.0,
             ("amenity", "fuel") => Self::FUEL.0,
             ("amenity", "grit_bin") => Self::STREET_FURNITURE.0,
@@ -93,6 +104,7 @@ impl MatchMask {
             ("amenity", "kindergarten") => Self::SCHOOL.0,
             ("amenity", "letter_box") => Self::STREET_FURNITURE.0,
             ("amenity", "library") => Self::SHOP.0,
+            ("amenity", "money_transfer") => Self::SHOP.0,
             ("amenity", "motorcycle_parking") => Self::PARKING.0,
             ("amenity", "nightclub") => Self::SHOP.0,
             ("amenity", "parking") => Self::PARKING.0,
@@ -109,6 +121,8 @@ impl MatchMask {
             ("amenity", "theatre") => Self::SHOP.0,
             ("amenity", "trolley_bay") => Self::STREET_FURNITURE.0,
             ("amenity", "restaurant") => Self::RESTAURANT.0,
+            ("amenity", "school") => Self::SCHOOL.0,
+            ("amenity", "veterinary") => Self::SHOP.0,
             ("amenity", "university") => Self::SCHOOL.0,
             ("amenity", "vending_machine") => Self::STREET_FURNITURE.0,
             ("amenity", "waste_basket") => Self::STREET_FURNITURE.0,
@@ -121,6 +135,9 @@ impl MatchMask {
             ("barrier", "stile") => Self::STREET_FURNITURE.0,
 
             ("bicycle_rental", "shop") => Self::SHOP.0,
+
+            ("healthcare", "no") => 0,
+            ("healthcare", _) => Self::SHOP.0,
 
             ("emergency", "acess_point") => Self::STREET_FURNITURE.0,
             ("emergency", "assembly_point") => Self::STREET_FURNITURE.0,
@@ -154,6 +171,8 @@ impl MatchMask {
             ("leisure", "bird_hide") => Self::STREET_FURNITURE.0,
             ("leisure", "bowling_alley") => Self::SHOP.0,
             ("leisure", "dance") => Self::SHOP.0,
+            ("leisure", "fitness_centre") => Self::SHOP.0,
+            ("leisure", "sports_centre") => Self::SHOP.0,
             ("leisure", "minigolf") => Self::SHOP.0,
             ("leisure", "firepit") => Self::STREET_FURNITURE.0,
             ("leisure", "hot_tub") => Self::STREET_FURNITURE.0,
@@ -206,6 +225,7 @@ impl MatchMask {
             ("tourism", "hotel") => Self::LODGING.0,
             ("tourism", "hotel;motel") => Self::LODGING.0,
             ("tourism", "motel") => Self::LODGING.0,
+            ("tourism", "museum") => Self::SHOP.0,
             ("tourism", "wilderness_hut") => Self::LODGING.0,
 
             ("tower", _) => Self::STREET_FURNITURE.0,

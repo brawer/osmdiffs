@@ -31,6 +31,7 @@ use time::UtcDateTime;
 pub(crate) const EXTERNAL_SORT_CHUNK_BYTES: usize = 512 * 1024 * 1024;
 
 mod atp;
+pub(crate) use atp::nondescript;
 mod conflate;
 mod conflated_tiles;
 mod datapackage;
