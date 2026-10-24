@@ -246,7 +246,7 @@ static SMALL_DISTANCE: LazyLock<ChordAngle> = LazyLock::new(|| meters_to_chord_a
 static MEDIUM_DISTANCE: LazyLock<ChordAngle> = LazyLock::new(|| meters_to_chord_angle(400.0));
 static LARGE_DISTANCE: LazyLock<ChordAngle> = LazyLock::new(|| meters_to_chord_angle(1000.0));
 
-fn meters_to_chord_angle(radius_meters: f64) -> ChordAngle {
+pub(crate) fn meters_to_chord_angle(radius_meters: f64) -> ChordAngle {
     use s2::s1::angle::{Angle, Rad};
     ChordAngle::from(Angle::from(Rad(radius_meters / EARTH_RADIUS_METERS)))
 }
