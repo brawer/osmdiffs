@@ -1,7 +1,7 @@
 # Shared phone numbers in AllThePlaces, and nondescript phones
 
 Investigation note behind `alltheplaces.nondescript-phones`
-([`src/pipeline/atp/nondescript_phones.rs`](../../src/pipeline/atp/nondescript_phones.rs)),
+([`src/pipeline/atp/nondescript/`](../../src/pipeline/atp/nondescript/)),
 written for a planned phone/fax matching signal. The question was how
 often several ATP features share one number, and which kind of sharing
 makes a number *nondescript*: it doesn't describe one place, so a match
