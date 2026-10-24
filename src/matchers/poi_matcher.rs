@@ -1,7 +1,11 @@
-use super::{MatchMask, Matcher, OsmCandidate, geo_point_distance_score, parse_wikidata_ids};
+use super::{
+    MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
+    parse_wikidata_ids,
+};
 use crate::places::Place;
 use geo::Centroid;
 use s2::{cell::Cell, cellid::CellID, point::Point};
+use std::sync::LazyLock;
 
 /// Finds the first `brand:wikidata` tag in `tags` and parses its
 /// value, which may list several `;`-separated IDs -- e.g. a car
@@ -18,31 +22,224 @@ fn find_brand_wikidata<'a>(
         .flat_map(|(_, v)| parse_wikidata_ids(v))
 }
 
+/// How [PoiMatcher] compares brands when `brand:wikidata` alone can't
+/// decide, i.e. when the ATP feature or the OSM candidate lacks it.
+/// Chosen with the `OSMDIFFS_BRAND_MATCH` environment variable, for
+/// experiments: `wikidata` (default: only `brand:wikidata` equality),
+/// `exact` (also equal `brand` tags after trimming and case folding),
+/// or `jw` (also `brand` tags whose Jaro-Winkler similarity after case
+/// folding is at least `OSMDIFFS_BRAND_JW_THRESHOLD`, default 0.9).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BrandMode {
+    Wikidata,
+    Exact,
+    /// Like `Exact`, but also splits OSM's `;`-separated multi-value
+    /// `brand` tags (e.g. `Toyota;Lexus`) and accepts any part.
+    ExactMulti,
+    JaroWinkler(f64),
+    /// Token sort ratio (as in fuzzywuzzy/RapidFuzz): lowercase, split
+    /// into alphanumeric words, sort them, and compute the Indel
+    /// similarity of the joined strings; accepts if at least the given
+    /// threshold, against any `;`-separated part of OSM's `brand`.
+    TokenSort(f64),
+}
+
+static BRAND_MODE: LazyLock<BrandMode> =
+    LazyLock::new(|| match std::env::var("OSMDIFFS_BRAND_MATCH").as_deref() {
+        Ok("exact") => BrandMode::Exact,
+        Ok("exact-multi") => BrandMode::ExactMulti,
+        Ok("jw") => {
+            let t = std::env::var("OSMDIFFS_BRAND_JW_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.9);
+            BrandMode::JaroWinkler(t)
+        }
+        Ok("tsr") => BrandMode::TokenSort(
+            std::env::var("OSMDIFFS_BRAND_TSR_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1.0),
+        ),
+        _ => BrandMode::Wikidata,
+    });
+
+/// With `OSMDIFFS_BRAND_VS_NAME=1`, an OSM candidate that has neither
+/// `brand` nor `brand:wikidata` is compared by its `name` instead.
+static BRAND_VS_NAME: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("OSMDIFFS_BRAND_VS_NAME").as_deref() == Ok("1"));
+
+/// Lowercased alphanumeric words of `s`, sorted and joined by spaces.
+fn token_sort_key(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let mut tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    tokens.sort_unstable();
+    tokens.join(" ")
+}
+
+/// Indel similarity: 2 * LCS / (len(a) + len(b)), over chars.
+fn indel_ratio(a: &str, b: &str) -> f64 {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut cur = vec![0usize; b.len() + 1];
+    for ca in &a {
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = if ca == cb {
+                prev[j] + 1
+            } else {
+                cur[j].max(prev[j + 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    2.0 * prev[b.len()] as f64 / (a.len() + b.len()) as f64
+}
+
+fn token_sort_ratio(a: &str, b: &str) -> f64 {
+    indel_ratio(&token_sort_key(a), &token_sort_key(b))
+}
+
+/// With `OSMDIFFS_BRAND_REQUIRE_ATP_WIKIDATA=1`, ATP features without
+/// `brand:wikidata` still get no matcher, so the `brand` tag only helps
+/// to find OSM features that lack `brand:wikidata`.
+static REQUIRE_ATP_WIKIDATA: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("OSMDIFFS_BRAND_REQUIRE_ATP_WIKIDATA").as_deref() == Ok("1"));
+
+/// With `OSMDIFFS_ADDR_CHECK_BEYOND_M=<meters>`, candidates farther
+/// than that need a matching street address (street and house number).
+/// `OSMDIFFS_ADDR_CHECK_SCOPE=all` applies this to `brand:wikidata`
+/// matches too; by default only to `brand`/`name` matches.
+static ADDR_CHECK_BEYOND_M: LazyLock<Option<f64>> = LazyLock::new(|| {
+    std::env::var("OSMDIFFS_ADDR_CHECK_BEYOND_M")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+});
+static ADDR_CHECK_ALL: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("OSMDIFFS_ADDR_CHECK_SCOPE").as_deref() == Ok("all"));
+
+/// Score factor for a match found through the `brand` tag only, so a
+/// `brand:wikidata` match at the same distance always wins.
+const BRAND_TAG_FACTOR: f64 = 0.99;
+
+fn normalize_brand(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn find_tag<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>, key: &str) -> Option<&'a str> {
+    tags.into_iter().find(|&(k, _)| k == key).map(|(_, v)| v)
+}
+
 pub struct PoiMatcher {
     center: Point,
     /// Usually a single ID; see [find_brand_wikidata].
     brand_wikidata: Vec<u64>,
+    brand: Option<String>,
+    mode: BrandMode,
+    atp_addr_tags: Vec<(String, String)>,
 }
 
 impl PoiMatcher {
-    // TODO: For now, we only match based on brand:wikidata.
-    // We should also look at names, by computing the token sort ratio,
+    // TODO: We should also look at names, by computing the token sort ratio,
     // but we should do this in a way that works for CJK. So we need
     // a decent segmenter that works for CJK languages. Maybe Lindera?
     pub fn for_place(place: &Place) -> Option<PoiMatcher> {
+        Self::for_place_with_mode(place, *BRAND_MODE)
+    }
+
+    pub fn for_place_with_mode(place: &Place, mode: BrandMode) -> Option<PoiMatcher> {
         if !place.mask.intersects(&MatchMask::SHOP) {
             return None;
         }
-        let tags = place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-        let brand_wikidata: Vec<u64> = find_brand_wikidata(tags).collect();
-        if brand_wikidata.is_empty() {
+        let tags = || place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+        let brand_wikidata: Vec<u64> = find_brand_wikidata(tags()).collect();
+        let brand = if mode == BrandMode::Wikidata {
+            None
+        } else {
+            find_tag(tags(), "brand")
+                .map(normalize_brand)
+                .filter(|b| !b.is_empty())
+        };
+        if brand_wikidata.is_empty() && (brand.is_none() || *REQUIRE_ATP_WIKIDATA) {
             return None;
         }
         let center = Cell::from(CellID(place.s2_cell_id)).center();
         Some(PoiMatcher {
             center,
             brand_wikidata,
+            brand,
+            mode,
+            atp_addr_tags: tags()
+                .filter(|(k, _)| k.starts_with("addr:"))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         })
+    }
+
+    fn atp_addr_tags_ref(&self) -> Vec<(&str, &str)> {
+        self.atp_addr_tags
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    /// How well `candidate` agrees on brand: 1.0 for equal
+    /// `brand:wikidata`, [BRAND_TAG_FACTOR] for a `brand` tag match
+    /// when either side lacks `brand:wikidata`, else 0.0.
+    fn brand_factor(&self, candidate: &OsmCandidate) -> f64 {
+        let osm_wikidata: Vec<u64> = find_brand_wikidata(candidate.tags()).collect();
+        if !self.brand_wikidata.is_empty() && !osm_wikidata.is_empty() {
+            let shared = osm_wikidata
+                .iter()
+                .any(|id| self.brand_wikidata.contains(id));
+            return if shared { 1.0 } else { 0.0 };
+        }
+        if self.mode == BrandMode::Wikidata {
+            return 0.0;
+        }
+        if self.brand.is_none() {
+            return 0.0;
+        }
+        let ok = match find_tag(candidate.tags(), "brand") {
+            Some(osm_brand) => self.brand_matches(&normalize_brand(osm_brand), true),
+            None if *BRAND_VS_NAME && osm_wikidata.is_empty() => {
+                match find_tag(candidate.tags(), "name") {
+                    Some(name) => self.brand_matches(&normalize_brand(name), false),
+                    None => false,
+                }
+            }
+            None => false,
+        };
+        if ok { BRAND_TAG_FACTOR } else { 0.0 }
+    }
+
+    /// Compares the ATP brand against a normalized OSM string; `multi`
+    /// allows `;`-separated values (OSM `brand`, not `name`).
+    fn brand_matches(&self, osm: &str, multi: bool) -> bool {
+        let Some(atp_brand) = &self.brand else {
+            return false;
+        };
+        let mut parts: Box<dyn Iterator<Item = &str>> = if multi {
+            Box::new(osm.split(';').map(str::trim))
+        } else {
+            Box::new(std::iter::once(osm))
+        };
+        match self.mode {
+            BrandMode::Wikidata => false,
+            BrandMode::Exact => osm == atp_brand,
+            BrandMode::ExactMulti => parts.any(|b| b == atp_brand),
+            BrandMode::JaroWinkler(t) => strsim::jaro_winkler(atp_brand, osm) >= t,
+            BrandMode::TokenSort(t) => parts.any(|b| token_sort_ratio(atp_brand, b) >= t),
+        }
     }
 }
 
@@ -50,7 +247,8 @@ impl Matcher for PoiMatcher {
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64 {
         // Cheap check first: only decode the (potentially large) geometry
         // for candidates that actually match on brand.
-        if !find_brand_wikidata(candidate.tags()).any(|id| self.brand_wikidata.contains(&id)) {
+        let factor = self.brand_factor(candidate);
+        if factor == 0.0 {
             return 0.0;
         }
         let Result::Ok(geometry) = candidate.geometry() else {
@@ -59,15 +257,32 @@ impl Matcher for PoiMatcher {
         let Some(centroid) = geometry.centroid() else {
             return 0.0;
         };
-        geo_point_distance_score(&self.center, &centroid, 400.0)
+        if let Some(limit) = *ADDR_CHECK_BEYOND_M
+            && (factor < 1.0 || *ADDR_CHECK_ALL)
+            && geo_point_distance(&self.center, &centroid) > limit
+        {
+            let osm_tags: Vec<(&str, &str)> = candidate.tags().collect();
+            let confirmed = address::osm_address_in_atp_text(&self.atp_addr_tags_ref(), &osm_tags);
+            if !confirmed {
+                return 0.0;
+            }
+        }
+        factor * geo_point_distance_score(&self.center, &centroid, 400.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_token_sort_ratio() {
+        assert_eq!(token_sort_ratio("COOP Pronto", "pronto coop"), 1.0);
+        assert_eq!(token_sort_ratio("k-kiosk", "K Kiosk"), 1.0);
+        assert!(token_sort_ratio("Coop Pronto", "Coop") < 0.6);
+        assert!((indel_ratio("abcd", "abce") - 0.75).abs() < 1e-9);
+    }
     use crate::utils::UtcTimestamp;
-    use std::sync::LazyLock;
 
     fn test_timestamp() -> UtcTimestamp {
         UtcTimestamp(time::UtcDateTime::from_unix_timestamp(1_770_000_000).unwrap())
@@ -286,5 +501,79 @@ mod tests {
             strings: &pool,
         };
         assert_eq!(ch_kiosk_matcher.score_osm_candidate(&other_candidate), 0.0);
+    }
+
+    #[test]
+    fn test_poi_matcher_brand_modes() {
+        use crate::tables::{Feature, StringPool};
+        use s2::{cellid::CellID, latlng::LatLng};
+        use tempfile::TempDir;
+        use wkb::writer::{WriteOptions, write_point};
+
+        let dir = TempDir::new().expect("tempdir");
+        let strings = [
+            "brand",
+            "k kiosk",
+            "k  kiosk",
+            "k-kiosk",
+            "Migros",
+            "Migros; k kiosk",
+            "brand:wikidata",
+            "Q1",
+        ];
+        let pool = StringPool::create(
+            strings.iter().map(|s| s.to_string()),
+            dir.path(),
+            &dir.path().join("strings"),
+        )
+        .expect("StringPool::create");
+        let make_feature = |tags: &[(&str, &str)]| -> Feature {
+            let mut flat_tags = Vec::new();
+            for (k, v) in tags {
+                flat_tags.push(pool.lookup(k).expect("key") as u32);
+                flat_tags.push(pool.lookup(v).expect("value") as u32);
+            }
+            let ll = LatLng::from(CellID(CH_KIOSK_OSM.s2_cell_id));
+            let mut geometry_wkb = Vec::new();
+            write_point(
+                &mut geometry_wkb,
+                &geo::Point::new(ll.lng.deg(), ll.lat.deg()),
+                &WriteOptions {
+                    endianness: wkb::Endianness::LittleEndian,
+                },
+            )
+            .expect("wkb encode");
+            Feature {
+                id: 1,
+                tags: flat_tags,
+                geometry_wkb,
+                ..Default::default()
+            }
+        };
+        let spaced = make_feature(&[("brand", "k  kiosk")]);
+        let dashed = make_feature(&[("brand", "k-kiosk")]);
+        let other = make_feature(&[("brand", "Migros")]);
+        let multi = make_feature(&[("brand", "Migros; k kiosk")]);
+        let wrong_qid = make_feature(&[("brand", "k kiosk"), ("brand:wikidata", "Q1")]);
+        let score = |mode, f: &Feature| {
+            PoiMatcher::for_place_with_mode(&CH_KIOSK_ATP, mode)
+                .expect("matcher")
+                .score_osm_candidate(&OsmCandidate {
+                    feature: f,
+                    strings: &pool,
+                })
+        };
+        assert_eq!(score(BrandMode::Wikidata, &spaced), 0.0);
+        assert!(score(BrandMode::Exact, &spaced) > 0.5);
+        assert_eq!(score(BrandMode::Exact, &dashed), 0.0);
+        assert!(score(BrandMode::ExactMulti, &multi) > 0.5);
+        assert_eq!(score(BrandMode::Exact, &multi), 0.0);
+        assert!(score(BrandMode::JaroWinkler(0.9), &dashed) > 0.5);
+        assert_eq!(score(BrandMode::JaroWinkler(0.9), &other), 0.0);
+        assert!(score(BrandMode::TokenSort(1.0), &dashed) > 0.5);
+        assert!(score(BrandMode::TokenSort(1.0), &multi) > 0.5);
+        assert_eq!(score(BrandMode::TokenSort(0.9), &other), 0.0);
+        // Conflicting brand:wikidata wins over an equal brand tag.
+        assert_eq!(score(BrandMode::JaroWinkler(0.9), &wrong_qid), 0.0);
     }
 }

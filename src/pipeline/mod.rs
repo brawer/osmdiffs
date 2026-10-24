@@ -248,6 +248,13 @@ fn run_pipeline_steps(
         })?
     };
 
+    // Experiments: `OSMDIFFS_STOP_AFTER_CONFLATE=1` skips uploads, tiles
+    // and edits, so matching variants can be compared quickly.
+    if std::env::var("OSMDIFFS_STOP_AFTER_CONFLATE").is_ok_and(|v| v == "1") {
+        log::info!("stopping after conflate (OSMDIFFS_STOP_AFTER_CONFLATE=1)");
+        return Ok(());
+    }
+
     // Each published file's manifest entry, collected as it's uploaded;
     // `datapackage.json` is built from these and uploaded last.
     let mut published = Vec::new();

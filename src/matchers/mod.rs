@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use wkb::reader::read_wkb;
 
+mod address;
 mod poi_matcher;
 
 /// Mean Earth radius, in meters -- used throughout this module to turn
