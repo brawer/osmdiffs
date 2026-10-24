@@ -14,10 +14,9 @@
 //! quarters of those were co-located; the far-apart ones affected about
 //! 11% of features with a number.
 //!
-//! A number is denied if the bounding box around every place carrying
-//! it, across all spiders, has a diagonal of at least
-//! [MIN_SWITCHBOARD_SPREAD_METERS]. The bounding box doesn't depend on
-//! the order in which places arrive, and its diagonal is never shorter
+//! A number is denied if the S2 latitude/longitude rectangle around
+//! every place carrying it, across all spiders, has a diagonal of at
+//! least [MIN_SWITCHBOARD_SPREAD_METERS]. The diagonal is never shorter
 //! than the largest distance between two of the places (and at most
 //! about 1.4 times it), which is precise enough for this threshold.
 //!
@@ -29,20 +28,24 @@
 
 use anyhow::Result;
 use ext_sort::{ExternalSorter, ExternalSorterBuilder, buffer::LimitedBufferBuilder};
-use geo::{Distance, Haversine, Point};
+use s2::{cellid::CellID, latlng::LatLng, point::Point, rect::Rect, s1::ChordAngle};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::LazyLock;
 
 use crate::places::{Place, PlaceReader};
 use crate::tables::U64Set;
 
 /// Filename, within `workdir`, of the denylist written by
-/// [PhoneDenylistBuilder::finish].
+/// [write_denylist].
 pub const PHONE_DENYLIST_FILENAME: &str = "alltheplaces.phone-denylist";
 
 /// Places carrying the same number whose bounding box diagonal is at
 /// least this long make that number a switchboard.
 pub const MIN_SWITCHBOARD_SPREAD_METERS: f64 = 1000.0;
+
+static MIN_SWITCHBOARD_SPREAD: LazyLock<ChordAngle> =
+    LazyLock::new(|| crate::matchers::meters_to_chord_angle(MIN_SWITCHBOARD_SPREAD_METERS));
 
 /// Tag keys whose values may hold phone or fax numbers. Phone and fax
 /// share one key space: in ATP, thousands of numbers show up as a phone
@@ -70,7 +73,7 @@ const MAX_DIGITS: usize = 15;
 /// first; country codes never start with 0, so the encoding is unique.
 /// Parts that aren't in international format -- a few spiders emit
 /// local numbers, or junk like `9350-0` or `1800 PARKING` -- are
-/// skipped, since we can't tell which country they belong to.
+/// skipped.
 pub fn parse_phone_numbers(value: &str) -> impl Iterator<Item = u64> + '_ {
     value.split(';').filter_map(parse_phone_number)
 }
@@ -103,47 +106,28 @@ pub fn is_phone_key(key: &str) -> bool {
     PHONE_KEYS.contains(&key)
 }
 
-/// One place carrying one number, as sorted by [PhoneDenylistBuilder].
-/// Fixed-size, so the sort buffer can budget by item count.
+/// One place carrying one number, as sorted by [sorter]. Fixed-size,
+/// so the sort buffer can budget by item count.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Sighting {
     phone: u64,
-    lat_e7: i32,
-    lng_e7: i32,
+    s2_cell_id: u64,
 }
 
 /// Returns one [Sighting] for each number in `place`'s phone tags, at
-/// the place's representative point (the one its `s2_cell_id` encodes).
-/// A number listed twice on the same place yields two identical
-/// sightings, which doesn't change any bounding box.
+/// the place's `s2_cell_id`. A number listed twice on the same place
+/// yields two identical sightings, which doesn't change any rectangle.
 pub fn sightings(place: &Place) -> Vec<Sighting> {
-    let mut result = Vec::new();
-    let mut point: Option<(i32, i32)> = None;
-    for (key, value) in &place.tags {
-        if !is_phone_key(key) {
-            continue;
-        }
-        for phone in parse_phone_numbers(value) {
-            let (lat_e7, lng_e7) = *point.get_or_insert_with(|| {
-                let ll = s2::latlng::LatLng::from(s2::cellid::CellID(place.s2_cell_id));
-                (to_e7(ll.lat.deg()), to_e7(ll.lng.deg()))
-            });
-            result.push(Sighting {
-                phone,
-                lat_e7,
-                lng_e7,
-            });
-        }
-    }
-    result
-}
-
-fn to_e7(deg: f64) -> i32 {
-    (deg * 1e7).round() as i32
-}
-
-fn from_e7(e7: i32) -> f64 {
-    f64::from(e7) / 1e7
+    place
+        .tags
+        .iter()
+        .filter(|(key, _)| is_phone_key(key))
+        .flat_map(|(_, value)| parse_phone_numbers(value))
+        .map(|phone| Sighting {
+            phone,
+            s2_cell_id: place.s2_cell_id,
+        })
+        .collect()
 }
 
 /// External sorter for [Sighting]s. Feed it with [Self::sort], then
@@ -169,37 +153,37 @@ pub fn find_switchboards<E>(
 ) -> std::result::Result<Vec<u64>, E> {
     struct Group {
         phone: u64,
-        min_lat: i32,
-        max_lat: i32,
-        min_lng: i32,
-        max_lng: i32,
+        // Only the cell id while the group has a single cell, which is
+        // the common case: most numbers belong to a single place.
+        first_cell: u64,
+        rect: Option<Rect>,
     }
 
     impl Group {
         fn new(s: &Sighting) -> Group {
             Group {
                 phone: s.phone,
-                min_lat: s.lat_e7,
-                max_lat: s.lat_e7,
-                min_lng: s.lng_e7,
-                max_lng: s.lng_e7,
+                first_cell: s.s2_cell_id,
+                rect: None,
             }
         }
 
         fn add(&mut self, s: &Sighting) {
-            self.min_lat = self.min_lat.min(s.lat_e7);
-            self.max_lat = self.max_lat.max(s.lat_e7);
-            self.min_lng = self.min_lng.min(s.lng_e7);
-            self.max_lng = self.max_lng.max(s.lng_e7);
+            if s.s2_cell_id == self.first_cell && self.rect.is_none() {
+                return;
+            }
+            let rect = self
+                .rect
+                .get_or_insert_with(|| Rect::from(LatLng::from(CellID(self.first_cell))));
+            *rect = &*rect + &LatLng::from(CellID(s.s2_cell_id));
         }
 
         fn is_switchboard(&self) -> bool {
-            if self.min_lat == self.max_lat && self.min_lng == self.max_lng {
+            let Some(rect) = &self.rect else {
                 return false;
-            }
-            let a = Point::new(from_e7(self.min_lng), from_e7(self.min_lat));
-            let b = Point::new(from_e7(self.max_lng), from_e7(self.max_lat));
-            Haversine.distance(a, b) >= MIN_SWITCHBOARD_SPREAD_METERS
+            };
+            let diagonal = Point::from(rect.lo()).chordangle(&Point::from(rect.hi()));
+            diagonal >= *MIN_SWITCHBOARD_SPREAD
         }
     }
 
@@ -326,7 +310,7 @@ mod tests {
             tags.iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            &geo::Geometry::from(Point::from(coord)),
+            &geo::Geometry::from(geo::Point::from(coord)),
             UtcTimestamp(time::UtcDateTime::from_unix_timestamp(1_770_000_000).unwrap()),
         )
         .unwrap()
@@ -347,8 +331,7 @@ mod tests {
         let s = sightings(&p);
         let phones: Vec<u64> = s.iter().map(|s| s.phone).collect();
         assert_eq!(phones, [41444177777, 41444177778, 41444177779]);
-        assert!((from_e7(s[0].lat_e7) - 47.3769).abs() < 1e-6);
-        assert!((from_e7(s[0].lng_e7) - 8.5417).abs() < 1e-6);
+        assert!(s.iter().all(|s| s.s2_cell_id == p.s2_cell_id));
 
         assert!(sightings(&place(8.5, 47.3, &[("name", "No phone")])).is_empty());
     }
@@ -356,8 +339,7 @@ mod tests {
     fn sighting(phone: u64, lng: f64, lat: f64) -> Sighting {
         Sighting {
             phone,
-            lat_e7: to_e7(lat),
-            lng_e7: to_e7(lng),
+            s2_cell_id: CellID::from(LatLng::from_degrees(lat, lng)).0,
         }
     }
 
@@ -401,8 +383,14 @@ mod tests {
                 sighting(50, next_door.0, next_door.1),
                 sighting(50, bern.0, bern.1),
                 sighting(50, zurich.0, zurich.1),
+                // About 1.5 km apart, across the antimeridian.
+                sighting(60, 179.993, -16.5),
+                sighting(60, -179.993, -16.5),
+                // About 400 m apart, across the antimeridian.
+                sighting(70, 179.998, -16.5),
+                sighting(70, -179.998, -16.5),
             ]),
-            [20, 30, 50]
+            [20, 30, 50, 60]
         );
     }
 

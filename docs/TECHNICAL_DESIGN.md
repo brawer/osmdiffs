@@ -296,7 +296,9 @@ fetch away.
   ([`phone_denylist.rs`](../src/pipeline/atp/phone_denylist.rs)):
   hotlines and switchboards that say nothing about which place a
   feature is. Numbers shared only by features at the same site stay
-  usable. **~3 minutes.**
+  usable; see
+  [`notes/2026-10-24-shared-phone-numbers.md`](notes/2026-10-24-shared-phone-numbers.md)
+  for how common either kind of sharing is, and why. **~3 minutes.**
 - **`collect_wikidata_ids`**
   ([`src/pipeline/atp/wikidata_ids.rs`](../src/pipeline/atp/wikidata_ids.rs)) — extracts
   every `wikidata`/`brand:wikidata`/… tag value ATP carries, for a
