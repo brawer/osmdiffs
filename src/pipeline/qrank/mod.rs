@@ -25,15 +25,25 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-mod fetch;
+use super::packaged::PackagedResource;
 
-pub(super) use fetch::{QRANK_DATAPACKAGE_URL, QRankMetadata, fetch_qrank};
+/// QRank's Frictionless Data Package descriptor, which names the
+/// current build's files and their hashes. See
+/// <https://github.com/brawer/wikidata-qrank/blob/main/doc/downloads.md>.
+pub(super) const QRANK_DATAPACKAGE_URL: &str =
+    "https://qrank.toolforge.org/download/datapackage.json";
 
-/// Filename, within `workdir`, of the QRank file [`fetch_qrank`]
-/// downloads: gzipped CSV with columns `Entity,QRank`, one row per
-/// Wikidata item with any pageviews.
-const QRANK_FILENAME: &str = "qrank.csv.gz";
+/// The QRank file the pipeline fetches: gzipped CSV with columns
+/// `Entity,QRank`, one row per Wikidata item with any pageviews.
+pub(super) const QRANK: PackagedResource = PackagedResource {
+    name: "qrank",
+    filename: "qrank.csv.gz",
+    meta_filename: "qrank.meta.json",
+    label: "qrank.fetch   ",
+    timeout: Duration::from_secs(600),
+};
 
 /// Filename, within `workdir`, of the [BlobTable] that
 /// [`compute_qrank_quantiles`] writes.

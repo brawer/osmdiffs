@@ -36,7 +36,12 @@ fn run_pipeline_on_fixtures(extra_args: &[&str]) -> Result<TempDir> {
         fixture("planet-latest.osm.pbf.meta.json"),
         workdir.path().join("planet-latest.osm.pbf.meta.json"),
     )?;
-    for name in ["qrank.csv.gz", "qrank.meta.json"] {
+    for name in [
+        "qrank.csv.gz",
+        "qrank.meta.json",
+        "osmviews.tiff",
+        "osmviews.meta.json",
+    ] {
         symlink(fixture(name), workdir.path().join(name))?;
     }
 
@@ -67,6 +72,7 @@ fn test_pipeline() -> Result<()> {
         "alltheplaces.nondescript-emails",
         "wikidata-ids",
         "qrank-quantiles",
+        "osmviews-ranks",
     ] {
         assert!(
             workdir.path().join(name).exists(),

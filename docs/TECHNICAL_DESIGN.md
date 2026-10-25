@@ -179,20 +179,27 @@ graph TD
     ATP_SRC@{ shape: cloud, label: "AllThePlaces weekly dump" }
     OSM_SRC@{ shape: cloud, label: "OpenStreetMap planet" }
     QRANK_SRC@{ shape: cloud, label: "QRank" }
+    OSMVIEWS_SRC@{ shape: cloud, label: "OSMViews" }
 
     subgraph INPUTS [Inputs]
         ATP_SRC
         OSM_SRC
         QRANK_SRC
+        OSMVIEWS_SRC
     end
     INPUTS --> FETCH_INPUTS("fetch_inputs<br/>(all in parallel)")
     FETCH_INPUTS --> ATP_ZIP[alltheplaces.zip]
     FETCH_INPUTS --> OSM_PBF[planet-latest.osm.pbf]
     FETCH_INPUTS --> QRANK_CSV[qrank.csv.gz]
+    FETCH_INPUTS --> OSMVIEWS_TIFF[osmviews.tiff]
 
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
     IMPORT_ATP --> NONDESCRIPT_PHONES[alltheplaces.nondescript-phones]
     IMPORT_ATP --> NONDESCRIPT_EMAILS[alltheplaces.nondescript-emails]
+    ATP_PARQUET --> OSMVIEWS_RANKS(compute_osmviews_ranks)
+    OSMVIEWS_TIFF --> OSMVIEWS_RANKS
+    OSMVIEWS_RANKS --> OSMVIEWS_R[osmviews-ranks]
+
     OSM_PBF --> IMPORT_OSM(import_osm) --> OSM_INDEX[osm-features.index]
 
     ATP_PARQUET --> COLLECT_WIKI(collect_wikidata_ids)
@@ -228,11 +235,11 @@ graph TD
     UPLOAD_BOM --> UPLOAD_DATAPACKAGE(upload_datapackage<br/>data/datapackage.json) --> S3A
 
     classDef process fill:#fce4ec,stroke:#ad1457,stroke-width:2px,color:#4a0e28,font-weight:bold;
-    class FETCH_INPUTS,IMPORT_ATP,COLLECT_WIKI,QRANK_QUANTILES,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SUGGEST_EDITS,RENDER_TILES,UPLOAD_TILES,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
+    class FETCH_INPUTS,IMPORT_ATP,OSMVIEWS_RANKS,COLLECT_WIKI,QRANK_QUANTILES,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SUGGEST_EDITS,RENDER_TILES,UPLOAD_TILES,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
 ```
 
 (Pink boxes are processing steps; plain rectangles are the files they
-read or write. `qrank-quantiles`,
+read or write. `qrank-quantiles`, `osmviews-ranks`,
 `alltheplaces.nondescript-phones` and `alltheplaces.nondescript-emails`
 have no outgoing edge above: nothing consumes them yet, they’re
 generated on behalf of planned future work, see
@@ -283,9 +290,11 @@ fetch away.
   object store, not BitTorrent — see
   [#755](https://github.com/brawer/osmdiffs/pull/755) for why that
   switch happened), and the latest [QRank](https://qrank.toolforge.org/)
-  file ([`qrank/fetch.rs`](../src/pipeline/qrank/fetch.rs),
-  `fetch_inputs.qrank`; discovered through QRank's `datapackage.json`
-  and checked against the SHA-256 listed there). Each input is hashed (SHA-256) while it streams in,
+  file (`fetch_inputs.qrank`) and the latest
+  [OSMViews](https://osmviews.brawer.ch/) raster
+  (`fetch_inputs.osmviews`, about 560 MB). Both are discovered through
+  their publisher's `datapackage.json` and checked against the SHA-256
+  listed there ([`packaged.rs`](../src/pipeline/packaged.rs)). Each input is hashed (SHA-256) while it streams in,
   and its provenance written to a `*.meta.json` sidecar. If any
   download fails, the others are cancelled and the run aborts within
   minutes; an interrupted planet download is resumed on the next
@@ -340,6 +349,14 @@ fetch away.
   compute-heavy portions (prune/assemble/index-build) aren’t a clean
   apples-to-apples comparison, since they ran under different CPU
   counts and memory limits.
+- **`compute_osmviews_ranks`**
+  ([`src/pipeline/osm_views.rs`](../src/pipeline/osm_views.rs)) — looks
+  up the OSMViews `rank()` at every ATP feature's location and stores
+  them sorted in `osmviews-ranks`, so any location's `rank()` can be
+  turned into its quantile among the places ATP covers. Raw ranks of
+  inhabited places bunch up (in Switzerland, 80% lie between 0.40 and
+  0.61); quantiles spread them over 0 to 1 like the QRank quantiles.
+  Not consumed by anything yet.
 - **`collect_wikidata_ids`**
   ([`src/pipeline/wikidata_ids.rs`](../src/pipeline/wikidata_ids.rs)) — collects
   every `brand:wikidata`, `operator:wikidata` and `network:wikidata`
