@@ -1,6 +1,7 @@
-//! Downloads the latest [QRank](https://qrank.toolforge.org/) file,
-//! verified against the SHA-256 that QRank's own `datapackage.json`
-//! lists for it.
+//! Fetches one resource of a [Frictionless Data
+//! Package](https://datapackage.org/), verified against the SHA-256
+//! that the package's `datapackage.json` lists for it. QRank and
+//! OSMViews both publish their builds this way.
 
 use crate::make_download_bar;
 use crate::pipeline::inputs::Input;
@@ -15,32 +16,41 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::{fs::File, io::AsyncWriteExt};
 
-/// QRank's Frictionless Data Package descriptor, which names the
-/// current build's files and their hashes. See
-/// <https://github.com/brawer/wikidata-qrank/blob/main/doc/downloads.md>.
-pub const QRANK_DATAPACKAGE_URL: &str = "https://qrank.toolforge.org/download/datapackage.json";
+/// Which resource of which data package to fetch, and where to put it.
+pub(crate) struct PackagedResource {
+    /// The resource's `name` in `datapackage.json`, e.g. `"qrank"`.
+    pub name: &'static str,
 
-/// Filename, within `workdir`, of the [`QRankMetadata`] persisted next
-/// to [`super::QRANK_FILENAME`].
-pub(super) const META_JSON_FILENAME: &str = "qrank.meta.json";
+    /// Filename, within `workdir`, of the downloaded resource.
+    pub filename: &'static str,
 
-/// Provenance of the QRank file this pipeline used, so it can be cited
-/// once QRank feeds into published output.
+    /// Filename, within `workdir`, of the [`PackagedMetadata`] sidecar.
+    pub meta_filename: &'static str,
+
+    /// Progress bar label.
+    pub label: &'static str,
+
+    /// Upper bound on the whole download.
+    pub timeout: Duration,
+}
+
+/// Provenance of a fetched resource, so it can be cited once it feeds
+/// into published output.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct QRankMetadata {
-    /// QRank's build date, as given by the data package's `version`,
-    /// e.g. "2026-10-11".
+pub struct PackagedMetadata {
+    /// The build date, as given by the data package's `version`, e.g.
+    /// "2026-10-11".
     pub version: String,
 
-    /// The dated `qrank-<YYYYMMDD>.csv.gz` URL we downloaded. Dated
-    /// files never change.
+    /// The dated URL we downloaded, e.g. `qrank-<YYYYMMDD>.csv.gz`.
+    /// Dated files never change.
     pub url: String,
 
     /// The data package descriptor we discovered `url` from.
     pub datapackage_url: String,
 
-    /// QRank's own provenance BOM for this build, if the data package
-    /// lists one.
+    /// The publisher's own provenance BOM for this build, if the data
+    /// package lists one.
     pub bom_url: Option<String>,
 
     /// SHA-256 of the downloaded file, as lowercase hex. Checked against
@@ -51,19 +61,20 @@ pub struct QRankMetadata {
     pub bytes: u64,
 }
 
-/// Makes the latest QRank file available as `workdir/qrank.csv.gz`.
-/// Reused if it already exists (a hard error if its sidecar is then
-/// missing, since there would be no way to tell which build it is);
-/// otherwise discovered via `datapackage_url`, downloaded, verified and
-/// its metadata persisted alongside.
-pub async fn fetch_qrank(
+/// Makes the latest build of `resource` available as
+/// `workdir/<resource.filename>`. Reused if it already exists (a hard
+/// error if its sidecar is then missing, since there would be no way to
+/// tell which build it is); otherwise discovered via `datapackage_url`,
+/// downloaded, verified and its metadata persisted alongside.
+pub(crate) async fn fetch_packaged(
+    resource: &PackagedResource,
     datapackage_url: &str,
     client: &Client,
     progress: &MultiProgress,
     workdir: &Path,
-) -> Result<Input<QRankMetadata>> {
-    let out_path = workdir.join(super::QRANK_FILENAME);
-    let meta_json_path = workdir.join(META_JSON_FILENAME);
+) -> Result<Input<PackagedMetadata>> {
+    let out_path = workdir.join(resource.filename);
+    let meta_json_path = workdir.join(resource.meta_filename);
     if tokio::fs::try_exists(&out_path).await? {
         let metadata = read_meta_json(&meta_json_path).await.with_context(|| {
             format!(
@@ -78,9 +89,10 @@ pub async fn fetch_qrank(
         });
     }
 
-    let mut metadata = fetch_datapackage(client, datapackage_url).await?;
-    let tmp_path = workdir.join("qrank.csv.gz.tmp");
-    let (sha256, bytes) = download(client, progress, &metadata.url, &tmp_path).await?;
+    let mut metadata = fetch_datapackage(client, datapackage_url, resource.name).await?;
+    let mut tmp_path = out_path.clone();
+    tmp_path.add_extension("tmp");
+    let (sha256, bytes) = download(client, progress, resource, &metadata.url, &tmp_path).await?;
     if sha256 != metadata.sha256 {
         bail!(
             "SHA-256 of {} is {sha256}, but {datapackage_url} says {}",
@@ -97,10 +109,14 @@ pub async fn fetch_qrank(
     })
 }
 
-/// Reads `datapackage_url` and returns the metadata of its `qrank`
-/// resource. `sha256` is the hash the data package claims, still to be
+/// Reads `datapackage_url` and returns the metadata of its resource
+/// called `name`. `sha256` is the hash the data package claims, still to be
 /// checked against the actual download; `bytes` is the claimed size.
-async fn fetch_datapackage(client: &Client, datapackage_url: &str) -> Result<QRankMetadata> {
+async fn fetch_datapackage(
+    client: &Client,
+    datapackage_url: &str,
+    name: &str,
+) -> Result<PackagedMetadata> {
     let package: serde_json::Value = client
         .get(datapackage_url)
         .timeout(Duration::from_secs(60))
@@ -112,10 +128,14 @@ async fn fetch_datapackage(client: &Client, datapackage_url: &str) -> Result<QRa
         .json()
         .await
         .with_context(|| format!("Failed to parse {datapackage_url}"))?;
-    parse_datapackage(&package, datapackage_url)
+    parse_datapackage(&package, datapackage_url, name)
 }
 
-fn parse_datapackage(package: &serde_json::Value, datapackage_url: &str) -> Result<QRankMetadata> {
+fn parse_datapackage(
+    package: &serde_json::Value,
+    datapackage_url: &str,
+    name: &str,
+) -> Result<PackagedMetadata> {
     let version = package["version"]
         .as_str()
         .ok_or_else(|| anyhow!("{datapackage_url} has no version"))?;
@@ -124,27 +144,27 @@ fn parse_datapackage(package: &serde_json::Value, datapackage_url: &str) -> Resu
         .ok_or_else(|| anyhow!("{datapackage_url} has no resources"))?;
     let resource = |name: &str| resources.iter().find(|r| r["name"] == name);
 
-    let qrank =
-        resource("qrank").ok_or_else(|| anyhow!("{datapackage_url} has no qrank resource"))?;
-    let path = qrank["path"]
+    let found =
+        resource(name).ok_or_else(|| anyhow!("{datapackage_url} has no {name} resource"))?;
+    let path = found["path"]
         .as_str()
-        .ok_or_else(|| anyhow!("qrank resource in {datapackage_url} has no path"))?;
-    let sha256 = qrank["hash"]
+        .ok_or_else(|| anyhow!("{name} resource in {datapackage_url} has no path"))?;
+    let sha256 = found["hash"]
         .as_str()
         .and_then(|h| h.strip_prefix("sha256:"))
         .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| anyhow!("qrank resource in {datapackage_url} has no sha256 hash"))?;
+        .ok_or_else(|| anyhow!("{name} resource in {datapackage_url} has no sha256 hash"))?;
     let bom_url = resource("bom")
         .and_then(|r| r["path"].as_str())
         .map(|p| resolve(datapackage_url, p));
 
-    Ok(QRankMetadata {
+    Ok(PackagedMetadata {
         version: version.to_string(),
         url: resolve(datapackage_url, path),
         datapackage_url: datapackage_url.to_string(),
         bom_url,
         sha256: sha256.to_ascii_lowercase(),
-        bytes: qrank["bytes"].as_u64().unwrap_or(0),
+        bytes: found["bytes"].as_u64().unwrap_or(0),
     })
 }
 
@@ -166,6 +186,7 @@ fn resolve(datapackage_url: &str, path: &str) -> String {
 async fn download(
     client: &Client,
     progress: &MultiProgress,
+    resource: &PackagedResource,
     url: &str,
     dest: &Path,
 ) -> Result<(String, u64)> {
@@ -174,13 +195,13 @@ async fn download(
         .with_context(|| format!("Failed to create file {}", dest.display()))?;
     let response = client
         .get(url)
-        .timeout(Duration::from_secs(600))
+        .timeout(resource.timeout)
         .send()
         .await
         .with_context(|| format!("Failed to GET {url}"))?
         .error_for_status()
         .with_context(|| format!("Server returned error for {url}"))?;
-    let bar = make_download_bar(progress, "qrank.fetch   ", response.content_length());
+    let bar = make_download_bar(progress, resource.label, response.content_length());
     let mut stream = response.bytes_stream();
     let mut hasher = DigestContext::new(&SHA256);
     let mut bytes = 0u64;
@@ -200,7 +221,7 @@ async fn download(
     Ok((to_hex(hasher.finish().as_ref()), bytes))
 }
 
-async fn write_meta_json(metadata: &QRankMetadata, dest: &Path) -> Result<()> {
+async fn write_meta_json(metadata: &PackagedMetadata, dest: &Path) -> Result<()> {
     // Via a temp file and rename, so a crash mid-write can't leave a
     // truncated sidecar that a restart would fail to parse.
     let mut tmp = dest.to_path_buf();
@@ -214,7 +235,7 @@ async fn write_meta_json(metadata: &QRankMetadata, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn read_meta_json(path: &Path) -> Result<QRankMetadata> {
+async fn read_meta_json(path: &Path) -> Result<PackagedMetadata> {
     let data = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -243,6 +264,14 @@ mod tests {
     fn hidden_progress() -> MultiProgress {
         MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
     }
+
+    const QRANK: PackagedResource = PackagedResource {
+        name: "qrank",
+        filename: "qrank.csv.gz",
+        meta_filename: "qrank.meta.json",
+        label: "qrank.fetch   ",
+        timeout: Duration::from_secs(10),
+    };
 
     fn datapackage(qrank_hash: &str) -> serde_json::Value {
         json!({
@@ -278,12 +307,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_qrank() -> Result<()> {
+    async fn test_fetch_packaged() -> Result<()> {
         let (server, mocks) = mock_server(DATA_SHA256).await?;
         let url = format!("{}/download/datapackage.json", server.url());
         let workdir = TempDir::new()?;
-        let Input { path, metadata } =
-            fetch_qrank(&url, &test_client(), &hidden_progress(), workdir.path()).await?;
+        let Input { path, metadata } = fetch_packaged(
+            &QRANK,
+            &url,
+            &test_client(),
+            &hidden_progress(),
+            workdir.path(),
+        )
+        .await?;
         for m in &mocks {
             m.assert_async().await;
         }
@@ -303,9 +338,10 @@ mod tests {
 
         // The sidecar was persisted, and a second call reuses the file
         // without going back to the (now unreachable) server.
-        let persisted = read_meta_json(&workdir.path().join(META_JSON_FILENAME)).await?;
+        let persisted = read_meta_json(&workdir.path().join(QRANK.meta_filename)).await?;
         assert_eq!(persisted, metadata);
-        let again = fetch_qrank(
+        let again = fetch_packaged(
+            &QRANK,
             "http://127.0.0.1:9/datapackage.json",
             &test_client(),
             &hidden_progress(),
@@ -317,24 +353,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_qrank_rejects_hash_mismatch() -> Result<()> {
+    async fn test_fetch_packaged_rejects_hash_mismatch() -> Result<()> {
         let (server, _mocks) = mock_server(&"0".repeat(64)).await?;
         let url = format!("{}/download/datapackage.json", server.url());
         let workdir = TempDir::new()?;
-        let err = fetch_qrank(&url, &test_client(), &hidden_progress(), workdir.path())
-            .await
-            .expect_err("a corrupt download must not be accepted");
+        let err = fetch_packaged(
+            &QRANK,
+            &url,
+            &test_client(),
+            &hidden_progress(),
+            workdir.path(),
+        )
+        .await
+        .expect_err("a corrupt download must not be accepted");
         assert!(format!("{err:#}").contains("SHA-256"), "{err:#}");
         assert!(!workdir.path().join("qrank.csv.gz").exists());
-        assert!(!workdir.path().join(META_JSON_FILENAME).exists());
+        assert!(!workdir.path().join(QRANK.meta_filename).exists());
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_fetch_qrank_requires_sidecar_for_existing_file() -> Result<()> {
+    async fn test_fetch_packaged_requires_sidecar_for_existing_file() -> Result<()> {
         let workdir = TempDir::new()?;
         std::fs::write(workdir.path().join("qrank.csv.gz"), b"data")?;
-        let err = fetch_qrank(
+        let err = fetch_packaged(
+            &QRANK,
             "http://127.0.0.1:9/datapackage.json",
             &test_client(),
             &hidden_progress(),
@@ -350,11 +393,11 @@ mod tests {
     fn test_parse_datapackage_errors() {
         let url = "https://example.org/download/datapackage.json";
         let no_qrank = json!({"version": "2026-10-11", "resources": []});
-        assert!(parse_datapackage(&no_qrank, url).is_err());
+        assert!(parse_datapackage(&no_qrank, url, "qrank").is_err());
         let bad_hash = json!({"version": "2026-10-11", "resources": [
             {"name": "qrank", "path": "q.csv.gz", "hash": "md5:abc"}]});
-        assert!(parse_datapackage(&bad_hash, url).is_err());
-        assert!(parse_datapackage(&json!({}), url).is_err());
+        assert!(parse_datapackage(&bad_hash, url, "qrank").is_err());
+        assert!(parse_datapackage(&json!({}), url, "qrank").is_err());
     }
 
     #[test]

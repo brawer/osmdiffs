@@ -39,6 +39,8 @@ mod inputs;
 mod logging;
 mod memstats;
 mod osm;
+mod osm_views;
+mod packaged;
 mod provenance;
 mod qrank;
 
@@ -227,6 +229,10 @@ fn run_pipeline_steps(
 
     let atp = run_step("import_atp", || {
         atp::import_atp(&inputs.atp, progress, workdir)
+    })?;
+    // Not consumed by anything yet; see `osm_views`.
+    let _osmviews_ranks = run_step("compute_osmviews_ranks", || {
+        osm_views::compute_osmviews_ranks(&atp, &inputs.osmviews.path, workdir)
     })?;
     // `osm_features` is scoped to just these steps, not bound at
     // this function's top level: it's an `OsmFeatureIndex`, holding the
