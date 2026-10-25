@@ -1,4 +1,4 @@
-//! Phone and fax numbers, for [super::Signal::Phone].
+//! Phone and fax numbers in tag values.
 
 /// Tag keys whose values may hold phone or fax numbers. Phone and fax
 /// share one key space: in ATP, thousands of numbers show up as a phone
@@ -19,7 +19,7 @@ const MIN_DIGITS: usize = 7;
 const MAX_DIGITS: usize = 15;
 
 /// Whether `key` is a tag key that may hold phone or fax numbers.
-pub fn is_phone_key(key: &str) -> bool {
+pub(crate) fn is_phone_key(key: &str) -> bool {
     PHONE_KEYS.contains(&key)
 }
 
@@ -32,11 +32,13 @@ pub fn is_phone_key(key: &str) -> bool {
 /// Parts that aren't in international format -- a few spiders emit
 /// local numbers, or junk like `9350-0` or `1800 PARKING` -- are
 /// skipped.
-pub fn parse_phone_numbers(value: &str) -> impl Iterator<Item = u64> + '_ {
+pub(crate) fn parse_phone_numbers(value: &str) -> impl Iterator<Item = u64> + '_ {
     value.split(';').filter_map(parse_phone_number)
 }
 
-fn parse_phone_number(part: &str) -> Option<u64> {
+/// Parses one phone number in international format, as in
+/// [parse_phone_numbers].
+pub(crate) fn parse_phone_number(part: &str) -> Option<u64> {
     let rest = part.trim().strip_prefix('+')?;
     let mut number: u64 = 0;
     let mut digits = 0;

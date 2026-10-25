@@ -28,6 +28,13 @@ ignore = [
   # release picks it up, then drop these two lines.
   "RUSTSEC-2026-0194", # quadratic run time checking duplicate attribute names
   "RUSTSEC-2026-0195", # unbounded namespace-declaration allocation (OOM)
+  # atomic-polyfill is unmaintained, not vulnerable. It comes in via
+  # phonenumber -> postcard -> heapless 0.7, which only uses it on targets
+  # without native atomics, so it is never built for the x86_64 and aarch64
+  # targets we ship (`cargo tree -i atomic-polyfill` prints nothing there;
+  # only `--target all` shows it). Drop this line once postcard moves to
+  # heapless 0.8, or phonenumber stops using postcard.
+  "RUSTSEC-2023-0089",
 ]
 
 # ── licenses: only accept licenses we've reviewed as OK to redistribute ─────

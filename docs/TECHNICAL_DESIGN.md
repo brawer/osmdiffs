@@ -346,7 +346,9 @@ fetch away.
   in spatial order; for each feature, builds a search cap around its
   centroid and queries `OsmFeatureIndex` for OSM candidates inside it,
   scoring each (see [`src/matchers/`](../src/matchers/)) and keeping
-  the best. Writes one row per ATP feature — matched or not — to
+  the best. Opens the nondescript phone and email sets from
+  `import_atp`, so that hotlines and central mailboxes never count as
+  matching evidence. Writes one row per ATP feature — matched or not — to
   `conflated.parquet`. See
   [`docs/outputs/CONFLATED_PARQUET.md`](outputs/CONFLATED_PARQUET.md)
   for that file’s schema. **~8 minutes** (~5 min matching, ~3 min
@@ -603,10 +605,13 @@ until the full pipeline was proven out:
 - Nothing yet uploads suggested edits to any of the tools described
   above — that integration (most likely MapRoulette first, given its
   API is the closest fit) is future work, not yet designed in detail.
-- The only matcher implemented, `PoiMatcher`, matches shop-category
-  POIs solely on an exact `brand:wikidata` tag. We’d like to extend
-  this well beyond it: matching stores by name too, not just
-  `brand:wikidata`, and matching well beyond stores (a tree matcher
+- The only matcher implemented, `PoiMatcher`, matches shops,
+  restaurants, hotels, schools and fuel stations on an exact
+  `brand:wikidata` tag, or on a shared phone number or email address
+  with a compatible category (see
+  [`notes/2026-10-25-phone-and-email-matching.md`](notes/2026-10-25-phone-and-email-matching.md)).
+  We’d like to extend this well beyond it: matching by name too, and
+  matching well beyond points of interest (a tree matcher
   conflating municipal tree datasets against OSM by spatial distance
   and species looks particularly tractable). See
   [#708](https://github.com/brawer/osmdiffs/issues/708).
