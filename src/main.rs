@@ -52,6 +52,16 @@ fn init_crypto() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
+/// Sent with every HTTP request, in production too. Wikimedia's
+/// servers, including Toolforge where QRank is hosted, reject requests
+/// without one, and want automated clients to say "bot"; see
+/// <https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy>.
+const USER_AGENT: &str = concat!(
+    "OSMDiffsBot/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/brawer/osmdiffs)"
+);
+
 fn build_client() -> reqwest::Client {
     let mut root_store = RootCertStore::empty();
     root_store.extend(TLS_SERVER_ROOTS.iter().cloned());
@@ -66,6 +76,7 @@ fn build_client() -> reqwest::Client {
 
     Client::builder()
         .use_preconfigured_tls(config)
+        .user_agent(USER_AGENT)
         .build()
         .unwrap()
 }

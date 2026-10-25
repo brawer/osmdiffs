@@ -19,14 +19,16 @@
 //! downstream step reuses its derived artifact instead, and provenance
 //! only needs the metadata. One exception: a planet `.pbf` without a
 //! sidecar (e.g. a regional extract dropped in for testing) is accepted
-//! too, with its metadata computed on the spot. See
-//! [`super::atp::fetch_atp`] and [`super::osm::fetch_planet`] for each
-//! input's exact rule.
+//! too, with its metadata computed on the spot. QRank's file is small
+//! enough to keep, so it has no derived-artifact stand-in. See
+//! [`super::atp::fetch_atp`], [`super::osm::fetch_planet`] and
+//! [`super::qrank::fetch_qrank`] for each input's exact rule.
 
 use anyhow::Result;
 use indicatif::MultiProgress;
 use std::path::{Path, PathBuf};
 
+use super::qrank::{self, QRankMetadata};
 use super::{AtpMetadata, OsmMetadata, atp, osm};
 
 /// One pipeline input, available locally once `fetch_inputs` is done.
@@ -46,6 +48,7 @@ pub(crate) struct Input<M> {
 pub(crate) struct Inputs {
     pub atp: Input<AtpMetadata>,
     pub osm: Input<OsmMetadata>,
+    pub qrank: Input<QRankMetadata>,
 }
 
 /// Where to fetch the pipeline's inputs from. Only ever not the
@@ -56,6 +59,9 @@ pub(crate) struct Sources {
 
     /// The OpenStreetMap planet PBF.
     pub osm_planet_url: String,
+
+    /// QRank's `datapackage.json`, which points to the actual file.
+    pub qrank_datapackage_url: String,
 }
 
 impl Default for Sources {
@@ -63,12 +69,13 @@ impl Default for Sources {
         Sources {
             atp_history_url: atp::ATP_RUN_HISTORY_URL.to_string(),
             osm_planet_url: osm::OSM_PLANET_URL.to_string(),
+            qrank_datapackage_url: qrank::QRANK_DATAPACKAGE_URL.to_string(),
         }
     }
 }
 
 /// Fetches every input in parallel, each logged as its own sub-step
-/// (`fetch_inputs.atp`, `fetch_inputs.osm`). If any fetch fails, the
+/// (`fetch_inputs.atp`, `fetch_inputs.osm`, `fetch_inputs.qrank`). If any fetch fails, the
 /// others are cancelled right away (a cancelled planet download leaves a
 /// `.part` file that the next attempt resumes), and the error is
 /// returned. See the module documentation for when a cached input is
@@ -79,7 +86,7 @@ pub(crate) async fn fetch_inputs(
     workdir: &Path,
     sources: &Sources,
 ) -> Result<Inputs> {
-    let (atp, osm) = futures_util::future::try_join(
+    let (atp, osm, qrank) = futures_util::future::try_join3(
         super::run_step_async(
             "fetch_inputs.atp",
             atp::fetch_atp(&sources.atp_history_url, http_client, progress, workdir),
@@ -88,9 +95,18 @@ pub(crate) async fn fetch_inputs(
             "fetch_inputs.osm",
             osm::fetch_planet(&sources.osm_planet_url, http_client, progress, workdir),
         ),
+        super::run_step_async(
+            "fetch_inputs.qrank",
+            qrank::fetch_qrank(
+                &sources.qrank_datapackage_url,
+                http_client,
+                progress,
+                workdir,
+            ),
+        ),
     )
     .await?;
-    Ok(Inputs { atp, osm })
+    Ok(Inputs { atp, osm, qrank })
 }
 
 #[cfg(test)]
@@ -126,6 +142,7 @@ mod tests {
         Sources {
             atp_history_url: "http://127.0.0.1:9/history.json".to_string(),
             osm_planet_url: "http://127.0.0.1:9/planet.osm.pbf".to_string(),
+            qrank_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
         }
     }
 
@@ -140,6 +157,8 @@ mod tests {
                 "planet-latest.osm.pbf.meta.json",
                 "planet-latest.osm.pbf.meta.json",
             ),
+            ("qrank.csv.gz", "qrank.csv.gz"),
+            ("qrank.meta.json", "qrank.meta.json"),
         ] {
             symlink(fixture(src), workdir.path().join(dst))?;
         }
@@ -165,15 +184,23 @@ mod tests {
             inputs.osm.metadata,
             super::super::read_cached_metadata(workdir.path())?
         );
+        assert_eq!(inputs.qrank.path, workdir.path().join("qrank.csv.gz"));
+        assert_eq!(inputs.qrank.metadata.version, "2026-10-11");
         Ok(())
     }
 
     #[tokio::test]
     async fn test_derived_artifacts_stand_in_for_deleted_inputs() -> Result<()> {
-        // Both raw inputs were deleted after their derived artifacts
-        // were built: their sidecars and those artifacts are enough.
+        // Both large raw inputs were deleted after their derived
+        // artifacts were built: their sidecars and those artifacts are
+        // enough. QRank has no such stand-in; its small raw file stays.
         let workdir = tempfile::tempdir()?;
-        for name in ["alltheplaces.meta.json", "planet-latest.osm.pbf.meta.json"] {
+        for name in [
+            "alltheplaces.meta.json",
+            "planet-latest.osm.pbf.meta.json",
+            "qrank.csv.gz",
+            "qrank.meta.json",
+        ] {
             symlink(fixture(name), workdir.path().join(name))?;
         }
         for name in [
@@ -219,10 +246,15 @@ mod tests {
             }
         });
 
+        // QRank is already there, so only the other two get fetched.
         let workdir = tempfile::tempdir()?;
+        for name in ["qrank.csv.gz", "qrank.meta.json"] {
+            symlink(fixture(name), workdir.path().join(name))?;
+        }
         let sources = Sources {
             atp_history_url: format!("{}/history.json", server.url()),
             osm_planet_url: format!("http://{planet_addr}/planet.osm.pbf"),
+            qrank_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
         };
         let result = tokio::time::timeout(
             Duration::from_secs(30),
