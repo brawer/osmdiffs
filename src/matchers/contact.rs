@@ -214,11 +214,15 @@ impl AtpContacts {
         value.split(';').filter_map(move |part| {
             let part = part.trim();
             let fast = || parse_phone_numbers(part).next();
-            match parse {
+            let result = match parse {
                 PhoneParse::Plus => fast(),
                 PhoneParse::Lib if part.starts_with('+') => fast(),
                 PhoneParse::Lib | PhoneParse::LibAll => lib_parse(part, country),
+            };
+            if *PHONE_STATS {
+                count_phone_value(country, part, result.is_some());
             }
+            result
         })
     }
 }
@@ -248,7 +252,44 @@ fn lib_parse(part: &str, country: Option<phonenumber::country::Id>) -> Option<u6
     result
 }
 
+/// With `OSMDIFFS_CONTACT_PHONE_STATS=1`, counts OSM phone values seen
+/// by contact matchers, per `addr:country` of the ATP feature: values in
+/// `+…` form, other values, and how many of each parsed. Each OSM value
+/// counts once per ATP feature that looks at it.
+static PHONE_STATS: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("OSMDIFFS_CONTACT_PHONE_STATS").as_deref() == Ok("1"));
+
+type CountryStats = std::collections::HashMap<String, [u64; 4]>;
+static PHONE_STATS_BY_COUNTRY: LazyLock<std::sync::Mutex<CountryStats>> =
+    LazyLock::new(Default::default);
+
+fn count_phone_value(country: Option<phonenumber::country::Id>, part: &str, parsed: bool) {
+    let key = country.map_or_else(|| "??".to_string(), |c| format!("{c:?}"));
+    let i = if part.starts_with('+') { 0 } else { 2 };
+    let mut stats = PHONE_STATS_BY_COUNTRY.lock().unwrap();
+    let entry = stats.entry(key).or_default();
+    entry[i] += 1;
+    if parsed {
+        entry[i + 1] += 1;
+    }
+}
+
 pub fn log_stats() {
+    if *PHONE_STATS {
+        let stats = PHONE_STATS_BY_COUNTRY.lock().unwrap();
+        let mut rows: Vec<_> = stats.iter().collect();
+        rows.sort_by(|a, b| (b.1[0] + b.1[2]).cmp(&(a.1[0] + a.1[2])));
+        let json: Vec<String> = rows
+            .iter()
+            .map(|(c, v)| {
+                format!(
+                    "{{\"country\":\"{c}\",\"plus\":{},\"plus_parsed\":{},\"other\":{},\"other_parsed\":{}}}",
+                    v[0], v[1], v[2], v[3]
+                )
+            })
+            .collect();
+        log::info!(by_country = format!("[{}]", json.join(",")); "contact: OSM phone values");
+    }
     let calls = LIB_CALLS.load(Ordering::Relaxed);
     let nanos = LIB_NANOS.load(Ordering::Relaxed);
     log::info!(

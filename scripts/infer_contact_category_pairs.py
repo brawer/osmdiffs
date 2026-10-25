@@ -90,9 +90,17 @@ def main():
                     help="minimum name agreement, relative to equal categories")
     args = ap.parse_args()
 
+    # Only rows where both sides have a phone or email key; at planet
+    # scale, this keeps the Python loop below small.
+    has_contact = (
+        "len(list_filter(map_keys({}), lambda k: k IN ({}) OR k = 'email' "
+        "OR k = 'contact:pec' OR k LIKE '%:email')) > 0"
+    )
+    keys = ", ".join(f"'{k}'" for k in sorted(PHONE_KEYS))
     rows = duckdb.sql(
-        f"SELECT map_from_entries(map_entries(atp.tags)), map_from_entries(map_entries(osm.tags)) "
-        f"FROM read_parquet('{args.conflated}') WHERE osm IS NOT NULL"
+        "SELECT map_from_entries(map_entries(atp.tags)), map_from_entries(map_entries(osm.tags)) "
+        f"FROM read_parquet('{args.conflated}') WHERE osm IS NOT NULL "
+        f"AND {has_contact.format('atp.tags', keys)} AND {has_contact.format('osm.tags', keys)}"
     ).fetchall()
 
     pairs = collections.Counter()
