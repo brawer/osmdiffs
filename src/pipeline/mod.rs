@@ -31,6 +31,7 @@ use time::UtcDateTime;
 pub(crate) const EXTERNAL_SORT_CHUNK_BYTES: usize = 512 * 1024 * 1024;
 
 mod atp;
+mod category_brands;
 mod conflate;
 mod conflated_tiles;
 mod datapackage;
@@ -250,9 +251,14 @@ fn run_pipeline_steps(
         let wikidata_ids = run_step("collect_wikidata_ids", || {
             wikidata_ids::collect_wikidata_ids(&atp, &osm_features, progress, workdir)
         })?;
-        // Not consumed by anything yet either; see `qrank`.
-        let _qrank_quantiles = run_step("compute_qrank_quantiles", || {
+        // Only consumed by compute_category_brand_quantiles, just below,
+        // so far; see `qrank`.
+        let qrank_quantiles = run_step("compute_qrank_quantiles", || {
             qrank::compute_qrank_quantiles(&inputs.qrank.path, &wikidata_ids, workdir)
+        })?;
+        // Not consumed by anything yet; see `category_brands`.
+        let _category_brand_quantiles = run_step("compute_category_brand_quantiles", || {
+            category_brands::compute_category_brand_quantiles(&atp, &qrank_quantiles, workdir)
         })?;
         run_step("conflate", || {
             conflate::conflate(&atp, &osm_features, progress, workdir, pipeline_run_id)

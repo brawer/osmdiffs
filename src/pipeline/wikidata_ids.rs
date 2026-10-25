@@ -36,7 +36,7 @@ const WIKIDATA_KEYS: [&str; 3] = ["brand:wikidata", "network:wikidata", "operato
 
 /// True for tag keys whose value(s) are the Wikidata IDs of a brand,
 /// operator or network.
-fn is_wikidata_key(key: &str) -> bool {
+pub(super) fn is_wikidata_key(key: &str) -> bool {
     WIKIDATA_KEYS.contains(&key)
 }
 
