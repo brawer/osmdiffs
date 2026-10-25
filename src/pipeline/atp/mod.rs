@@ -23,7 +23,6 @@ use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
 mod fetch;
 mod nondescript;
-mod wikidata_ids;
 
 // Only these two re-exported crate-wide (rather than making all of
 // `fetch` pub(crate)): provenance needs them to assemble this
@@ -33,8 +32,6 @@ pub(crate) use fetch::{AtpMetadata, read_cached_metadata};
 // For `pipeline::inputs`, which fetches every pipeline input up front;
 // nothing else outside `atp` needs the rest of fetch's API.
 pub(super) use fetch::{ATP_RUN_HISTORY_URL, fetch_atp};
-
-pub use wikidata_ids::collect_wikidata_ids;
 
 /// Filename, within `workdir`, of the AllThePlaces dump `fetch_atp`
 /// downloads.

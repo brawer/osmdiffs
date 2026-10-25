@@ -56,6 +56,7 @@ pub(crate) use osm::{
 };
 mod tiles;
 mod upload;
+mod wikidata_ids;
 
 pub fn run_pipeline(http_client: &reqwest::Client, workdir: &Path, raw_run_id: &str) -> Result<()> {
     // Fallback identifier for this invocation, used only for
@@ -226,12 +227,7 @@ fn run_pipeline_steps(
     let atp = run_step("import_atp", || {
         atp::import_atp(&inputs.atp, progress, workdir)
     })?;
-    // Not consumed by anything yet -- see atp::collect_wikidata_ids for
-    // what this is for.
-    let _wikidata_ids = run_step("collect_wikidata_ids", || {
-        atp::collect_wikidata_ids(&atp, workdir)
-    })?;
-    // `osm_features` is scoped to just these two steps, not bound at
+    // `osm_features` is scoped to just these steps, not bound at
     // this function's top level: it's an `OsmFeatureIndex`, holding the
     // pipeline's largest mmap'd tables (coordinates, features, the
     // inverted index -- tens of GB on a full-planet run). Nothing after
@@ -242,6 +238,11 @@ fn run_pipeline_steps(
     let conflated = {
         let osm_features = run_step("import_osm", || {
             osm::import_osm(&inputs.osm, progress, workdir)
+        })?;
+        // Not consumed by anything yet -- see
+        // wikidata_ids::collect_wikidata_ids for what this is for.
+        let _wikidata_ids = run_step("collect_wikidata_ids", || {
+            wikidata_ids::collect_wikidata_ids(&atp, &osm_features, progress, workdir)
         })?;
         run_step("conflate", || {
             conflate::conflate(&atp, &osm_features, progress, workdir, pipeline_run_id)

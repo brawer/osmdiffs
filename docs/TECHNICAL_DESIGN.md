@@ -190,9 +190,11 @@ graph TD
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
     IMPORT_ATP --> NONDESCRIPT_PHONES[alltheplaces.nondescript-phones]
     IMPORT_ATP --> NONDESCRIPT_EMAILS[alltheplaces.nondescript-emails]
-    ATP_PARQUET --> COLLECT_WIKI(collect_wikidata_ids) --> WIKIDATA[alltheplaces.wikidata-ids]
-
     OSM_PBF --> IMPORT_OSM(import_osm) --> OSM_INDEX[osm-features.index]
+
+    ATP_PARQUET --> COLLECT_WIKI(collect_wikidata_ids)
+    OSM_INDEX --> COLLECT_WIKI
+    COLLECT_WIKI --> WIKIDATA[wikidata-ids]
 
     ATP_PARQUET --> CONFLATE(conflate)
     OSM_INDEX --> CONFLATE
@@ -224,11 +226,11 @@ graph TD
 ```
 
 (Pink boxes are processing steps; plain rectangles are the files they
-read or write. `alltheplaces.wikidata-ids`,
+read or write. `wikidata-ids`,
 `alltheplaces.nondescript-phones` and `alltheplaces.nondescript-emails`
 have no outgoing edge above: nothing consumes them yet, they’re
 generated on behalf of planned future work, see
-[#682](https://github.com/brawer/osmdiffs/issues/682) for the first;
+[#713](https://github.com/brawer/osmdiffs/issues/713) for the first;
 the other two are for using phone numbers and email addresses as
 matching signals.)
 
@@ -307,12 +309,6 @@ fetch away.
   and
   [`notes/2026-10-24-shared-email-addresses.md`](notes/2026-10-24-shared-email-addresses.md)
   for how common either kind of sharing is, and why. **~3 minutes.**
-- **`collect_wikidata_ids`**
-  ([`src/pipeline/atp/wikidata_ids.rs`](../src/pipeline/atp/wikidata_ids.rs)) — extracts
-  every `wikidata`/`brand:wikidata`/… tag value ATP carries, for a
-  planned future feature (flagging OSM-only features whose brand ATP
-  tracks elsewhere, [#682](https://github.com/brawer/osmdiffs/issues/682));
-  not consumed by anything yet. Not separately timed.
 - **`import_osm`** ([`src/pipeline/osm/`](../src/pipeline/osm/)) —
   does a first pass over the planet dump that
   decides, by tag, which nodes/ways/relations are even worth fully
@@ -335,6 +331,15 @@ fetch away.
   compute-heavy portions (prune/assemble/index-build) aren’t a clean
   apples-to-apples comparison, since they ran under different CPU
   counts and memory limits.
+- **`collect_wikidata_ids`**
+  ([`src/pipeline/wikidata_ids.rs`](../src/pipeline/wikidata_ids.rs)) — collects
+  every `brand:wikidata`, `operator:wikidata` and `network:wikidata`
+  value on ATP and OSM features into one set, the reference population
+  for ranking a feature by the QRank quantile of its brand
+  ([#713](https://github.com/brawer/osmdiffs/issues/713)); not
+  consumed by anything yet. Plain `wikidata` is left out, since on OSM
+  it mostly points at cities, rivers and the like. Visits every
+  feature in `osm-features.index`.
 - **`conflate`**
   ([`src/pipeline/conflate/mod.rs`](../src/pipeline/conflate/mod.rs))
   — a single scan over AllThePlaces (the smaller of the two datasets),
