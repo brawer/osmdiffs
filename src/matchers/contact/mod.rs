@@ -24,7 +24,7 @@ mod phones;
 #[cfg(test)]
 pub(crate) use emails::email_hash;
 pub(crate) use emails::{is_email_key, parse_emails};
-pub(crate) use phones::{is_phone_key, parse_phone_numbers};
+pub(crate) use phones::{is_phone_key, parse_phone_number, parse_phone_numbers};
 
 /// Score factor of a contact match whose main categories are equal.
 /// Below 1.0, so a `brand:wikidata` match at the same distance wins.
@@ -135,7 +135,7 @@ impl AtpContacts {
 }
 
 /// Parses one OSM phone value. Most are in international format, which
-/// [parse_phone_numbers] reads quickly. The rest, such as `044 417 77
+/// [parse_phone_number] reads quickly. The rest, such as `044 417 77
 /// 77`, go through the `phonenumber` crate in the AllThePlaces
 /// feature's country. That is slow (about 60 µs a call) but rare: on
 /// the planet, it adds about one second in all. In some countries,
@@ -144,14 +144,14 @@ impl AtpContacts {
 fn parse_osm_phone(part: &str, country: Option<phonenumber::country::Id>) -> Option<u64> {
     let part = part.trim();
     if part.starts_with('+') {
-        return parse_phone_numbers(part).next();
+        return parse_phone_number(part);
     }
     let number = phonenumber::parse(country, part).ok()?;
     if !phonenumber::is_valid(&number) {
         return None;
     }
     let e164 = number.format().mode(phonenumber::Mode::E164).to_string();
-    parse_phone_numbers(&e164).next()
+    parse_phone_number(&e164)
 }
 
 /// Keys whose value is a feature's main category, in order of priority.

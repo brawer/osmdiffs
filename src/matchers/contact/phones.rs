@@ -36,7 +36,9 @@ pub(crate) fn parse_phone_numbers(value: &str) -> impl Iterator<Item = u64> + '_
     value.split(';').filter_map(parse_phone_number)
 }
 
-fn parse_phone_number(part: &str) -> Option<u64> {
+/// Parses one phone number in international format, as in
+/// [parse_phone_numbers].
+pub(crate) fn parse_phone_number(part: &str) -> Option<u64> {
     let rest = part.trim().strip_prefix('+')?;
     let mut number: u64 = 0;
     let mut digits = 0;

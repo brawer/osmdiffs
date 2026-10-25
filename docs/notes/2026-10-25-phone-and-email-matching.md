@@ -94,9 +94,11 @@ ATP run `2026-10-10-13-32-41` against the planet of the same week,
 |---|---:|
 | `brand:wikidata`, shops only (before) | 825,901 |
 | `brand:wikidata`, wider categories | 1,233,452 |
-| `brand:wikidata` or phone and email, wider categories (this change) | PLANET_PR |
+| `brand:wikidata` or phone and email, wider categories (this change) | 1,302,469 |
 
-No match from before was lost. To measure precision without hand
+So phone and email add 69,017 matches on top of the wider categories.
+No match from before was lost, and 535 moved to another OSM feature.
+The match step took 38 s for 5.3 million ATP features. To measure precision without hand
 labels, a test run hid the brand tags on both sides and checked
 whether contact evidence alone finds the OSM feature that
 `brand:wikidata` found. Of about 183,000 such rows, it found the same
