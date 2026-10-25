@@ -1,7 +1,8 @@
+use super::atp::nondescript::Signal;
 use super::last_modified;
 use crate::{
     make_progress_bar,
-    matchers::{OsmCandidate, create_matcher, match_distance},
+    matchers::{OsmCandidate, contact::Nondescript, create_matcher, match_distance},
     pipeline::EXTERNAL_SORT_CHUNK_BYTES,
     places::{Place, PlaceReader},
     tables::{Feature, OsmFeatures},
@@ -39,12 +40,16 @@ pub fn conflate(
     workdir: &Path,
     pipeline_run_id: &str,
 ) -> Result<PathBuf> {
-    let input_modified = last_modified(&[atp])?.max(osm.modified()?);
+    let nondescript_phones = Signal::Phone.path(workdir);
+    let nondescript_emails = Signal::Email.path(workdir);
+    let input_modified =
+        last_modified(&[atp, &nondescript_phones, &nondescript_emails])?.max(osm.modified()?);
     let out_path = workdir.join("conflated.parquet");
     if out_path.exists() && last_modified(&[&out_path])? >= input_modified {
         return Ok(out_path);
     }
 
+    let nondescript = Nondescript::open(&nondescript_phones, &nondescript_emails)?;
     let atp_reader = PlaceReader::open(atp)?;
     let num_atp_features = atp_reader.total_rows() as u64;
     let producer_progress =
@@ -56,7 +61,7 @@ pub fn conflate(
     thread::scope(|s| {
         let (tx, rx) = sync_channel::<ParquetRow>(8192);
         s.spawn(|| {
-            producer_result = produce_rows(&atp_reader, osm, producer_progress, tx);
+            producer_result = produce_rows(&atp_reader, osm, &nondescript, producer_progress, tx);
         });
         s.spawn(|| {
             writer_result =
@@ -78,6 +83,7 @@ struct ConflatedFeature {
 fn produce_rows(
     atp_reader: &PlaceReader,
     osm: &OsmFeatures,
+    nondescript: &Nondescript,
     progress_bar: ProgressBar,
     out: SyncSender<ParquetRow>,
 ) -> Result<()> {
@@ -111,7 +117,7 @@ fn produce_rows(
                 )
             });
 
-            let Some(matcher) = create_matcher(atp) else {
+            let Some(matcher) = create_matcher(atp, nondescript) else {
                 return Ok(());
             };
 

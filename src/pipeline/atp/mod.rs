@@ -22,7 +22,7 @@ use crate::places::{ParquetWriter, Place};
 use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
 mod fetch;
-mod nondescript;
+pub(super) mod nondescript;
 
 // Only these two re-exported crate-wide (rather than making all of
 // `fetch` pub(crate)): provenance needs them to assemble this

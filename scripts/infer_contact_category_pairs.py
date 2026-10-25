@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: 2026 Sascha Brawer <sascha@brawer.ch>
+# SPDX-License-Identifier: MIT
+
+"""Infers which category pairs may match through a phone or email.
+
+Reads `conflated.parquet` from a run with contact matching and no
+category check (`OSMDIFFS_CONTACT_MATCH=both OSMDIFFS_CONTACT_CATEGORY=any`),
+keeps the rows whose match rests on a shared phone number or email
+address (not on `brand:wikidata`), and counts the pairs of main
+categories, such as `tourism=hotel` in AllThePlaces and
+`amenity=restaurant` in OpenStreetMap.
+
+A shared number alone doesn't tell the same business apart from a
+neighbor at the same site: a flower shop inside a supermarket lists the
+supermarket's number. Names do, mostly. So a pair is kept if, among its
+contact matches, names agree about as often as among contact matches
+whose categories are equal. `shop=florist` and `shop=supermarket` share
+many numbers (Florissimo inside Migros) but almost never a name word, so
+that pair is dropped.
+
+The conflated file must come from a run with the category check
+switched off. The pipeline has no such switch; the experimental
+branch `contact-matching` has one (`OSMDIFFS_CONTACT_MATCH=both
+OSMDIFFS_CONTACT_CATEGORY=any OSMDIFFS_POI_MASKS=wide`). Review
+the output by hand before checking it in: some pairs with agreeing
+names still join two features at one site, such as a Western Union
+counter and the supermarket it sits in. The checked-in file keeps
+the removed pairs as comments, with the reason.
+
+Usage:
+  uv run infer_contact_category_pairs.py conflated.parquet \\
+      --min-name-agree 20 > new_pairs.tsv 2> dropped.txt
+"""
+
+import argparse
+import collections
+import re
+import sys
+import unicodedata
+
+import duckdb
+
+CATEGORY_KEYS = ["shop", "amenity", "tourism", "leisure", "healthcare", "craft", "office"]
+PHONE_KEYS = {"phone", "fax", "mobile", "contact:phone", "contact:fax", "contact:mobile"}
+
+
+def main_category(tags):
+    for k in CATEGORY_KEYS:
+        v = tags.get(k)
+        if v and v != "no":
+            return f"{k}={v}"
+    return None
+
+
+def phones(tags):
+    out = set()
+    for k, v in tags.items():
+        if k in PHONE_KEYS:
+            for part in v.split(";"):
+                part = part.strip()
+                if part.startswith("+"):
+                    digits = re.sub(r"[ \-.() ]", "", part[1:])
+                    if digits.isdigit() and 7 <= len(digits) <= 15:
+                        out.add(digits)
+    return out
+
+
+def emails(tags):
+    out = set()
+    for k, v in tags.items():
+        if k == "email" or k == "contact:pec" or k.endswith(":email"):
+            for part in re.split("[;,]", v):
+                part = part.strip().lower()
+                if part.startswith("mailto:"):
+                    part = part[7:]
+                part = part.split("?")[0]
+                if "@" in part:
+                    out.add(part)
+    return out
+
+
+def name_words(tags):
+    s = " ".join(tags.get(k, "") for k in ("name", "brand"))
+    s = unicodedata.normalize("NFKD", s.lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return {w for w in re.split(r"[^\w]+", s) if len(w) >= 4}
+
+
+def wikidata(tags):
+    return {q.strip() for q in tags.get("brand:wikidata", "").split(";") if q.strip()}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("conflated")
+    ap.add_argument("--min-name-agree", type=int, default=3,
+                    help="minimum contact matches with agreeing names per pair")
+    ap.add_argument("--min-ratio", type=float, default=0.5,
+                    help="minimum name agreement, relative to equal categories")
+    args = ap.parse_args()
+
+    # Only rows where both sides have a phone or email key; at planet
+    # scale, this keeps the Python loop below small.
+    has_contact = (
+        "len(list_filter(map_keys({}), lambda k: k IN ({}) OR k = 'email' "
+        "OR k = 'contact:pec' OR k LIKE '%:email')) > 0"
+    )
+    keys = ", ".join(f"'{k}'" for k in sorted(PHONE_KEYS))
+    rows = duckdb.sql(
+        "SELECT map_from_entries(map_entries(atp.tags)), map_from_entries(map_entries(osm.tags)) "
+        f"FROM read_parquet('{args.conflated}') WHERE osm IS NOT NULL "
+        f"AND {has_contact.format('atp.tags', keys)} AND {has_contact.format('osm.tags', keys)}"
+    ).fetchall()
+
+    pairs = collections.Counter()
+    pairs_named = collections.Counter()
+    same = same_named = 0
+    for atp, osm in rows:
+        atp, osm = dict(atp), dict(osm)
+        if wikidata(atp) & wikidata(osm):
+            continue
+        if not (phones(atp) & phones(osm) or emails(atp) & emails(osm)):
+            continue
+        a, o = main_category(atp), main_category(osm)
+        if not a or not o:
+            continue
+        named = bool(name_words(atp) & name_words(osm))
+        if a == o:
+            same += 1
+            same_named += named
+            continue
+        key = tuple(sorted((a, o)))
+        pairs[key] += 1
+        pairs_named[key] += named
+
+    base = same_named / same if same else 0.0
+    print("# Pairs of main categories (key=value) that one business often has in")
+    print("# AllThePlaces and OpenStreetMap. A contact match (shared phone or email)")
+    print("# between them counts; see src/matchers/contact/mod.rs. Generated by")
+    print("# scripts/infer_contact_category_pairs.py from contact matches whose names")
+    print(f"# agree; with equal categories, names agree in {same_named}/{same} ({base:.0%}).")
+    print(f"# Kept: >= {args.min_name_agree} name agreements and >= {args.min_ratio:.0%} of that rate.")
+    print("# Columns: category, category, contact matches, of which names agree.")
+    for key, n in pairs.most_common():
+        k = pairs_named[key]
+        keep = k >= args.min_name_agree and k / n >= args.min_ratio * base
+        line = f"{key[0]}\t{key[1]}\t{n}\t{k}"
+        print(line if keep else f"# dropped: {line}", file=sys.stdout if keep else sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,9 +1,9 @@
-//! Email addresses, for [super::Signal::Email].
+//! Email addresses in tag values.
 
 /// Whether `key` is a tag key that may hold email addresses: `email`,
 /// `contact:email`, department-specific ones like `sales:email` or
 /// `repair:email`, and `contact:pec` (Italian certified email).
-pub fn is_email_key(key: &str) -> bool {
+pub(crate) fn is_email_key(key: &str) -> bool {
     key == "email" || key == "contact:pec" || key.ends_with(":email")
 }
 
@@ -12,7 +12,7 @@ pub fn is_email_key(key: &str) -> bool {
 /// some AllThePlaces spiders), normalized with [normalize_email], and
 /// hashed with [email_hash]. Parts that aren't a plausible address are
 /// skipped.
-pub fn parse_emails(value: &str) -> impl Iterator<Item = u64> + '_ {
+pub(crate) fn parse_emails(value: &str) -> impl Iterator<Item = u64> + '_ {
     value
         .split([';', ','])
         .filter_map(normalize_email)
@@ -25,7 +25,7 @@ pub fn parse_emails(value: &str) -> impl Iterator<Item = u64> + '_ {
 /// mail system treats it so in practice. Returns `None` for anything
 /// that doesn't look like an address (one `@`, a non-empty local part
 /// without spaces, a domain with at least two labels).
-pub fn normalize_email(part: &str) -> Option<String> {
+pub(crate) fn normalize_email(part: &str) -> Option<String> {
     let mut s = part.trim();
     s = s
         .strip_prefix('<')
@@ -67,7 +67,7 @@ pub fn normalize_email(part: &str) -> Option<String> {
 /// version can be read by another. With about 430,000 distinct
 /// addresses in ATP, the chance of any collision is about 1 in 200
 /// million; a collision would only make one more address nondescript.
-pub fn email_hash(normalized: &str) -> u64 {
+pub(crate) fn email_hash(normalized: &str) -> u64 {
     let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, normalized.as_bytes());
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest.as_ref()[..8]);

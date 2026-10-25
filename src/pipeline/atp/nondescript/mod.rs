@@ -39,11 +39,7 @@ use std::sync::LazyLock;
 use crate::places::{Place, PlaceReader};
 use crate::tables::U64Set;
 
-mod emails;
-mod phones;
-
-use emails::{is_email_key, parse_emails};
-use phones::{is_phone_key, parse_phone_numbers};
+use crate::matchers::contact::{is_email_key, is_phone_key, parse_emails, parse_phone_numbers};
 
 /// Places carrying the same value whose bounding box diagonal is at
 /// least this long make that value nondescript.
@@ -59,7 +55,7 @@ pub enum Signal {
     /// (see [parse_phone_numbers]).
     Phone,
     /// Email addresses, encoded as a 64-bit hash of the normalized
-    /// address (see [parse_emails] and [emails::email_hash]).
+    /// address (see [parse_emails]).
     Email,
 }
 
@@ -281,9 +277,9 @@ pub fn write(nondescript: &Nondescript, workdir: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::emails::email_hash;
     use super::*;
     use crate::matchers::MatchMask;
+    use crate::matchers::contact::email_hash;
     use crate::utils::UtcTimestamp;
     use geo::Coord;
 
