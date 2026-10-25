@@ -2056,6 +2056,7 @@ dependencies = [
  "deepsize_derive",
  "env_logger",
  "ext-sort",
+ "flate2",
  "futures-util",
  "geo",
  "geo-traits",

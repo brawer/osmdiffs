@@ -40,6 +40,7 @@ mod logging;
 mod memstats;
 mod osm;
 mod provenance;
+mod qrank;
 
 // Only these re-exported at the pipeline level (rather than making all
 // of `atp`/`osm` pub(crate)): `provenance` needs them to assemble this
@@ -239,10 +240,13 @@ fn run_pipeline_steps(
         let osm_features = run_step("import_osm", || {
             osm::import_osm(&inputs.osm, progress, workdir)
         })?;
-        // Not consumed by anything yet -- see
-        // wikidata_ids::collect_wikidata_ids for what this is for.
-        let _wikidata_ids = run_step("collect_wikidata_ids", || {
+        // Only consumed by compute_qrank_quantiles, just below.
+        let wikidata_ids = run_step("collect_wikidata_ids", || {
             wikidata_ids::collect_wikidata_ids(&atp, &osm_features, progress, workdir)
+        })?;
+        // Not consumed by anything yet either; see `qrank`.
+        let _qrank_quantiles = run_step("compute_qrank_quantiles", || {
+            qrank::compute_qrank_quantiles(&inputs.qrank.path, &wikidata_ids, workdir)
         })?;
         run_step("conflate", || {
             conflate::conflate(&atp, &osm_features, progress, workdir, pipeline_run_id)

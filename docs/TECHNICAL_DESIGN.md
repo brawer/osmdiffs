@@ -178,14 +178,17 @@ detail.
 graph TD
     ATP_SRC@{ shape: cloud, label: "AllThePlaces weekly dump" }
     OSM_SRC@{ shape: cloud, label: "OpenStreetMap planet" }
+    QRANK_SRC@{ shape: cloud, label: "QRank" }
 
     subgraph INPUTS [Inputs]
         ATP_SRC
         OSM_SRC
+        QRANK_SRC
     end
     INPUTS --> FETCH_INPUTS("fetch_inputs<br/>(all in parallel)")
     FETCH_INPUTS --> ATP_ZIP[alltheplaces.zip]
     FETCH_INPUTS --> OSM_PBF[planet-latest.osm.pbf]
+    FETCH_INPUTS --> QRANK_CSV[qrank.csv.gz]
 
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
     IMPORT_ATP --> NONDESCRIPT_PHONES[alltheplaces.nondescript-phones]
@@ -195,6 +198,9 @@ graph TD
     ATP_PARQUET --> COLLECT_WIKI(collect_wikidata_ids)
     OSM_INDEX --> COLLECT_WIKI
     COLLECT_WIKI --> WIKIDATA[wikidata-ids]
+    WIKIDATA --> QRANK_QUANTILES(compute_qrank_quantiles)
+    QRANK_CSV --> QRANK_QUANTILES
+    QRANK_QUANTILES --> QRANK_Q[qrank-quantiles]
 
     ATP_PARQUET --> CONFLATE(conflate)
     OSM_INDEX --> CONFLATE
@@ -222,11 +228,11 @@ graph TD
     UPLOAD_BOM --> UPLOAD_DATAPACKAGE(upload_datapackage<br/>data/datapackage.json) --> S3A
 
     classDef process fill:#fce4ec,stroke:#ad1457,stroke-width:2px,color:#4a0e28,font-weight:bold;
-    class FETCH_INPUTS,IMPORT_ATP,COLLECT_WIKI,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SUGGEST_EDITS,RENDER_TILES,UPLOAD_TILES,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
+    class FETCH_INPUTS,IMPORT_ATP,COLLECT_WIKI,QRANK_QUANTILES,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SUGGEST_EDITS,RENDER_TILES,UPLOAD_TILES,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
 ```
 
 (Pink boxes are processing steps; plain rectangles are the files they
-read or write. `wikidata-ids`,
+read or write. `qrank-quantiles`,
 `alltheplaces.nondescript-phones` and `alltheplaces.nondescript-emails`
 have no outgoing edge above: nothing consumes them yet, they’re
 generated on behalf of planned future work, see
@@ -276,7 +282,10 @@ fetch away.
   over plain HTTPS, a redirect straight to a well-provisioned cloud
   object store, not BitTorrent — see
   [#755](https://github.com/brawer/osmdiffs/pull/755) for why that
-  switch happened). Each input is hashed (SHA-256) while it streams in,
+  switch happened), and the latest [QRank](https://qrank.toolforge.org/)
+  file ([`qrank/fetch.rs`](../src/pipeline/qrank/fetch.rs),
+  `fetch_inputs.qrank`; discovered through QRank's `datapackage.json`
+  and checked against the SHA-256 listed there). Each input is hashed (SHA-256) while it streams in,
   and its provenance written to a `*.meta.json` sidecar. If any
   download fails, the others are cancelled and the run aborts within
   minutes; an interrupted planet download is resumed on the next
@@ -336,10 +345,15 @@ fetch away.
   every `brand:wikidata`, `operator:wikidata` and `network:wikidata`
   value on ATP and OSM features into one set, the reference population
   for ranking a feature by the QRank quantile of its brand
-  ([#713](https://github.com/brawer/osmdiffs/issues/713)); not
-  consumed by anything yet. Plain `wikidata` is left out, since on OSM
-  it mostly points at cities, rivers and the like. Visits every
-  feature in `osm-features.index`.
+  ([#713](https://github.com/brawer/osmdiffs/issues/713)). Plain
+  `wikidata` is left out, since on OSM it mostly points at cities,
+  rivers and the like. Visits every feature in `osm-features.index`.
+- **`compute_qrank_quantiles`**
+  ([`src/pipeline/qrank/mod.rs`](../src/pipeline/qrank/mod.rs)) — gives
+  each ID in `wikidata-ids` its QRank quantile among those same IDs
+  (mid-rank for ties; IDs without pageviews share the lowest), so brand
+  importance can be combined with unrelated signals such as OSMViews.
+  Not consumed by anything yet.
 - **`conflate`**
   ([`src/pipeline/conflate/mod.rs`](../src/pipeline/conflate/mod.rs))
   — a single scan over AllThePlaces (the smaller of the two datasets),
