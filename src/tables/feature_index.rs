@@ -76,6 +76,7 @@ use ext_sort::{
 };
 use memmap2::Mmap;
 use prost::Message;
+use rayon::prelude::*;
 use s2::cellid::CellID;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -412,7 +413,6 @@ impl<'a> OsmFeatureIndex<'a> {
     }
 
     /// The number of features in this index.
-    #[allow(unused)]
     pub fn len(&self) -> usize {
         self.entries_count
     }
@@ -474,6 +474,15 @@ impl<'a> OsmFeatureIndex<'a> {
     #[allow(unused)]
     pub fn feature_id(&self, r: LocalFeatureRef) -> u64 {
         u64::from_le(self.id[r.0 as usize])
+    }
+
+    /// Every feature in this index, in storage order, for a caller that
+    /// needs to visit all of them rather than query a region -- e.g. to
+    /// collect tag values planet-wide.
+    pub fn all_refs(&self) -> impl IndexedParallelIterator<Item = LocalFeatureRef> + use<> {
+        let count = u32::try_from(self.entries_count)
+            .expect("OsmFeatureIndex::create never writes more than u32::MAX features");
+        (0..count).into_par_iter().map(LocalFeatureRef)
     }
 
     /// Fully decodes the feature `r` refers to. The only operation on

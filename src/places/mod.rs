@@ -12,7 +12,7 @@
 //! see the BOM "evidence" link in `pipeline::provenance`) Parquet file
 //! that lives only in the pipeline's local working directory and is
 //! never uploaded anywhere. Written by `pipeline::atp`, read back by
-//! `pipeline::conflate`/`pipeline::atp::wikidata_ids`, and consumed
+//! `pipeline::conflate`/`pipeline::wikidata_ids`, and consumed
 //! directly by `matchers` when scoring a candidate match.
 //!
 //! Plays the same cross-pipeline-stage-storage role `crate::tables`
