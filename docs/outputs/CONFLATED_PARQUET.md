@@ -40,6 +40,8 @@ osm                                          STRUCT, nullable
     id        UINT64                         non-null
     role      UTF8                           nullable — null if OSM gives the member no role
 osm_geometry  BINARY (WKB)                   nullable — null exactly when osm is null
+
+importance    FLOAT                          non-null, 0.0 to 1.0
 ```
 
 A few things worth calling out that aren’t obvious from the above:
@@ -77,6 +79,36 @@ A few things worth calling out that aren’t obvious from the above:
   `relation_members` is a relation’s members, also in declared order,
   each with its own type (node/way/relation), ID, and role (e.g.
   “outer”, “inner”, or `null` if OpenStreetMap doesn’t record one).
+
+## Importance
+
+`importance` says how much a row’s place matters to map users, from
+0.0 (least) to 1.0 (most), so you can work through the file in
+priority order instead of in whatever order it happens to be in. It
+is a *relative* position among the rows of this file: `importance >=
+0.9` always selects the top tenth of rows, and the same place can get
+a different value from one week to the next as other places come and
+go.
+
+It combines three signals:
+
+- **Location**: how much the place’s location is looked at on
+  OpenStreetMap-based maps, according to
+  [OSMViews](https://osmviews.brawer.ch/). A shop on a busy downtown
+  street ranks above the same shop in a remote valley.
+- **Brand**: how often the Wikipedia articles about the place’s brand,
+  operator or network (from its `brand:wikidata`, `operator:wikidata`
+  and `network:wikidata` tags) were viewed, according to
+  [QRank](https://qrank.toolforge.org/). A place without such a tag, or
+  whose brand has no Wikipedia article, is ranked on the other two
+  signals alone rather than pushed down.
+- **Kind of place**: a coarse, hand-made score by category, so that a
+  defibrillator, pharmacy or hospital ranks above a bench or a tree.
+
+The exact weights and categories are an implementation detail that
+may change; see
+[`src/pipeline/importance.rs`](../../src/pipeline/importance.rs) and
+[#713](https://github.com/brawer/osmdiffs/issues/713).
 
 ## Geometry
 
@@ -147,9 +179,10 @@ embedded in its own metadata — CycloneDX being an established,
 [standardized](https://ecma-international.org/wp-content/uploads/ECMA-424_2nd_edition_december_2025.pdf)
 format for exactly this kind of “where did this data come from”
 record. It answers questions like which AllThePlaces run and which
-OpenStreetMap snapshot went into this file, and which version of our
-pipeline produced it. It also records licensing information for both
-inputs and the output.
+OpenStreetMap snapshot went into this file, which QRank and OSMViews
+builds the `importance` column was computed from, and which version of
+our pipeline produced it. It also records licensing information for
+every input and the output.
 
 The same document is also published as a **standalone file** next to the
 Parquet — the `bom` resource in

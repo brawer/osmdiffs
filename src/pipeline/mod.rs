@@ -35,6 +35,7 @@ mod conflate;
 mod conflated_tiles;
 mod datapackage;
 mod edits;
+mod importance;
 mod inputs;
 mod logging;
 mod memstats;
@@ -230,8 +231,7 @@ fn run_pipeline_steps(
     let atp = run_step("import_atp", || {
         atp::import_atp(&inputs.atp, progress, workdir)
     })?;
-    // Not consumed by anything yet; see `osm_views`.
-    let _osmviews_ranks = run_step("compute_osmviews_ranks", || {
+    let osmviews_ranks = run_step("compute_osmviews_ranks", || {
         osm_views::compute_osmviews_ranks(&atp, &inputs.osmviews.path, workdir)
     })?;
     // `osm_features` is scoped to just these steps, not bound at
@@ -250,12 +250,23 @@ fn run_pipeline_steps(
         let wikidata_ids = run_step("collect_wikidata_ids", || {
             wikidata_ids::collect_wikidata_ids(&atp, &osm_features, progress, workdir)
         })?;
-        // Not consumed by anything yet either; see `qrank`.
-        let _qrank_quantiles = run_step("compute_qrank_quantiles", || {
+        let qrank_quantiles = run_step("compute_qrank_quantiles", || {
             qrank::compute_qrank_quantiles(&inputs.qrank.path, &wikidata_ids, workdir)
         })?;
+        let importance = conflate::ImportanceInputs {
+            osmviews: &inputs.osmviews.path,
+            osmviews_ranks: &osmviews_ranks,
+            qrank_quantiles: &qrank_quantiles,
+        };
         run_step("conflate", || {
-            conflate::conflate(&atp, &osm_features, progress, workdir, pipeline_run_id)
+            conflate::conflate(
+                &atp,
+                &osm_features,
+                &importance,
+                progress,
+                workdir,
+                pipeline_run_id,
+            )
         })?
     };
 

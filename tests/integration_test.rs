@@ -292,6 +292,16 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
             .as_any()
             .downcast_ref::<BinaryArray>()
             .context("'osm_geometry' is not binary")?;
+        let importance = batch
+            .column_by_name("importance")
+            .context("missing 'importance' column")?
+            .as_any()
+            .downcast_ref::<arrow::array::Float32Array>()
+            .context("'importance' is not float32")?;
+        assert_eq!(importance.null_count(), 0);
+        for value in importance.values() {
+            assert!((0.0..=1.0).contains(value), "importance {value}");
+        }
         for row in 0..batch.num_rows() {
             if osm.is_null(row) {
                 continue;

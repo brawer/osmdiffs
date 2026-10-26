@@ -211,6 +211,11 @@ graph TD
 
     ATP_PARQUET --> CONFLATE(conflate)
     OSM_INDEX --> CONFLATE
+    NONDESCRIPT_PHONES --> CONFLATE
+    NONDESCRIPT_EMAILS --> CONFLATE
+    OSMVIEWS_TIFF --> CONFLATE
+    OSMVIEWS_R --> CONFLATE
+    QRANK_Q --> CONFLATE
     CONFLATE --> CONFLATED[conflated.parquet]
     CONFLATED --> UPLOAD_CONFLATED(upload_conflated) --> S3A[("public S3")]
 
@@ -239,13 +244,7 @@ graph TD
 ```
 
 (Pink boxes are processing steps; plain rectangles are the files they
-read or write. `qrank-quantiles`, `osmviews-ranks`,
-`alltheplaces.nondescript-phones` and `alltheplaces.nondescript-emails`
-have no outgoing edge above: nothing consumes them yet, they’re
-generated on behalf of planned future work, see
-[#713](https://github.com/brawer/osmdiffs/issues/713) for the first;
-the other two are for using phone numbers and email addresses as
-matching signals.)
+read or write.)
 
 Every top-level step above is logged with its own wall-clock time and
 memory snapshot, regardless of success or failure — see
@@ -356,7 +355,7 @@ fetch away.
   turned into its quantile among the places ATP covers. Raw ranks of
   inhabited places bunch up (in Switzerland, 80% lie between 0.40 and
   0.61); quantiles spread them over 0 to 1 like the QRank quantiles.
-  Not consumed by anything yet.
+  Used by `conflate` for the `importance` column.
 - **`collect_wikidata_ids`**
   ([`src/pipeline/wikidata_ids.rs`](../src/pipeline/wikidata_ids.rs)) — collects
   every `brand:wikidata`, `operator:wikidata` and `network:wikidata`
@@ -367,10 +366,12 @@ fetch away.
   rivers and the like. Visits every feature in `osm-features.index`.
 - **`compute_qrank_quantiles`**
   ([`src/pipeline/qrank/mod.rs`](../src/pipeline/qrank/mod.rs)) — gives
-  each ID in `wikidata-ids` its QRank quantile among those same IDs
-  (mid-rank for ties; IDs without pageviews share the lowest), so brand
-  importance can be combined with unrelated signals such as OSMViews.
-  Not consumed by anything yet.
+  each ID in `wikidata-ids` that has pageviews its QRank quantile among
+  those same IDs (mid-rank for ties), so brand importance can be
+  combined with unrelated signals such as OSMViews. IDs without
+  pageviews are left out and count as no brand: many brand items from
+  the Name Suggestion Index have no Wikipedia article. Used by
+  `conflate` for the `importance` column.
 - **`conflate`**
   ([`src/pipeline/conflate/mod.rs`](../src/pipeline/conflate/mod.rs))
   — a single scan over AllThePlaces (the smaller of the two datasets),
@@ -380,7 +381,12 @@ fetch away.
   the best. Opens the nondescript phone and email sets from
   `import_atp`, so that hotlines and central mailboxes never count as
   matching evidence. Writes one row per ATP feature — matched or not — to
-  `conflated.parquet`. See
+  `conflated.parquet`, each with an `importance` from 0 to 1 (see
+  [`src/pipeline/importance.rs`](../src/pipeline/importance.rs)): a
+  weighted mean of the location's OSMViews quantile, the brand's QRank
+  quantile and a coarse score for the kind of place
+  (`MatchMask::importance`), turned into a quantile among all rows
+  once every row is known. See
   [`docs/outputs/CONFLATED_PARQUET.md`](outputs/CONFLATED_PARQUET.md)
   for that file’s schema. **~8 minutes** (~5 min matching, ~3 min
   writing) for 3.8M ATP features against the full OpenStreetMap
@@ -565,7 +571,7 @@ Two properties keep that safe:
     component’s `version`, the workflow’s `timeStart`/`timeEnd`) to
     `max(AllThePlaces run start, OSM planet replication)` — the
     freshness of the most-recently-updated input — rather than to
-    “now”. Its `serialNumber` is a version-5 UUID derived from the two
+    “now”. Its `serialNumber` is a version-5 UUID derived from the
     inputs’ SHA-256s, not a random v4 UUID.
   - The Parquet row order is a total order
     ([`ParquetRow::cmp`](../src/pipeline/conflate/writer.rs)): the S2

@@ -13,6 +13,7 @@
 //! values, so this stays decoupled from however those importers (and
 //! whatever indexing they feed into) end up wired together.
 
+use crate::pipeline::packaged::{PackagedMetadata, PackagedResource, read_cached_metadata};
 use crate::pipeline::{self, AtpMetadata, OsmMetadata};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -20,6 +21,14 @@ use std::path::Path;
 use time::UtcDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
+
+/// Supplier of QRank and OSMViews, which feed the `importance` column.
+fn brawer_supplier() -> Value {
+    json!({
+        "name": "Sascha Brawer",
+        "url": ["https://brawer.ch"]
+    })
+}
 
 /// GitHub repository this pipeline is published from -- used to build
 /// `metadata.tools.components[0]`'s external references and purl.
@@ -149,8 +158,17 @@ pub fn build_bom_for_conflated_parquet(
     let osm_metadata = pipeline::read_cached_metadata(workdir)
         .context("could not read OpenStreetMap provenance")?;
 
+    let qrank_metadata = read_cached_metadata(&pipeline::qrank::QRANK, workdir)
+        .context("could not read QRank provenance")?;
+    let osmviews_metadata = read_cached_metadata(&pipeline::osm_views::OSMVIEWS, workdir)
+        .context("could not read OSMViews provenance")?;
+
     let anchor = format_rfc3339(anchor_timestamp(&atp_metadata, &osm_metadata));
-    let serial_number = deterministic_serial_number(&atp_metadata, &osm_metadata)?;
+    let serial_number = deterministic_serial_number(
+        &atp_metadata,
+        &osm_metadata,
+        &[&qrank_metadata, &osmviews_metadata],
+    )?;
 
     Ok(json!({
         "bomFormat": "CycloneDX",
@@ -168,16 +186,18 @@ pub fn build_bom_for_conflated_parquet(
         "components": [
             atp_component(&atp_metadata)?,
             osm_component(&osm_metadata)?,
+            packaged_component(&pipeline::qrank::QRANK, &qrank_metadata),
+            packaged_component(&pipeline::osm_views::OSMVIEWS, &osmviews_metadata),
         ],
-        // Declares conflated.parquet's two inputs as *its* dependencies,
+        // Declares conflated.parquet's inputs as *its* dependencies,
         // so the dependency graph has a single root (conflated.parquet)
-        // instead of three unlinked ones -- an NTIA-minimum-elements
+        // instead of several unlinked ones -- an NTIA-minimum-elements
         // validator flags components no other component depends on as
         // extra roots. Same pattern as scripts/sbom/pipeline.jq uses for
         // the container-image SBOM.
         "dependencies": [{
             "ref": "conflated.parquet",
-            "dependsOn": ["alltheplaces.zip", pipeline::PLANET_PBF_FILENAME],
+            "dependsOn": input_refs(),
         }],
         "formulation": [formulation(pipeline_run_id, &anchor, &anchor)],
     }))
@@ -194,6 +214,17 @@ pub(crate) fn anchor_timestamp(atp: &AtpMetadata, osm: &OsmMetadata) -> UtcDateT
     atp.start_time.max(osm.replication_timestamp)
 }
 
+/// The `bom-ref`s of conflated.parquet's inputs, in the order the BOM
+/// lists them.
+fn input_refs() -> [&'static str; 4] {
+    [
+        "alltheplaces.zip",
+        pipeline::PLANET_PBF_FILENAME,
+        pipeline::qrank::QRANK.filename,
+        pipeline::osm_views::OSMVIEWS.filename,
+    ]
+}
+
 /// Fixed, arbitrary namespace for the version-5 (SHA-1) UUID used as the
 /// BOM's `serialNumber` -- a constant so the derivation
 /// `UUIDv5(namespace, atp_sha256 ":" osm_sha256)` is entirely
@@ -205,11 +236,17 @@ const SERIAL_NAMESPACE: Uuid = Uuid::from_bytes([
     0x18, 0x68, 0x7b, 0x2b, 0xa4, 0x9c, 0x56, 0x07, 0xb1, 0xe7, 0xf7, 0x40, 0xda, 0xee, 0x83, 0x2f,
 ]);
 
-/// The BOM's `serialNumber`, derived from the two inputs' SHA-256s so an
-/// identical input pair always yields an identically identified BOM --
+/// The BOM's `serialNumber`, derived from the inputs' SHA-256s so
+/// identical inputs always yield an identically identified BOM --
 /// rather than a fresh random v4 UUID per run, which made every BOM
-/// (and, with it, `conflated.parquet`) non-reproducible.
-fn deterministic_serial_number(atp: &AtpMetadata, osm: &OsmMetadata) -> Result<String> {
+/// (and, with it, `conflated.parquet`) non-reproducible. The packaged
+/// inputs (QRank, OSMViews) are appended after ATP's and OSM's, so a
+/// new QRank or OSMViews build also gets a new serial number.
+fn deterministic_serial_number(
+    atp: &AtpMetadata,
+    osm: &OsmMetadata,
+    packaged: &[&PackagedMetadata],
+) -> Result<String> {
     let atp_sha = atp
         .sha256
         .as_deref()
@@ -217,11 +254,14 @@ fn deterministic_serial_number(atp: &AtpMetadata, osm: &OsmMetadata) -> Result<S
     let osm_sha = osm.sha256.as_deref().context(
         "OpenStreetMap metadata has no sha256 (workdir from an older osmdiffs version?)",
     )?;
-    Ok(
-        Uuid::new_v5(&SERIAL_NAMESPACE, format!("{atp_sha}:{osm_sha}").as_bytes())
-            .urn()
-            .to_string(),
-    )
+    let mut name = format!("{atp_sha}:{osm_sha}");
+    for p in packaged {
+        name.push(':');
+        name.push_str(&p.sha256);
+    }
+    Ok(Uuid::new_v5(&SERIAL_NAMESPACE, name.as_bytes())
+        .urn()
+        .to_string())
 }
 
 /// The `osmdiffs` pipeline itself, as the tool that produced the output
@@ -350,7 +390,35 @@ fn osm_component(osm: &OsmMetadata) -> Result<Value> {
     }))
 }
 
-/// Ties `tool_component()`, the two input `*_component()`s, and
+/// A weekly build of QRank or OSMViews, both CC0-licensed and
+/// published as Frictionless Data Packages with their own CycloneDX
+/// BOM, which this component links to.
+fn packaged_component(resource: &PackagedResource, metadata: &PackagedMetadata) -> Value {
+    let mut external_references = vec![
+        json!({"type": "distribution", "url": metadata.url}),
+        license_external_reference(CC0_URL),
+    ];
+    if let Some(bom_url) = &metadata.bom_url {
+        external_references.push(json!({"type": "bom", "url": bom_url}));
+    }
+    json!({
+        "bom-ref": resource.filename,
+        "type": "data",
+        "name": resource.filename,
+        "version": metadata.version,
+        "supplier": brawer_supplier(),
+        "licenses": license("CC0-1.0", CC0_URL),
+        "hashes": [{"alg": "SHA-256", "content": metadata.sha256}],
+        "purl": format!(
+            "pkg:generic/{}@{}?download_url={}&checksum=sha256:{}",
+            resource.name, metadata.version, metadata.url, metadata.sha256
+        ),
+        "data": [{"type": "dataset", "contents": {"url": metadata.url}}],
+        "externalReferences": external_references,
+    })
+}
+
+/// Ties `tool_component()`, the input `*_component()`s, and
 /// `output_component()` together into one workflow: which tool consumed
 /// which inputs to produce which output.
 fn formulation(pipeline_run_id: &str, time_start: &str, time_end: &str) -> Value {
@@ -374,10 +442,10 @@ fn formulation(pipeline_run_id: &str, time_start: &str, time_end: &str) -> Value
             "timeStart": time_start,
             "timeEnd": time_end,
             "resourceReferences": [{"ref": "tool-osmdiffs"}],
-            "inputs": [
-                {"resource": {"ref": "alltheplaces.zip"}},
-                {"resource": {"ref": pipeline::PLANET_PBF_FILENAME}},
-            ],
+            "inputs": input_refs()
+                .iter()
+                .map(|r| json!({"resource": {"ref": r}}))
+                .collect::<Vec<_>>(),
             "outputs": [{"resource": {"ref": "conflated.parquet"}}],
         }],
     })
@@ -425,6 +493,12 @@ mod tests {
                 "sha256": "56e12b62871018c7a969c9924bcfb1bdce15676bee706156260f101db809b9e1"
             }"#,
         )?;
+        for name in ["qrank.meta.json", "osmviews.meta.json"] {
+            let mut src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            src.push("tests/test_data");
+            src.push(name);
+            std::os::unix::fs::symlink(&src, workdir.join(name))?;
+        }
         Ok(())
     }
 
@@ -467,7 +541,7 @@ mod tests {
         assert_eq!(output["copyright"], OSM_COPYRIGHT);
 
         let components = bom["components"].as_array().expect("components array");
-        assert_eq!(components.len(), 2);
+        assert_eq!(components.len(), 4);
 
         let atp = &components[0];
         assert_eq!(atp["bom-ref"], "alltheplaces.zip");
@@ -514,8 +588,43 @@ mod tests {
              56e12b62871018c7a969c9924bcfb1bdce15676bee706156260f101db809b9e1"
         );
 
+        let qrank = &components[2];
+        assert_eq!(qrank["bom-ref"], "qrank.csv.gz");
+        assert_eq!(qrank["version"], "2026-10-11");
+        assert_eq!(qrank["supplier"]["name"], "Sascha Brawer");
+        assert_eq!(qrank["licenses"][0]["license"]["id"], "CC0-1.0");
+        assert_eq!(
+            qrank["hashes"][0]["content"],
+            "f478d9967d46b3cb7aa5bbf8c8625770b3de25d68e007ab42c4f9d5259709a0b"
+        );
+        assert_eq!(
+            qrank["purl"],
+            "pkg:generic/qrank@2026-10-11\
+             ?download_url=https://qrank.toolforge.org/download/qrank-20261011.csv.gz\
+             &checksum=sha256:f478d9967d46b3cb7aa5bbf8c8625770b3de25d68e007ab42c4f9d5259709a0b"
+        );
+        let qrank_bom = qrank["externalReferences"]
+            .as_array()
+            .expect("externalReferences")
+            .iter()
+            .find(|r| r["type"] == "bom")
+            .expect("a bom external reference");
+        assert_eq!(
+            qrank_bom["url"],
+            "https://qrank.toolforge.org/download/qrank-20261011.cdx.json"
+        );
+
+        let osmviews = &components[3];
+        assert_eq!(osmviews["bom-ref"], "osmviews.tiff");
+        assert_eq!(osmviews["version"], "2026-10-18");
+        assert_eq!(osmviews["licenses"][0]["license"]["id"], "CC0-1.0");
+        assert_eq!(
+            osmviews["data"][0]["contents"]["url"],
+            "https://osmviews.brawer.ch/data/osmviews-20261018.tiff"
+        );
+
         // Single-rooted dependency graph: conflated.parquet depends on
-        // both inputs, so neither shows up as an orphan root.
+        // every input, so none shows up as an orphan root.
         assert_eq!(bom["dependencies"][0]["ref"], "conflated.parquet");
         let depends_on = bom["dependencies"][0]["dependsOn"]
             .as_array()
@@ -525,7 +634,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             depends_on,
-            vec!["alltheplaces.zip", pipeline::PLANET_PBF_FILENAME]
+            vec![
+                "alltheplaces.zip",
+                pipeline::PLANET_PBF_FILENAME,
+                "qrank.csv.gz",
+                "osmviews.tiff"
+            ]
         );
 
         // None of the deliberately-dropped ATP/OSM fields (run-health
@@ -554,6 +668,8 @@ mod tests {
             "conflated.parquet",
             "alltheplaces.zip",
             pipeline::PLANET_PBF_FILENAME,
+            "qrank.csv.gz",
+            "osmviews.tiff",
         ];
         let workflow = &bom["formulation"][0]["workflows"][0];
         assert_eq!(workflow["uid"], "k8s-job-42");
@@ -564,6 +680,7 @@ mod tests {
         assert_eq!(workflow["timeStart"], "2026-03-04T15:16:17Z");
         assert_eq!(workflow["timeEnd"], bom["metadata"]["timestamp"]);
         assert_eq!(workflow["resourceReferences"][0]["ref"], "tool-osmdiffs");
+        assert_eq!(workflow["inputs"].as_array().expect("inputs").len(), 4);
         for input in workflow["inputs"].as_array().expect("inputs") {
             let r = input["resource"]["ref"].as_str().expect("ref");
             assert!(known_refs.contains(&r), "unknown bom-ref {r}");

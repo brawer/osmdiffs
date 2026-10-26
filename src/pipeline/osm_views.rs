@@ -16,8 +16,8 @@
 //! [`OsmViewsQuantiles`] maps any `rank()` value to its quantile among
 //! them, so the same scale works for OpenStreetMap features too.
 //!
-//! Not consumed by anything yet; see
-//! [brawer/osmdiffs#713](https://github.com/brawer/osmdiffs/issues/713).
+//! Used for the `importance` column of conflated.parquet; see
+//! [`super::importance`].
 
 use super::packaged::PackagedResource;
 use crate::places::PlaceReader;
@@ -106,14 +106,11 @@ fn write_ranks(ranks: &[f32], out: &Path) -> Result<()> {
 
 /// Maps an OSMViews `rank()` to its quantile among the locations of all
 /// AllThePlaces features, as stored by [`compute_osmviews_ranks`].
-// Used once the ranking signals are combined (#713).
-#[allow(dead_code)]
 pub struct OsmViewsQuantiles {
     /// Ascending.
     sorted: Vec<f32>,
 }
 
-#[allow(dead_code)]
 impl OsmViewsQuantiles {
     pub fn open(path: &Path) -> Result<OsmViewsQuantiles> {
         let mut data = Vec::new();
