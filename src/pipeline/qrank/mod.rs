@@ -14,10 +14,10 @@
 //! so against all of Wikidata every brand would end up in the bottom
 //! quantiles. Each brand counts once, however many stores it has.
 //!
-//! Not consumed by anything yet; see
-//! [brawer/osmdiffs#713](https://github.com/brawer/osmdiffs/issues/713).
+//! [`QRankQuantiles`] reads the result back, for the `importance`
+//! column of conflated.parquet; see [`super::importance`].
 
-use crate::matchers::parse_wikidata_id;
+use crate::matchers::{parse_wikidata_id, parse_wikidata_ids};
 use crate::tables::{BlobTable, U64Set};
 use anyhow::{Context, Result, bail};
 use flate2::read::MultiGzDecoder;
@@ -54,8 +54,12 @@ const QUANTILES_FILENAME: &str = "qrank-quantiles";
 /// `workdir/qrank-quantiles`: a [BlobTable] keyed by numeric Wikidata ID
 /// (42 for Q42), each value a little-endian `f32` in `(0, 1)`.
 ///
-/// Items that QRank doesn't list have no pageviews, and share the
-/// lowest quantile. Ties get the middle of the range they share (the
+/// Items that QRank doesn't list have no pageviews, and are left out
+/// altogether: many brands that the Name Suggestion Index links to
+/// have a Wikidata item but no Wikipedia article (Shell's fuel brand,
+/// Q110716465, is one), so having no pageviews says nothing about how
+/// well-known a brand is. Their features are ranked as if they had no
+/// brand. Ties get the middle of the range they share (the
 /// "mid-rank" quantile), so the result doesn't depend on how ties
 /// happen to be ordered: with `less` IDs viewed less than this one, and
 /// `same` IDs (including this one) viewed exactly as much, out of `n`,
@@ -73,7 +77,7 @@ pub fn compute_qrank_quantiles(
 
     let ids = U64Set::open(wikidata_ids)?;
     let (pageviews, rows) = read_pageviews(qrank, &ids)?;
-    let quantiles = quantiles(ids.iter().map(|id| (id, *pageviews.get(&id).unwrap_or(&0))));
+    let quantiles = quantiles(pageviews.iter().map(|(&id, &views)| (id, views)));
 
     BlobTable::create(
         quantiles
@@ -90,6 +94,43 @@ pub fn compute_qrank_quantiles(
         "compute_qrank_quantiles: done"
     );
     Ok(out)
+}
+
+/// The table that [`compute_qrank_quantiles`] writes, opened for
+/// lookups.
+pub struct QRankQuantiles<'a> {
+    table: BlobTable<'a>,
+}
+
+impl QRankQuantiles<'_> {
+    pub fn open(path: &Path) -> Result<Self> {
+        let table = BlobTable::open(path)?;
+        Ok(QRankQuantiles { table })
+    }
+
+    /// The quantile of Wikidata item `id`, or `None` if it isn't in
+    /// the reference population or has no pageviews.
+    pub fn get(&self, id: u64) -> Option<f32> {
+        let bytes = self.table.lookup(id)?;
+        Some(f32::from_le_bytes(bytes.try_into().ok()?))
+    }
+
+    /// The brand quantile of a feature with `tags`: the highest
+    /// quantile among the IDs in its `brand:wikidata`,
+    /// `operator:wikidata` and `network:wikidata` tags, or `None` if
+    /// it has none. The highest, because a franchise often carries both
+    /// a well-known brand and an obscure operator, and the brand is
+    /// what makes the place matter.
+    pub fn brand_quantile<'t>(
+        &self,
+        tags: impl IntoIterator<Item = (&'t str, &'t str)>,
+    ) -> Option<f32> {
+        tags.into_iter()
+            .filter(|(key, _)| super::wikidata_ids::is_wikidata_key(key))
+            .flat_map(|(_, value)| parse_wikidata_ids(value))
+            .filter_map(|id| self.get(id))
+            .reduce(f32::max)
+    }
 }
 
 /// Reads the pageview count of each ID in `ids` from `qrank`, and the
@@ -181,12 +222,13 @@ mod tests {
         // Q64 are not in our set of brands, so they must not count.
         write_qrank(
             &qrank,
-            "Entity,QRank\nQ64,900000\nQ42,500000\nQ37158,8000\nQ379911,300\nQ680727,300\n",
+            "Entity,QRank\nQ64,900000\nQ42,500000\nQ37158,8000\nQ379911,300\nQ680727,300\nQ2381223,100\n",
         )?;
         let ids_path = workdir.path().join("wikidata-ids");
-        // Starbucks, Denner, Migros, and an item without pageviews.
+        // Starbucks, Denner, Migros, MediaMarkt, and an item without
+        // pageviews.
         U64Set::create(
-            [37158, 379911, 680727, 116151325].into_iter(),
+            [37158, 379911, 680727, 2381223, 116151325].into_iter(),
             workdir.path(),
             &ids_path,
             crate::pipeline::EXTERNAL_SORT_CHUNK_BYTES,
@@ -195,16 +237,56 @@ mod tests {
         let out = compute_qrank_quantiles(&qrank, &ids_path, workdir.path())?;
         let table = BlobTable::open(&out)?;
         assert_eq!(table.len(), 4);
-        assert_eq!(quantile(&table, 116151325), Some(0.125));
+        assert_eq!(quantile(&table, 116151325), None);
+        assert_eq!(quantile(&table, 2381223), Some(0.125));
         assert_eq!(quantile(&table, 379911), Some(0.5));
         assert_eq!(quantile(&table, 680727), Some(0.5));
         assert_eq!(quantile(&table, 37158), Some(0.875));
         assert_eq!(quantile(&table, 42), None);
 
+        let q = QRankQuantiles::open(&out)?;
+        assert_eq!(q.get(37158), Some(0.875));
+        assert_eq!(q.get(42), None);
+
         // A second call reuses the file.
         let modified = std::fs::metadata(&out)?.modified()?;
         compute_qrank_quantiles(&qrank, &ids_path, workdir.path())?;
         assert_eq!(std::fs::metadata(&out)?.modified()?, modified);
+        Ok(())
+    }
+
+    #[test]
+    fn test_brand_quantile() -> Result<()> {
+        let workdir = TempDir::new()?;
+        let qrank = workdir.path().join("qrank.csv.gz");
+        write_qrank(&qrank, "Entity,QRank\nQ1,30\nQ2,20\nQ3,10\nQ5,5\n")?;
+        let ids_path = workdir.path().join("wikidata-ids");
+        U64Set::create(
+            [1, 2, 3, 4, 5].into_iter(),
+            workdir.path(),
+            &ids_path,
+            crate::pipeline::EXTERNAL_SORT_CHUNK_BYTES,
+        )?;
+        let q = QRankQuantiles::open(&compute_qrank_quantiles(&qrank, &ids_path, workdir.path())?)?;
+        // Q1 0.875, Q2 0.625, Q3 0.375, Q5 0.125; Q4 has no pageviews.
+
+        // The highest of several IDs and keys wins.
+        let tags = [
+            ("shop", "supermarket"),
+            ("operator:wikidata", "Q3"),
+            ("brand:wikidata", "Q4;Q2"),
+        ];
+        assert_eq!(q.brand_quantile(tags), Some(0.625));
+        assert_eq!(q.brand_quantile([("network:wikidata", "Q1")]), Some(0.875));
+        assert_eq!(q.brand_quantile([("brand:wikidata", "Q5")]), Some(0.125));
+        // Brands without pageviews count as no brand.
+        assert_eq!(q.brand_quantile([("brand:wikidata", "Q4")]), None);
+
+        // Plain `wikidata` tags, unknown IDs and junk don't count.
+        assert_eq!(q.brand_quantile([("wikidata", "Q1")]), None);
+        assert_eq!(q.brand_quantile([("brand:wikidata", "Q99")]), None);
+        assert_eq!(q.brand_quantile([("brand:wikidata", "junk")]), None);
+        assert_eq!(q.brand_quantile([]), None);
         Ok(())
     }
 

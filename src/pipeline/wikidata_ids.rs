@@ -3,7 +3,7 @@
 //! `brand:wikidata`, `operator:wikidata` and `network:wikidata` tags,
 //! and writes them to a [U64Set] on disk.
 //!
-//! Not consumed by anything yet. This set is the reference population
+//! This set is the reference population
 //! for ranking features by the importance of their brand
 //! ([brawer/osmdiffs#713](https://github.com/brawer/osmdiffs/issues/713)):
 //! a feature's brand gets the quantile of its QRank among the brands
@@ -36,7 +36,7 @@ const WIKIDATA_KEYS: [&str; 3] = ["brand:wikidata", "network:wikidata", "operato
 
 /// True for tag keys whose value(s) are the Wikidata IDs of a brand,
 /// operator or network.
-fn is_wikidata_key(key: &str) -> bool {
+pub(super) fn is_wikidata_key(key: &str) -> bool {
     WIKIDATA_KEYS.contains(&key)
 }
 

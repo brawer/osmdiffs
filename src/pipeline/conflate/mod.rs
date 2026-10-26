@@ -1,4 +1,5 @@
 use super::atp::nondescript::Signal;
+use super::importance::{Quantiles, Signals};
 use super::last_modified;
 use crate::{
     make_progress_bar,
@@ -33,23 +34,44 @@ mod writer;
 use s2_util::MergedCellRanges;
 use writer::{ParquetRow, ParquetWriter};
 
+/// The files that the `importance` column is computed from; see
+/// `pipeline::importance`.
+pub struct ImportanceInputs<'a> {
+    pub osmviews: &'a Path,
+    pub osmviews_ranks: &'a Path,
+    pub qrank_quantiles: &'a Path,
+}
+
 pub fn conflate(
     atp: &Path,
     osm: &OsmFeatures,
+    importance: &ImportanceInputs,
     progress: &MultiProgress,
     workdir: &Path,
     pipeline_run_id: &str,
 ) -> Result<PathBuf> {
     let nondescript_phones = Signal::Phone.path(workdir);
     let nondescript_emails = Signal::Email.path(workdir);
-    let input_modified =
-        last_modified(&[atp, &nondescript_phones, &nondescript_emails])?.max(osm.modified()?);
+    let input_modified = last_modified(&[
+        atp,
+        &nondescript_phones,
+        &nondescript_emails,
+        importance.osmviews,
+        importance.osmviews_ranks,
+        importance.qrank_quantiles,
+    ])?
+    .max(osm.modified()?);
     let out_path = workdir.join("conflated.parquet");
     if out_path.exists() && last_modified(&[&out_path])? >= input_modified {
         return Ok(out_path);
     }
 
     let nondescript = Nondescript::open(&nondescript_phones, &nondescript_emails)?;
+    let signals = Signals::open(
+        importance.osmviews,
+        importance.osmviews_ranks,
+        importance.qrank_quantiles,
+    )?;
     let atp_reader = PlaceReader::open(atp)?;
     let num_atp_features = atp_reader.total_rows() as u64;
     let producer_progress =
@@ -61,7 +83,14 @@ pub fn conflate(
     thread::scope(|s| {
         let (tx, rx) = sync_channel::<ParquetRow>(8192);
         s.spawn(|| {
-            producer_result = produce_rows(&atp_reader, osm, &nondescript, producer_progress, tx);
+            producer_result = produce_rows(
+                &atp_reader,
+                osm,
+                &nondescript,
+                &signals,
+                producer_progress,
+                tx,
+            );
         });
         s.spawn(|| {
             writer_result =
@@ -77,13 +106,15 @@ pub fn conflate(
 struct ConflatedFeature {
     atp: Option<Place>,
     osm: Option<Feature>,
-    // TODO: Signals for ranking.
+    /// See `pipeline::importance::score`.
+    score: f32,
 }
 
 fn produce_rows(
     atp_reader: &PlaceReader,
     osm: &OsmFeatures,
     nondescript: &Nondescript,
+    signals: &Signals,
     progress_bar: ProgressBar,
     out: SyncSender<ParquetRow>,
 ) -> Result<()> {
@@ -124,6 +155,7 @@ fn produce_rows(
             let mut conflated = ConflatedFeature {
                 atp: Some(atp.deep_clone()),
                 osm: None,
+                score: 0.0,
             };
             let mut best_score: f64 = 0.0;
             let covering = {
@@ -149,6 +181,16 @@ fn produce_rows(
                 }
             }
 
+            conflated.score = match &conflated.osm {
+                Some(feature) => {
+                    let candidate = OsmCandidate {
+                        feature,
+                        strings: &osm.strings,
+                    };
+                    signals.score(atp, candidate.tags())
+                }
+                None => signals.score(atp, std::iter::empty()),
+            };
             let row = ParquetRow::from_conflated(conflated, &osm.strings)?;
             out.send(row)?;
 
@@ -229,10 +271,18 @@ fn write_conflated(
                 EXTERNAL_SORT_CHUNK_BYTES as u64,
             ))
             .build()?;
+    // Every row's importance score, collected on the way into the sort:
+    // `importance` is a score's quantile among all of them, which is
+    // only known once every row has been produced.
+    let scores = std::sync::Mutex::new(Vec::new());
     let sorted = sorter.sort(cf.iter().map(|row| {
         progress.set_length(row_count.fetch_add(1, Ordering::SeqCst));
+        scores.lock().expect("scores lock").push(row.score());
         std::io::Result::Ok(row)
     }))?;
+    // `sort` has consumed every row by now. Taken rather than
+    // `into_inner`, since `sorted` still borrows `scores`.
+    let quantiles = Quantiles::new(std::mem::take(&mut *scores.lock().expect("scores lock")));
     progress.set_length(row_count.load(Ordering::SeqCst));
     let provenance_bom = crate::pipeline::provenance::build_bom_for_conflated_parquet(
         workdir,
@@ -244,7 +294,9 @@ fn write_conflated(
     let mut writer =
         ParquetWriter::create(out, /* max_rows_per_group */ 200_000, &provenance_bom)?;
     for row in sorted {
-        writer.write(row?)?;
+        let row = row?;
+        let importance = quantiles.get(row.score());
+        writer.write(row, importance)?;
         progress.inc(1);
     }
     writer.close()?;

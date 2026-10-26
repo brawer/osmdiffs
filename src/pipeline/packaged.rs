@@ -235,6 +235,18 @@ async fn write_meta_json(metadata: &PackagedMetadata, dest: &Path) -> Result<()>
     Ok(())
 }
 
+/// The metadata that [`fetch_packaged`] stored for `resource` in
+/// `workdir`, for the provenance BOM.
+pub(crate) fn read_cached_metadata(
+    resource: &PackagedResource,
+    workdir: &Path,
+) -> Result<PackagedMetadata> {
+    let path = workdir.join(resource.meta_filename);
+    let data = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    serde_json::from_str(&data).with_context(|| format!("Failed to parse {}", path.display()))
+}
+
 async fn read_meta_json(path: &Path) -> Result<PackagedMetadata> {
     let data = tokio::fs::read_to_string(path)
         .await

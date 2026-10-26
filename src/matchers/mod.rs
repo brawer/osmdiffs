@@ -116,7 +116,6 @@ impl MatchMask {
     /// signals for ranking features
     /// ([brawer/osmdiffs#713](https://github.com/brawer/osmdiffs/issues/713)),
     /// along with the location's and the brand's popularity.
-    #[allow(dead_code)] // Used by conflate in a follow-up change.
     pub fn importance(&self) -> f32 {
         if self.0 & Self::IMPORTANT.0 != 0 {
             return 1.0;

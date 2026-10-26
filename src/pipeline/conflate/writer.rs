@@ -2,8 +2,8 @@ use anyhow::{Context, Ok, Result};
 use arrow::array::{
     ArrayRef, RecordBatch, StructArray,
     builder::{
-        BinaryBuilder, ListBuilder, MapBuilder, MapFieldNames, StringBuilder, StructBuilder,
-        TimestampMillisecondBuilder, UInt32Builder, UInt64Builder,
+        BinaryBuilder, Float32Builder, ListBuilder, MapBuilder, MapFieldNames, StringBuilder,
+        StructBuilder, TimestampMillisecondBuilder, UInt32Builder, UInt64Builder,
     },
 };
 use arrow_buffer::builder::NullBufferBuilder;
@@ -71,6 +71,8 @@ pub struct ParquetWriter {
     osm_geometries: BinaryBuilder,
     // See `atp_geometry_tally` above.
     osm_geometry_tally: GeometryTally,
+
+    importance: Float32Builder,
 }
 
 /// A single row in the conflated parquet file.
@@ -110,6 +112,11 @@ pub struct ParquetRow {
     atp_fetched: Option<UtcTimestamp>,
     atp_tags: Vec<(String, String)>,
     atp_shape_wkb: Vec<u8>,
+
+    /// Internal, like `s2_cell_id`: the published `importance` is this
+    /// score's quantile among all rows, which the writer computes once
+    /// every row is known. See `pipeline::importance`.
+    score: f32,
 }
 
 /// Key under which the CycloneDX provenance BOM (see `pipeline::provenance`)
@@ -220,6 +227,8 @@ impl ParquetWriter {
                 /* data_capacity */ max_rows_per_group * 21,
             ),
             osm_geometry_tally: GeometryTally::default(),
+
+            importance: Float32Builder::with_capacity(max_rows_per_group),
         })
     }
 
@@ -270,7 +279,9 @@ impl ParquetWriter {
         )
     }
 
-    pub fn write(&mut self, row: ParquetRow) -> Result<()> {
+    /// Appends `row`, whose published `importance` (see
+    /// `pipeline::importance`) is `importance`.
+    pub fn write(&mut self, row: ParquetRow, importance: f32) -> Result<()> {
         let row_s2_cell_id = row.s2_cell_id.get();
         assert!(row_s2_cell_id >= self.last_s2_cell_id);
         self.last_s2_cell_id = row_s2_cell_id;
@@ -387,6 +398,7 @@ impl ParquetWriter {
             self.osm_geometries.append_null();
         }
 
+        self.importance.append_value(importance);
         self.rows_in_group += 1;
         Ok(())
     }
@@ -557,6 +569,7 @@ impl ParquetWriter {
                 Arc::new(atp_geometry) as ArrayRef,
                 Arc::new(osm_struct) as ArrayRef,
                 Arc::new(osm_geometry) as ArrayRef,
+                Arc::new(self.importance.finish()) as ArrayRef,
             ],
         )?;
 
@@ -591,6 +604,7 @@ impl ParquetRow {
     ) -> Result<ParquetRow> {
         let atp = cf.atp;
         let osm = cf.osm;
+        let score = cf.score;
 
         // Internal sort key. Almost always available for free from `atp`
         // -- `produce_rows` only ever calls this with `atp: Some(..)`,
@@ -717,7 +731,12 @@ impl ParquetRow {
             osm_way_members,
             osm_relation_members,
             osm_shape_wkb,
+            score,
         })
+    }
+
+    pub(super) fn score(&self) -> f32 {
+        self.score
     }
 }
 
@@ -818,7 +837,11 @@ mod schema {
         );
         let osm_geometry = new_geo_field("osm_geometry", NULLABLE);
 
-        Schema::new(vec![atp, atp_geometry, osm, osm_geometry])
+        // How much this feature matters to map users, from 0.0 to 1.0;
+        // see `pipeline::importance`.
+        let importance = Field::new("importance", DataType::Float32, NOT_NULLABLE);
+
+        Schema::new(vec![atp, atp_geometry, osm, osm_geometry, importance])
     }
 
     /// Fields of one `osm.relation_members` list entry: the member's own
@@ -906,6 +929,7 @@ mod tests {
         ConflatedFeature {
             atp: Some(atp),
             osm: Some(osm),
+            score: 0.0,
         }
     }
 
