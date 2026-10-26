@@ -11,9 +11,12 @@
 //! `crate::edit_suggesters::EditSuggester` what to change for each
 //! already-matched pair.
 
+use super::tiles::round_importance;
 use crate::edit_suggesters::create_edit_suggester;
 use crate::pipeline::EXTERNAL_SORT_CHUNK_BYTES;
-use crate::utils::parquet::{get_binary, get_string, get_struct, get_tags, get_u32, get_u64};
+use crate::utils::parquet::{
+    get_binary, get_f32, get_string, get_struct, get_tags, get_u32, get_u64,
+};
 use crate::{TileLayer, make_progress_bar};
 use anyhow::{Context, Result};
 use arrow::array::{Array, RecordBatch};
@@ -55,6 +58,8 @@ pub struct SuggestedEdit {
     /// down; revisit once tile layers are known to handle non-point
     /// geometry the way this pipeline needs.
     centroid: (f64, f64),
+    /// The conflated row's `importance`; see `pipeline::importance`.
+    importance: f32,
 }
 
 impl PartialEq for SuggestedEdit {
@@ -89,6 +94,12 @@ impl SuggestedEdit {
         properties.insert(
             String::from("@osm_version"),
             serde_json::Value::from(self.osm_version),
+        );
+        // Lets tippecanoe show the most important edits at coarse
+        // zooms; see `tiles::importance_filter`.
+        properties.insert(
+            String::from("@importance"),
+            serde_json::Value::from(round_importance(self.importance)),
         );
 
         geojson::Feature {
@@ -182,6 +193,7 @@ struct ConflatedRow {
     osm_tags: Vec<(String, String)>,
     osm_version: u32,
     osm_geometry_wkb: Vec<u8>,
+    importance: f32,
 }
 
 fn produce_edits(
@@ -211,6 +223,7 @@ fn produce_edits(
                 osm_version: row.osm_version,
                 tags,
                 centroid: decode_centroid(&row.osm_geometry_wkb)?,
+                importance: row.importance,
             };
             num_edits.fetch_add(1, Ordering::Relaxed);
             // TODO: Dispatch to one of {shops, infrastructure, trees}
@@ -283,6 +296,7 @@ fn extract_conflated_row(batch: &RecordBatch, row: usize) -> Result<Option<Confl
         // geometry columns to live at the schema root (see
         // `pipeline::conflate::writer::GEO_METADATA_KEY`'s doc comment).
         osm_geometry_wkb: get_binary(batch, "osm_geometry", row)?,
+        importance: get_f32(batch, "importance", row)?,
     }))
 }
 
@@ -327,4 +341,24 @@ fn write_edits(edits: Receiver<SuggestedEdit>, path: &Path, workdir: &Path) -> R
     rename(&tmp_path, path)?;
 
     Ok(num_edits.load(Ordering::SeqCst))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_geojson_carries_rounded_importance() {
+        let edit = SuggestedEdit {
+            osm_id: 42,
+            osm_type: "node".to_string(),
+            osm_version: 3,
+            tags: vec![("opening_hours".to_string(), "Mo-Fr 08:00-18:00".to_string())],
+            centroid: (8.5, 47.2),
+            importance: 0.4567,
+        };
+        let value = serde_json::to_value(edit.to_geojson()).expect("json");
+        assert_eq!(value["properties"]["@importance"], 0.46);
+        assert_eq!(value["properties"]["@osm_version"], 3);
+    }
 }

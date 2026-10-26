@@ -24,12 +24,60 @@ pub enum ZoomRange {
     Bounded { min: u8, max: u8 },
 }
 
+/// Share of features, by `importance` (see `pipeline::importance`),
+/// that tiles show at z0. Each zoom level above that shows four times
+/// as many (a tile splits into four, so features per tile stay about
+/// the same), until every feature is shown from [`ALL_FEATURES_ZOOM`]
+/// on. On a planet of ~4M conflated rows, 1% is ~40k features, about
+/// what fits into z0 today.
+const TOP_SHARE_AT_Z0: f64 = 0.01;
+
+/// From this zoom level on, tiles show features of any importance.
+const ALL_FEATURES_ZOOM: u8 = 4;
+
+/// Rounds `importance` to two decimals for writing it into tiles, so a
+/// tile holds at most 101 distinct values of it.
+pub(crate) fn round_importance(importance: f32) -> f64 {
+    (f64::from(importance) * 100.0).round() / 100.0
+}
+
+/// The lowest (rounded) importance that tiles show at `zoom`: 0.99 at
+/// z0, 0.96 at z1, 0.84 at z2, 0.36 at z3.
+fn min_importance_at_zoom(zoom: u8) -> f64 {
+    let share = TOP_SHARE_AT_Z0 * 4f64.powi(i32::from(zoom));
+    ((1.0 - share) * 100.0).round() / 100.0
+}
+
+/// A tippecanoe feature filter (`-j`) so that coarse zooms show the
+/// most important places, rather than whatever survives density-based
+/// dropping ([#713](https://github.com/brawer/osmdiffs/issues/713)).
+/// `attr` names the feature property holding the rounded importance.
+///
+/// A filter rather than a per-feature `"tippecanoe": {"minzoom": N}`,
+/// because with tippecanoe v2.49 the latter made it drop nearly all
+/// features at every zoom (2 of 1,436 at z0 in a Swiss test run).
+fn importance_filter(attr: &str) -> String {
+    let mut any = vec![
+        serde_json::json!("any"),
+        serde_json::json!([">=", "$zoom", ALL_FEATURES_ZOOM]),
+    ];
+    for zoom in 0..ALL_FEATURES_ZOOM {
+        any.push(serde_json::json!([
+            "all",
+            [">=", "$zoom", zoom],
+            [">=", attr, min_importance_at_zoom(zoom)]
+        ]));
+    }
+    serde_json::json!({ "*": any }).to_string()
+}
+
 pub fn render_tiles(
     layers: &[TileLayer],
     progress: &MultiProgress,
     workdir: &Path,
     out_filename: &str,
     zoom_range: ZoomRange,
+    importance_attr: Option<&str>,
 ) -> Result<PathBuf> {
     let out_path = workdir.join(out_filename);
     if out_path.exists() {
@@ -45,7 +93,7 @@ pub fn render_tiles(
 
     let progress_bar = make_progress_bar(progress, "tiles.render", 100, "percent");
 
-    let mut cmd = make_tippecanoe_command(layers, workdir, &tmp_path, zoom_range)?;
+    let mut cmd = make_tippecanoe_command(layers, workdir, &tmp_path, zoom_range, importance_attr)?;
     let mut child = cmd.stderr(Stdio::piped()).spawn()?;
     let stderr = child.stderr.take().expect("Failed to capture stderr");
     let stderr_reader = BufReader::new(stderr);
@@ -72,6 +120,7 @@ fn make_tippecanoe_command(
     workdir: &Path,
     out_path: &Path,
     zoom_range: ZoomRange,
+    importance_attr: Option<&str>,
 ) -> Result<Command> {
     let mut cmd = Command::new("tippecanoe");
     // Clear all environment variables, so we don't leak secrets to an untrusted subprocess.
@@ -90,7 +139,21 @@ fn make_tippecanoe_command(
             cmd.arg(format!("-Z{min}")).arg(format!("-z{max}"));
         }
     }
-    cmd.arg("-r").arg("1.2").arg("--drop-densest-as-needed");
+    match importance_attr {
+        // Importance decides what coarse zooms show, so no additional
+        // random dot-dropping; `--drop-densest-as-needed` still thins
+        // out any tile that would otherwise be too large.
+        Some(attr) => {
+            cmd.arg("-r")
+                .arg("1")
+                .arg("-j")
+                .arg(importance_filter(attr));
+        }
+        None => {
+            cmd.arg("-r").arg("1.2");
+        }
+    }
+    cmd.arg("--drop-densest-as-needed");
     for layer in layers.iter() {
         // Suppress empty layers; Tippecanoe fails if any input file is empty.
         let metadata = std::fs::metadata(&layer.path)?;
@@ -175,6 +238,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_round_importance() {
+        assert_eq!(round_importance(0.98765), 0.99);
+        assert_eq!(round_importance(0.4567), 0.46);
+        assert_eq!(round_importance(0.0), 0.0);
+        assert_eq!(round_importance(1.0), 1.0);
+    }
+
+    #[test]
+    fn test_min_importance_at_zoom() {
+        let got: Vec<f64> = (0..ALL_FEATURES_ZOOM).map(min_importance_at_zoom).collect();
+        assert_eq!(got, [0.99, 0.96, 0.84, 0.36]);
+    }
+
+    #[test]
+    fn test_importance_filter() {
+        let filter: serde_json::Value =
+            serde_json::from_str(&importance_filter("imp")).expect("valid JSON");
+        assert_eq!(
+            filter,
+            serde_json::json!({"*": [
+                "any",
+                [">=", "$zoom", 4],
+                ["all", [">=", "$zoom", 0], [">=", "imp", 0.99]],
+                ["all", [">=", "$zoom", 1], [">=", "imp", 0.96]],
+                ["all", [">=", "$zoom", 2], [">=", "imp", 0.84]],
+                ["all", [">=", "$zoom", 3], [">=", "imp", 0.36]],
+            ]})
+        );
+    }
+
+    #[test]
+    fn test_make_tippecanoe_command_importance_filter() {
+        let layers = [make_test_tile_layer("Shops", "diffed-shops.jsonl")];
+        let cmd = make_tippecanoe_command(
+            &layers,
+            &PathBuf::from("test-workdir"),
+            &PathBuf::from("test-output.pmtiles"),
+            ZoomRange::Auto,
+            Some("@importance"),
+        )
+        .expect("should not fail");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let r = args.iter().position(|a| a == "-r").expect("-r");
+        assert_eq!(args[r + 1], "1");
+        let j = args.iter().position(|a| a == "-j").expect("-j");
+        assert_eq!(args[j + 1], importance_filter("@importance"));
+        assert!(args.iter().any(|a| a == "--drop-densest-as-needed"));
+    }
+
+    #[test]
     fn test_make_tippecanoe_command_auto_zoom() {
         let layers = [
             // Empty input file, expected to be suppressed from arguments.
@@ -183,7 +299,7 @@ mod tests {
         ];
         let workdir = PathBuf::from("test-workdir");
         let out = PathBuf::from("test-output.pmtiles");
-        let cmd = make_tippecanoe_command(&layers, &workdir, &out, ZoomRange::Auto)
+        let cmd = make_tippecanoe_command(&layers, &workdir, &out, ZoomRange::Auto, None)
             .expect("should not fail");
         assert_eq!(cmd.get_program(), "tippecanoe");
         let args: Vec<String> = cmd
@@ -222,6 +338,7 @@ mod tests {
             &workdir,
             &out,
             ZoomRange::Bounded { min: 13, max: 16 },
+            None,
         )
         .expect("should not fail");
         let args: Vec<String> = cmd

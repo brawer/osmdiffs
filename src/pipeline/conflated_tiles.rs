@@ -44,7 +44,8 @@
 //! [#775](https://github.com/brawer/osmdiffs/issues/775) for
 //! the full design discussion.
 
-use crate::utils::parquet::{get_binary, get_string, get_struct, get_tags, get_u64};
+use super::tiles::round_importance;
+use crate::utils::parquet::{get_binary, get_f32, get_string, get_struct, get_tags, get_u64};
 use crate::{TileLayer, make_progress_bar};
 use anyhow::{Context, Result};
 use arrow::array::{Array, RecordBatch};
@@ -153,6 +154,8 @@ pub struct ConflatedLayers {
 /// skipped entirely, the same defensive handling `edits.rs` applies.
 struct ConflatedTileRow {
     spider: String,
+    /// See `pipeline::importance`.
+    importance: f32,
     atp_tags: Vec<(String, String)>,
     atp_geometry_wkb: Vec<u8>,
     osm: Option<OsmSide>,
@@ -179,12 +182,10 @@ impl ConflatedTileRow {
     /// the z13+ detail layer ([`Self::to_detail_geojson_lines`] /
     /// [`Self::to_unmatched_detail_geojson_line`]).
     ///
-    /// TODO(#713): once conflated.parquet carries a per-row rank/
-    /// importance signal, this is the natural place to also emit it
-    /// as a feature property (or otherwise feed it to tippecanoe),
-    /// so --drop-densest-as-needed can prefer important places over
-    /// low-priority ones at low zoom instead of today's
-    /// density-only heuristic.
+    /// Also carries the row's `importance`, rounded to two decimals so
+    /// that it costs the tile at most 101 distinct values, which the
+    /// overview's tippecanoe filter uses to show the most important
+    /// places at low zooms (see `tiles::importance_filter`).
     fn to_overview_geojson_line(&self) -> Result<String> {
         let geometry_wkb: &[u8] = match &self.osm {
             Some(osm) => &osm.osm_geometry_wkb,
@@ -199,6 +200,10 @@ impl ConflatedTileRow {
             properties.insert("osm:type".to_string(), Value::String(osm.osm_type.clone()));
             properties.insert("osm:id".to_string(), Value::from(osm.osm_id));
         }
+        properties.insert(
+            "importance".to_string(),
+            Value::from(round_importance(self.importance)),
+        );
         geometry_to_geojson_line(&geometry, properties)
     }
 
@@ -561,6 +566,7 @@ fn extract_conflated_tile_row(batch: &RecordBatch, row: usize) -> Result<Option<
 
     Ok(Some(ConflatedTileRow {
         spider: get_string(fetched, "spider", row)?,
+        importance: get_f32(batch, "importance", row)?,
         atp_tags: get_tags(atp, "tags", row)?,
         atp_geometry_wkb: get_binary(batch, "atp_geometry", row)?,
         osm,
@@ -629,6 +635,7 @@ mod tests {
     fn overview_unmatched_row_is_the_atp_point_with_no_tags() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            importance: 0.5,
             atp_tags: vec![("shop".to_string(), "bakery".to_string())],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: None,
@@ -654,6 +661,7 @@ mod tests {
     fn overview_matched_row_is_the_osm_shape_with_only_the_osm_id() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            importance: 0.5,
             atp_tags: vec![("shop".to_string(), "bakery".to_string())],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: Some(OsmSide {
@@ -684,9 +692,30 @@ mod tests {
     }
 
     #[test]
+    fn overview_carries_rounded_importance() {
+        let row = ConflatedTileRow {
+            spider: "acme".to_string(),
+            importance: 0.98765,
+            atp_tags: vec![],
+            atp_geometry_wkb: encode_point(8.5, 47.2),
+            osm: None,
+        };
+        let value = parse(&row.to_overview_geojson_line().expect("overview line"));
+        assert_eq!(value["properties"]["importance"], 0.99);
+
+        // The detail features don't: at z13+ every row is shown.
+        let detail = parse(
+            &row.to_unmatched_detail_geojson_line(7)
+                .expect("detail line"),
+        );
+        assert!(detail["properties"].get("importance").is_none());
+    }
+
+    #[test]
     fn overview_geometry_coordinates_are_rounded_to_seven_decimal_places() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            importance: 0.5,
             atp_tags: vec![],
             atp_geometry_wkb: encode_point(8.123_456_789, 47.987_654_321),
             osm: None,
@@ -713,6 +742,7 @@ mod tests {
     fn matched_detail_features_carry_their_own_tags_and_a_shared_fid() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            importance: 0.5,
             atp_tags: vec![("name".to_string(), "Acme ATP".to_string())],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: None, // unused; osm side passed explicitly below
@@ -763,6 +793,7 @@ mod tests {
     fn matched_detail_omits_the_connector_when_offset_is_below_threshold() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            importance: 0.5,
             atp_tags: vec![],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: None,
@@ -790,6 +821,7 @@ mod tests {
     fn unmatched_detail_is_a_single_full_tag_atp_point() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            importance: 0.5,
             atp_tags: vec![
                 ("name".to_string(), "Acme Foods".to_string()),
                 ("addr:city".to_string(), "Zürich".to_string()),

@@ -515,6 +515,10 @@ fn assert_shops_jsonl(path: &Path) -> Result<()> {
             feature["properties"].get("@osm_changeset").is_none(),
             "feature should not carry @osm_changeset: {feature}"
         );
+        let importance = feature["properties"]["@importance"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("feature has no @importance: {feature}"));
+        assert!((0.0..=1.0).contains(&importance), "{feature}");
     }
 
     // One specific, known edit: this OSM feature's opening_hours and

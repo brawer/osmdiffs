@@ -48,8 +48,17 @@ against a full planet: full tags → ~370 features visible at z0; `+fid`
 
 Geometry is `osm_geometry` (the matched OpenStreetMap shape — point,
 line, or polygon) for `matched` rows, `atp_geometry` for `unmatched`.
-Properties: `spider`, `matched`, and — `matched` rows only — `osm:type`
-/ `osm:id`. To see a row's tags, click through to the detail layer
+Properties: `spider`, `matched`, `importance`, and — `matched` rows
+only — `osm:type` / `osm:id`.
+
+Coarse zooms show the most important rows, by their
+[`importance`](CONFLATED_PARQUET.md#importance): the top 1% at z0
+(`importance >= 0.99`), 4% at z1 (`>= 0.96`), 16% at z2 (`>= 0.84`),
+64% at z3 (`>= 0.36`), and every row from z4 on. Each zoom shows four
+times as many as the one before, since a tile splits into four, so a
+tile holds about as many features at every zoom. Where a tile would
+still be too large, tippecanoe's `--drop-densest-as-needed` thins it
+out further. To see a row's tags, click through to the detail layer
 (below): `matched` rows join on `osm:type`+`osm:id`, `unmatched` rows
 on nearest `part: "atp"` feature of the same `spider`.
 
@@ -95,6 +104,8 @@ for the full investigation.
   `atp.fetched.spider` in `conflated.parquet`). On every feature.
 - `matched` (`true` | `false`) — overview features only; the detail
   layer conveys the same thing through its layer name and `part`.
+- `importance` — the row's `importance` from `conflated.parquet`,
+  rounded to two decimals. Overview features only.
 - `osm:type`, `osm:id` — the matched OpenStreetMap object. On the
   `matched` overview feature (where they double as the join key to the
   detail layer) and the z13–16 `osm`/`link` detail features.
