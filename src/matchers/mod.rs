@@ -44,6 +44,15 @@ const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
 ///
 /// assert_eq!(!shop.intersects(bench), false);
 /// ```
+///
+/// Bits come in two kinds. *Category* bits (`SHOP`, `RESTAURANT`, ...,
+/// `SHRUBBERY`) say what kind of thing a feature is, and two features
+/// can only match if they share one. *Modifier* bits (`LARGE`,
+/// `IMPORTANT`) say something about a feature on top of its category:
+/// how far away a match may be ([match_distance]), or how much it
+/// matters ([MatchMask::importance]). Modifier bits never make two
+/// features match candidates, so a railway platform and a camp site,
+/// both `LARGE`, don't match each other.
 #[derive(
     Clone, Copy, Debug, DeepSizeOf, Default, Deserialize, PartialEq, Eq, Ord, PartialOrd, Serialize,
 )]
@@ -61,11 +70,63 @@ impl MatchMask {
     pub const SHRUBBERY: MatchMask = MatchMask(1 << 7);
     pub const STREET_FURNITURE: MatchMask = MatchMask(1 << 8);
 
-    /// To compute match_distance for large objects such as railway platforms.
+    /// Modifier bit: large objects such as railway platforms, which
+    /// get a longer [match_distance].
     const LARGE: MatchMask = MatchMask(1 << 9);
 
+    /// Modifier bit: places that matter a lot to map users whatever
+    /// their category, such as defibrillators or hospitals. Raises
+    /// [MatchMask::importance].
+    const IMPORTANT: MatchMask = MatchMask(1 << 10);
+
+    /// The category bits; see the type's documentation.
+    const CATEGORY_BITS: u16 = Self::SHOP.0
+        | Self::RESTAURANT.0
+        | Self::LODGING.0
+        | Self::SCHOOL.0
+        | Self::TRANSIT.0
+        | Self::PARKING.0
+        | Self::FUEL.0
+        | Self::SHRUBBERY.0
+        | Self::STREET_FURNITURE.0;
+
+    /// The importance of each category bit, for [MatchMask::importance].
+    const CATEGORY_IMPORTANCE: [(MatchMask, f32); 9] = [
+        (Self::SCHOOL, 0.8),
+        (Self::TRANSIT, 0.8),
+        (Self::SHOP, 0.7),
+        (Self::RESTAURANT, 0.7),
+        (Self::LODGING, 0.7),
+        (Self::FUEL, 0.6),
+        (Self::PARKING, 0.4),
+        (Self::STREET_FURNITURE, 0.2),
+        (Self::SHRUBBERY, 0.1),
+    ];
+
+    /// True if no category bit is set, i.e. the feature can't match
+    /// anything. Modifier bits alone don't count.
     pub fn is_empty(&self) -> bool {
-        self.0 == 0
+        self.0 & Self::CATEGORY_BITS == 0
+    }
+
+    /// How much a feature with this mask matters to map users, judged by
+    /// its kind alone, from 0.0 to 1.0: 1.0 if `IMPORTANT` is set,
+    /// otherwise the highest importance among its category bits, or 0.3
+    /// if it has none. Deliberately coarse; it is one of several
+    /// signals for ranking features
+    /// ([brawer/osmdiffs#713](https://github.com/brawer/osmdiffs/issues/713)),
+    /// along with the location's and the brand's popularity.
+    #[allow(dead_code)] // Used by conflate in a follow-up change.
+    pub fn importance(&self) -> f32 {
+        if self.0 & Self::IMPORTANT.0 != 0 {
+            return 1.0;
+        }
+        Self::CATEGORY_IMPORTANCE
+            .iter()
+            .filter(|(bit, _)| self.0 & bit.0 != 0)
+            .map(|&(_, importance)| importance)
+            .reduce(f32::max)
+            .unwrap_or(0.3)
     }
 
     pub fn add_tag(&mut self, key: &str, value: &str) {
@@ -86,7 +147,7 @@ impl MatchMask {
             ("amenity", "cafe") => Self::RESTAURANT.0,
             ("amenity", "car_rental") => Self::SHOP.0,
             ("amenity", "cinema") => Self::SHOP.0,
-            ("amenity", "clinic") => Self::SHOP.0,
+            ("amenity", "clinic") => Self::SHOP.0 | Self::IMPORTANT.0,
             ("amenity", "college") => Self::SCHOOL.0,
             ("amenity", "childcare") => Self::SCHOOL.0,
             ("amenity", "dentist") => Self::SHOP.0,
@@ -96,10 +157,12 @@ impl MatchMask {
             ("amenity", "charging_station") => Self::FUEL.0,
             ("amenity", "ferry_terminal") => Self::TRANSIT.0,
             ("amenity", "fast_food") => Self::RESTAURANT.0,
+            ("amenity", "fire_station") => Self::SHOP.0 | Self::IMPORTANT.0,
             ("amenity", "food_court") => Self::RESTAURANT.0,
             ("amenity", "fountain") => Self::STREET_FURNITURE.0,
             ("amenity", "fuel") => Self::FUEL.0,
             ("amenity", "grit_bin") => Self::STREET_FURNITURE.0,
+            ("amenity", "hospital") => Self::SHOP.0 | Self::IMPORTANT.0,
             ("amenity", "ice_cream") => Self::SHOP.0,
             ("amenity", "kindergarten") => Self::SCHOOL.0,
             ("amenity", "letter_box") => Self::STREET_FURNITURE.0,
@@ -108,8 +171,9 @@ impl MatchMask {
             ("amenity", "motorcycle_parking") => Self::PARKING.0,
             ("amenity", "nightclub") => Self::SHOP.0,
             ("amenity", "parking") => Self::PARKING.0,
-            ("amenity", "pharmacy") => Self::SHOP.0,
+            ("amenity", "pharmacy") => Self::SHOP.0 | Self::IMPORTANT.0,
             ("amenity", "place_of_worship") => Self::SHOP.0,
+            ("amenity", "police") => Self::SHOP.0 | Self::IMPORTANT.0,
             ("amenity", "post_box") => Self::STREET_FURNITURE.0,
             ("amenity", "post_office") => Self::SHOP.0,
             ("amenity", "public_bookcase") => Self::STREET_FURNITURE.0,
@@ -137,12 +201,13 @@ impl MatchMask {
             ("bicycle_rental", "shop") => Self::SHOP.0,
 
             ("healthcare", "no") => 0,
+            ("healthcare", "clinic" | "hospital" | "pharmacy") => Self::SHOP.0 | Self::IMPORTANT.0,
             ("healthcare", _) => Self::SHOP.0,
 
             ("emergency", "acess_point") => Self::STREET_FURNITURE.0,
             ("emergency", "assembly_point") => Self::STREET_FURNITURE.0,
             ("emergency", "bleed_control_kit") => Self::STREET_FURNITURE.0,
-            ("emergency", "defibrillator") => Self::STREET_FURNITURE.0,
+            ("emergency", "defibrillator") => Self::STREET_FURNITURE.0 | Self::IMPORTANT.0,
             ("emergency", "disaster_help_point") => Self::STREET_FURNITURE.0,
             ("emergency", "fire_alarm_box") => Self::STREET_FURNITURE.0,
             ("emergency", "fire_hydrant") => Self::STREET_FURNITURE.0,
@@ -234,9 +299,11 @@ impl MatchMask {
         }
     }
 
+    /// True if `self` and `other` share a category bit, i.e. features
+    /// with these masks may match. Modifier bits are ignored.
     #[inline]
     pub fn intersects(&self, other: &Self) -> bool {
-        (self.0 & other.0) != 0
+        (self.0 & other.0 & Self::CATEGORY_BITS) != 0
     }
 }
 
@@ -253,10 +320,11 @@ impl MatchMask {
 /// but as an equivalent ChordAngle of the S2 spherical geometry library.
 pub fn match_distance(mask: &MatchMask) -> ChordAngle {
     const SMALL_BITS: u16 = MatchMask::SHRUBBERY.0 | MatchMask::STREET_FURNITURE.0;
-    let has_only_small_bits = (mask.0 & SMALL_BITS) == mask.0 && (mask.0 & SMALL_BITS) != 0;
+    let categories = mask.0 & MatchMask::CATEGORY_BITS;
+    let has_only_small_bits = (categories & SMALL_BITS) == categories && categories != 0;
     if has_only_small_bits {
         *SMALL_DISTANCE
-    } else if mask.intersects(&MatchMask::LARGE) {
+    } else if mask.0 & MatchMask::LARGE.0 != 0 {
         *LARGE_DISTANCE
     } else {
         *MEDIUM_DISTANCE
@@ -402,6 +470,72 @@ mod tests {
         rental_shop.add_tag("bicycle_rental", "shop");
         assert!(rental_shop.intersects(&MatchMask::SHOP));
         assert!(match_distance(&rental_shop) == match_distance(&MatchMask::SHOP));
+    }
+
+    fn mask(tags: &[(&str, &str)]) -> MatchMask {
+        let mut mask = MatchMask::default();
+        for (key, value) in tags {
+            mask.add_tag(key, value);
+        }
+        mask
+    }
+
+    #[test]
+    fn test_modifier_bits_dont_match() {
+        let platform = mask(&[("railway", "platform")]);
+        let camp_site = mask(&[("tourism", "camp_site")]);
+        assert!(!platform.intersects(&camp_site));
+        assert!(platform.intersects(&MatchMask::TRANSIT));
+
+        let aed = mask(&[("emergency", "defibrillator")]);
+        let hospital = mask(&[("amenity", "hospital")]);
+        assert!(!aed.intersects(&hospital));
+        assert!(aed.intersects(&mask(&[("emergency", "fire_hydrant")])));
+        assert!(hospital.intersects(&MatchMask::SHOP));
+    }
+
+    #[test]
+    fn test_is_empty() {
+        assert!(MatchMask::default().is_empty());
+        assert!(MatchMask::LARGE.is_empty());
+        assert!(MatchMask::IMPORTANT.is_empty());
+        assert!(!mask(&[("emergency", "defibrillator")]).is_empty());
+    }
+
+    #[test]
+    fn test_match_distance_ignores_modifiers() {
+        // An AED is still small street furniture for matching.
+        let aed = mask(&[("emergency", "defibrillator")]);
+        assert!(match_distance(&aed) == match_distance(&MatchMask::STREET_FURNITURE));
+        let hospital = mask(&[("amenity", "hospital")]);
+        assert!(match_distance(&hospital) == match_distance(&MatchMask::SHOP));
+        let platform = mask(&[("public_transport", "platform")]);
+        assert!(match_distance(&platform) > match_distance(&MatchMask::TRANSIT));
+    }
+
+    #[test]
+    fn test_importance() {
+        let importance = |tags: &[(&str, &str)]| mask(tags).importance();
+        assert_eq!(importance(&[("emergency", "defibrillator")]), 1.0);
+        assert_eq!(importance(&[("amenity", "hospital")]), 1.0);
+        assert_eq!(importance(&[("healthcare", "hospital")]), 1.0);
+        assert_eq!(importance(&[("amenity", "pharmacy")]), 1.0);
+        assert_eq!(importance(&[("amenity", "school")]), 0.8);
+        assert_eq!(importance(&[("highway", "bus_stop")]), 0.8);
+        assert_eq!(importance(&[("shop", "bakery")]), 0.7);
+        assert_eq!(importance(&[("healthcare", "dentist")]), 0.7);
+        assert_eq!(importance(&[("amenity", "fuel")]), 0.6);
+        assert_eq!(importance(&[("amenity", "parking")]), 0.4);
+        assert_eq!(importance(&[("name", "Unknown")]), 0.3);
+        assert_eq!(importance(&[("amenity", "bench")]), 0.2);
+        assert_eq!(importance(&[("natural", "tree")]), 0.1);
+        // The highest category wins.
+        assert_eq!(importance(&[("shop", "yes"), ("amenity", "fuel")]), 0.7);
+        // Every category bit has an importance.
+        let listed = MatchMask::CATEGORY_IMPORTANCE
+            .iter()
+            .fold(0, |bits, (bit, _)| bits | bit.0);
+        assert_eq!(listed, MatchMask::CATEGORY_BITS);
     }
 
     const WKB_OPTS: WriteOptions = WriteOptions {
