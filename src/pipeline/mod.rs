@@ -311,6 +311,7 @@ fn run_pipeline_steps(
                 min: 0,
                 max: conflated_tiles::DETAIL_MIN_ZOOM - 1,
             },
+            Some("importance"),
         )
     })?;
     let conflated_detail = run_step("render_conflated_detail", || {
@@ -326,6 +327,7 @@ fn run_pipeline_steps(
                 min: conflated_tiles::DETAIL_MIN_ZOOM,
                 max: conflated_tiles::DETAIL_MAX_ZOOM,
             },
+            None,
         )
     })?;
     let conflated_tiles_out = run_step("join_conflated_tiles", || {
@@ -349,6 +351,7 @@ fn run_pipeline_steps(
             workdir,
             "diffed-places.pmtiles",
             tiles::ZoomRange::Auto,
+            Some("@importance"),
         )
     })?;
     published.push(run_step("upload_tiles", || {

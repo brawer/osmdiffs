@@ -14,8 +14,8 @@
 
 use anyhow::{Context, Result};
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, MapArray, RecordBatch, StringArray, StructArray, UInt16Array,
-    UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, Float32Array, MapArray, RecordBatch, StringArray, StructArray,
+    UInt16Array, UInt32Array, UInt64Array,
 };
 
 /// Something a named column can be looked up in -- a [`RecordBatch`]
@@ -83,6 +83,14 @@ pub(crate) fn get_u16(src: &impl ColumnSource, name: &str, row: usize) -> Result
         .as_any()
         .downcast_ref::<UInt16Array>()
         .with_context(|| format!("column '{name}' is not UInt16"))?
+        .value(row))
+}
+
+pub(crate) fn get_f32(src: &impl ColumnSource, name: &str, row: usize) -> Result<f32> {
+    Ok(column(src, name)?
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .with_context(|| format!("column '{name}' is not Float32"))?
         .value(row))
 }
 

@@ -398,8 +398,9 @@ fetch away.
   `suggest_edits` below) exactly once, writing all four layers both of
   `conflated.pmtiles`' passes need:
   - the coarse **overview** `matched`/`unmatched` layers — one
-    deliberately minimal feature per row: `spider`, `matched`, and
-    `osm:type`/`osm:id` when matched, but **no tags and no `fid`**. At
+    deliberately minimal feature per row: `spider`, `matched`,
+    `importance` (rounded to two decimals), and `osm:type`/`osm:id`
+    when matched, but **no tags and no `fid`**. At
     z0 a single tile holds the whole planet, and every per-feature byte
     counts: tags push the tile so far past tippecanoe’s size limit that
     `--drop-densest-as-needed` guts it to a few hundred features
@@ -477,7 +478,16 @@ fetch away.
   — runs tippecanoe over those layers to build `diffed-places.pmtiles`
   for visual review. **~2m48s** at full-planet scale (cpx42 run). The
   same function now builds both this and `conflated.pmtiles` above,
-  parameterized by output filename.
+  parameterized by output filename. For this archive and the
+  `conflated.pmtiles` overview, a tippecanoe feature filter (`-j`) on
+  the rounded `importance` decides what coarse zooms show: the top 1%
+  at z0, 4% at z1, 16% at z2, 64% at z3 and everything from z4 on
+  (four times as many per zoom, since each tile splits into four),
+  with no random dot-dropping (`-r 1`) and `--drop-densest-as-needed`
+  only as the safety net for oversized tiles. A per-feature
+  `"tippecanoe": {"minzoom": N}` would be the obvious way, but with
+  tippecanoe v2.49 it made tippecanoe drop nearly all features at
+  every zoom.
 - **`upload_conflated` / `upload_conflated_tiles` / `upload_tiles`**
   ([`src/pipeline/upload.rs`](../src/pipeline/upload.rs)) — push the
   data output and both sets of tiles to the public (`PUBLIC_S3_*`)
@@ -652,7 +662,7 @@ until the full pipeline was proven out:
   conflating municipal tree datasets against OSM by spatial distance
   and species looks particularly tractable). See
   [#708](https://github.com/brawer/osmdiffs/issues/708).
-- There’s no per-row match-confidence or cartographic-importance
-  signal yet, so both PMTiles archives rely entirely on tippecanoe’s
-  own density-based dropping at low zoom — see
-  [#713](https://github.com/brawer/osmdiffs/issues/713).
+- There’s no per-row match-confidence signal yet. Low-zoom tiles
+  select features by `importance` (see
+  [#713](https://github.com/brawer/osmdiffs/issues/713)), but not by
+  how sure we are of a match.
