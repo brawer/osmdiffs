@@ -386,7 +386,9 @@ fetch away.
   weighted mean of the location's OSMViews quantile, the brand's QRank
   quantile and a coarse score for the kind of place
   (`MatchMask::importance`), turned into a quantile among all rows
-  once every row is known. See
+  once every row is known (see
+  [`notes/2026-10-27-merging-ranks.md`](notes/2026-10-27-merging-ranks.md)
+  for why). See
   [`docs/outputs/CONFLATED_PARQUET.md`](outputs/CONFLATED_PARQUET.md)
   for that file’s schema. **~8 minutes** (~5 min matching, ~3 min
   writing) for 3.8M ATP features against the full OpenStreetMap
