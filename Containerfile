@@ -87,12 +87,25 @@ RUN for bin in tippecanoe tile-join; do \
 WORKDIR /usr/osmdiffs
 
 COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml .
+
+# cargo-auditable embeds the binary's exact Rust dependency list into
+# the binary itself, in a `.dep-v0` section. That lets vulnerability
+# scanners (Trivy, Grype, `cargo audit bin`) find the crates inside our
+# scratch image without needing our SBOM. Installed after copying
+# rust-toolchain.toml, so it gets built by the same pinned toolchain.
+RUN cargo install --locked cargo-auditable@0.7.7
+
 COPY scripts/sbom scripts/sbom
 COPY src src
 COPY tests tests
 
-RUN cargo build --release --locked
+RUN cargo auditable build --release --locked
 RUN cargo test --release --locked
+
+# Fail the build if the dependency list did not get embedded.
+RUN readelf --section-headers target/release/osmdiffs | grep -q '\.dep-v0' \
+    && echo "✓ cargo-auditable dependency data embedded in osmdiffs" \
+    || (echo "✗ no .dep-v0 section in osmdiffs" && exit 1)
 
 
 # ----------------------------------------------------------------------------

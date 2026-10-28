@@ -103,6 +103,17 @@ its output to S3-compatible storage.
 Both are generated from real, current build state, not maintained by
 hand — see [`scripts/sbom/README.md`](../scripts/sbom/README.md) for how.
 
+In addition, the `osmdiffs` binary is built with
+[`cargo-auditable`](https://github.com/rust-secure-code/cargo-auditable),
+which embeds its exact Rust dependency list into the binary itself.
+Vulnerability scanners such as Trivy, Grype or `cargo audit bin` read
+that data directly, so scanning our image finds its Rust crates even
+without fetching the SBOM. Without it, our image (a `scratch` image with
+static binaries and no package database) would look empty to such
+scanners and get reported as free of known vulnerabilities. The embedded
+data covers only the Rust crates; the SBOM remains the complete record,
+including `tippecanoe`, `tile-join`, their C libraries and the CBOM.
+
 ## CycloneDX
 
 We publish our SBOM (and CBOM) in [CycloneDX](https://cyclonedx.org/)
