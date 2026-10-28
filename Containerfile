@@ -99,8 +99,12 @@ COPY scripts/sbom scripts/sbom
 COPY src src
 COPY tests tests
 
+# Tests also run through cargo-auditable: a plain `cargo test` would
+# rebuild target/release/osmdiffs without the embedded dependency list
+# and overwrite the binary we ship. This way, the integration tests
+# exercise exactly the binary that goes into the image.
 RUN cargo auditable build --release --locked
-RUN cargo test --release --locked
+RUN cargo auditable test --release --locked
 
 # Fail the build if the dependency list did not get embedded.
 RUN readelf --section-headers target/release/osmdiffs | grep -q '\.dep-v0' \
