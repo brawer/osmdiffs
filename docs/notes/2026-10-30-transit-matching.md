@@ -25,6 +25,8 @@ Swiss OSM extract and ATP from 2026-10, with the spider changes from
 Counts are for features in Switzerland. Stops abroad hardly match,
 because the extract covers only Switzerland.
 
+Before one-to-one assignment (see below):
+
 | ATP feature      | count  | matched | note |
 |------------------|-------:|--------:|------|
 | `platform`       | 54,380 | 84%     | 10,969 of them to a bus stop mapped as one node on the road |
@@ -64,13 +66,37 @@ those ATP features and gave them only their stop's `uic_ref`. Of the
 - **Names only count without IDs to compare**, within 100 m, because
   names repeat ("Bahnhof").
 
+## One to one
+
+At first, each ATP feature took its best OSM candidate, and for 37% of
+Swiss platforms another ATP platform took the same OSM feature, mostly
+where OSM maps both directions of a bus stop as one node. Now
+`TransitMatcher` is exclusive (`Matcher::is_exclusive`): within one
+spider, `pipeline::conflate` gives each OSM feature to the best-scoring
+ATP feature, and the others fall back to their next candidates or stay
+unmatched. `PoiMatcher` is not exclusive, because several POIs can
+rightly share one OSM feature, such as car dealers of several brands
+in one building. Conflicts count only within a spider, so that two
+feeds for the same station can both match it. An OSM feature with the
+exact IDs of several ATP features, such as one platform tagged with
+three quay IDs, may go to all of them (`Matcher::may_share`).
+
+| measure | before | one to one |
+|---|---:|---:|
+| platforms matched | 84% | 68% |
+| tracks matched | 94% | 91% |
+| platforms sharing their match with another | 37% | 0.06% |
+| exact IDs matched right | 461 of 461 | 461 of 461 |
+| hold-out: same feature | 424 | 426 |
+| hold-out: neighbouring platform | 28 | 15 |
+| hold-out: unmatched | 4 | 15 |
+
+Fewer platforms match, but those that no longer match are mostly the
+second direction of a stop that OSM maps as one node: a useful signal
+that OSM lacks a platform. Matches for other spiders stay the same.
+
 ## Known limits
 
-- **Many to one.** Each ATP feature takes its best OSM candidate, and
-  nothing stops two ATP features from taking the same one. For 37% of
-  Swiss platforms, another ATP platform matched the same OSM feature,
-  mostly where OSM maps both directions of a bus stop as one node. A
-  one-to-one assignment would need a change in `pipeline::conflate`.
 - **Zürich HB tracks 31–34 and 41–44**: OSM gives them the UIC codes
   of the former stations Löwenstrasse and Museumstrasse, the Swiss
   registry the code of Zürich HB, so they don't match.

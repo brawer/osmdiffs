@@ -113,8 +113,16 @@ const INVERTED_INDEX_FILE_SIGNATURE: &[u8; 8] = b"featinv0";
 /// it's ever wrapped and handed to a caller; ordering it just delegates
 /// to the wrapped `u32` and carries no meaning beyond "some position",
 /// same as for any other field [Pass2Item] is sorted by.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct LocalFeatureRef(u32);
+
+impl LocalFeatureRef {
+    /// A made-up reference, for tests that don't need an index.
+    #[cfg(test)]
+    pub(crate) fn for_test(i: u32) -> LocalFeatureRef {
+        LocalFeatureRef(i)
+    }
+}
 
 /// Read-only, memory-mapped spatial index over [Feature] protos. See the
 /// module documentation for the on-disk layout and the reasoning behind
