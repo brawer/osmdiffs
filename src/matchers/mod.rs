@@ -13,6 +13,7 @@ use wkb::reader::read_wkb;
 mod address;
 pub mod contact;
 mod poi_matcher;
+mod transit_matcher;
 
 /// Mean Earth radius, in meters -- used throughout this module to turn
 /// S2 `Angle`s (dimensionless, on the unit sphere) into real-world
@@ -397,6 +398,8 @@ pub fn create_matcher<'a>(
     nondescript: &contact::Nondescript,
 ) -> Option<Box<dyn Matcher + 'a>> {
     if let Some(matcher) = poi_matcher::PoiMatcher::for_place(place, nondescript) {
+        Some(Box::new(matcher))
+    } else if let Some(matcher) = transit_matcher::TransitMatcher::for_place(place) {
         Some(Box::new(matcher))
     } else {
         // TODO: Implement matchers for fire hydrants, defibrillators, etc.
