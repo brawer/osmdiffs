@@ -453,6 +453,18 @@ impl TransitMatcher {
 }
 
 impl Matcher for TransitMatcher {
+    /// Two platforms or tracks in a feed are two real things, so they
+    /// shouldn't both take the same OSM feature.
+    fn is_exclusive(&self) -> bool {
+        true
+    }
+
+    /// OSM sometimes maps several quays as one platform, tagged with
+    /// all their IDs; then each of them should match it.
+    fn may_share(&self, candidate: &OsmCandidate) -> bool {
+        compare_ids(&self.ids, &Ids::from_tags(candidate.tags())) == IdEvidence::Same
+    }
+
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64 {
         let (best, worst, max_meters) = self.factor(candidate);
         if best == 0.0 {
@@ -509,6 +521,24 @@ mod tests {
     /// ATP feature gets no [TransitMatcher].
     fn score(atp: &[(&str, &str)], osm: &[(&str, &str)], meters: f64) -> Option<f64> {
         let matcher = TransitMatcher::for_place(&place(atp))?;
+        Some(with_candidate_at(osm, meters, |c| {
+            matcher.score_osm_candidate(c)
+        }))
+    }
+
+    /// Calls `f` with an OSM candidate with `osm` tags, at the ATP
+    /// features' position.
+    fn with_candidate<T>(osm: &[(&str, &str)], f: impl FnOnce(&OsmCandidate) -> T) -> T {
+        with_candidate_at(osm, 0.0, f)
+    }
+
+    /// Calls `f` with an OSM candidate with `osm` tags, `meters` north
+    /// of the ATP features.
+    fn with_candidate_at<T>(
+        osm: &[(&str, &str)],
+        meters: f64,
+        f: impl FnOnce(&OsmCandidate) -> T,
+    ) -> T {
         let dir = TempDir::new().expect("tempdir");
         let mut strings: Vec<String> = osm
             .iter()
@@ -538,7 +568,7 @@ mod tests {
             feature: &feature,
             strings: &pool,
         };
-        Some(matcher.score_osm_candidate(&candidate))
+        f(&candidate)
     }
 
     struct Case {
@@ -1075,6 +1105,27 @@ mod tests {
         let node = score(BUS_PLATFORM, &combined, 0.0).unwrap();
         let way = score(BUS_PLATFORM, &platform, 15.0).unwrap();
         assert!(way > node, "{way} vs {node}");
+    }
+
+    #[test]
+    fn test_may_share() {
+        let shares = |osm: &[(&str, &str)]| {
+            let matcher = TransitMatcher::for_place(&place(BUS_PLATFORM)).unwrap();
+            with_candidate(osm, |c| matcher.may_share(c))
+        };
+        // One OSM platform for three quays, tagged with all their IDs.
+        assert!(shares(&[
+            ("public_transport", "platform"),
+            (
+                "ref:sloid",
+                "ch:1:sloid:91119:0:12344;ch:1:sloid:91119:0:12345;ch:1:sloid:91119:0:12346"
+            ),
+        ]));
+        // Same stop only: exclusive.
+        assert!(!shares(&[
+            ("public_transport", "platform"),
+            ("uic_ref", "8591119"),
+        ]));
     }
 
     #[test]

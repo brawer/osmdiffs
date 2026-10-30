@@ -382,6 +382,23 @@ impl<'a> OsmCandidate<'a> {
 /// `crate::edit_suggesters` instead.
 pub trait Matcher {
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64;
+
+    /// True if no two AllThePlaces features of the same spider should
+    /// match the same OpenStreetMap feature, such as two bus platforms
+    /// of a stop. False where several may share one, such as car
+    /// dealers of several brands in one OSM building. See
+    /// `pipeline::conflate` for how conflicts are resolved.
+    fn is_exclusive(&self) -> bool {
+        false
+    }
+
+    /// For an exclusive matcher, true if `candidate` may match even
+    /// when another AllThePlaces feature of the same spider matches it
+    /// too, such as an OSM platform that carries the IDs of several
+    /// quays. Only called for candidates with a positive score.
+    fn may_share(&self, _candidate: &OsmCandidate) -> bool {
+        false
+    }
 }
 
 /// Construct a matcher for a given AllThePlaces feature.
