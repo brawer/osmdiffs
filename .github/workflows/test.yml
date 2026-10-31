@@ -65,7 +65,7 @@ jobs:
         # it on PATH.
         which tile-join
     - name: Install Rust coverage tool
-      uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+      uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
       with:
         tool: cargo-llvm-cov
     - name: Cache Cargo registry and build artifacts
