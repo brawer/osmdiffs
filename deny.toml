@@ -16,18 +16,6 @@ all-features = true
 [advisories]
 yanked = "deny"
 ignore = [
-  # quick-xml 0.40.1, pulled in transitively via the `s3` crate (our
-  # S3-compatible upload client), is affected by two DoS advisories in its
-  # XML attribute/namespace handling. Both only matter for untrusted input;
-  # `s3` uses quick-xml solely to parse XML *responses from the S3 endpoint
-  # we're uploading to*, not attacker-controlled input, so this isn't
-  # exploitable in how osmdiffs uses it. Fix is upstream in `s3`, not
-  # something we can patch here (no git/path deps -- see docs/CONTRIBUTING.md
-  # on why): https://github.com/lvillis/s3-rs/pull/15 bumps it to >=0.41.0.
-  # Re-run `cargo deny check advisories` after that merges and a new `s3`
-  # release picks it up, then drop these two lines.
-  "RUSTSEC-2026-0194", # quadratic run time checking duplicate attribute names
-  "RUSTSEC-2026-0195", # unbounded namespace-declaration allocation (OOM)
   # atomic-polyfill is unmaintained, not vulnerable. It comes in via
   # phonenumber -> postcard -> heapless 0.7, which only uses it on targets
   # without native atomics, so it is never built for the x86_64 and aarch64
@@ -35,20 +23,6 @@ ignore = [
   # only `--target all` shows it). Drop this line once postcard moves to
   # heapless 0.8, or phonenumber stops using postcard.
   "RUSTSEC-2023-0089",
-  # zstd 0.13.3 / zstd-safe 7.3.0 come in via s3 -> reqx 0.1.41, which uses
-  # zstd only to decode `Content-Encoding: zstd` HTTP responses from the S3
-  # endpoint, through `zstd::stream::read::Decoder::new`. None of these three
-  # advisories reach that path: 0391 needs `with_context` with a reused
-  # context, 0398 needs the `seekable` feature (not enabled), and 0403 only
-  # affects `zstd::stream::write::Decoder` (the advisory says the read decoder
-  # is not affected). The fixed releases are zstd >=0.14.3 / zstd-safe >=8.2.0,
-  # which reqx 0.1.x can't use; s3 0.1.38 moves to reqx 0.2 but needs Rust
-  # 1.99.1 (we pin 1.96.0 in rust-toolchain.toml). Our direct zstd use, via
-  # parquet, is already on the fixed versions. Drop these three lines once s3
-  # is upgraded.
-  "RUSTSEC-2026-0391", # abandoned stream data leaks into the next stream
-  "RUSTSEC-2026-0398", # Seekable::decompress sets Vec length past capacity
-  "RUSTSEC-2026-0403", # uninitialized memory on failed legacy-frame streaming
 ]
 
 # ── licenses: only accept licenses we've reviewed as OK to redistribute ─────
@@ -66,7 +40,6 @@ allow = [
   "ISC",
   "MIT",
   "MIT-0",
-  "MPL-2.0", # weak/file-level copyleft only (`option-ext`, via `dirs`); fine to redistribute as-is in a binary
   "Unicode-3.0",
   "Unlicense",
   "Zlib",

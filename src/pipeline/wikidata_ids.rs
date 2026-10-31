@@ -123,9 +123,11 @@ fn collect_from_osm(osm: &OsmFeatures, progress: &MultiProgress) -> Result<Vec<u
             let feature = osm.index.get_feature(r)?;
             let ids: Vec<u64> = feature
                 .tags
-                .chunks_exact(2)
-                .filter(|kv| key_ids.contains(&kv[0]))
-                .flat_map(|kv| parse_wikidata_ids(osm.strings.get(kv[1] as usize)))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .filter(|[k, _]| key_ids.contains(k))
+                .flat_map(|[_, v]| parse_wikidata_ids(osm.strings.get(*v as usize)))
                 .collect();
             Ok::<_, anyhow::Error>(ids)
         })
