@@ -654,11 +654,15 @@ until the full pipeline was proven out:
 - Nothing yet uploads suggested edits to any of the tools described
   above — that integration (most likely MapRoulette first, given its
   API is the closest fit) is future work, not yet designed in detail.
-- The only matcher implemented, `PoiMatcher`, matches shops,
+- Two matchers are implemented. `PoiMatcher` matches shops,
   restaurants, hotels, schools and fuel stations on an exact
   `brand:wikidata` tag, or on a shared phone number or email address
   with a compatible category (see
   [`notes/2026-10-25-phone-and-email-matching.md`](notes/2026-10-25-phone-and-email-matching.md)).
+  `TransitMatcher` matches public transport stops, platforms and
+  tracks by `ref:IFOPT`, `uic_ref` and `local_ref`, so far tuned for
+  Switzerland (see
+  [`notes/2026-10-30-transit-matching.md`](notes/2026-10-30-transit-matching.md)).
   We’d like to extend this well beyond it: matching by name too, and
   matching well beyond points of interest (a tree matcher
   conflating municipal tree datasets against OSM by spatial distance
