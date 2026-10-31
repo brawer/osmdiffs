@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.8.8](https://github.com/brawer/osmdiffs/compare/v0.8.7...v0.8.8) (2026-10-31)
+
+
+### 🆕 Enhancements
+
+* add importance column to conflated.parquet ([#853](https://github.com/brawer/osmdiffs/issues/853)) ([2d017a2](https://github.com/brawer/osmdiffs/commit/2d017a232c89e4da7df7b664c3a4bab5d33da554))
+* collect brand Wikidata IDs from OSM as well as ATP ([#847](https://github.com/brawer/osmdiffs/issues/847)) ([d87e4b8](https://github.com/brawer/osmdiffs/commit/d87e4b85634e007948f45a3cdd80932dc01daa03))
+* compute denylist of ATP switchboard phone numbers ([#844](https://github.com/brawer/osmdiffs/issues/844)) ([b1ef57f](https://github.com/brawer/osmdiffs/commit/b1ef57feec311433b5f58cd4141133aed6fc8bbd))
+* compute nondescript email addresses from AllThePlaces ([#846](https://github.com/brawer/osmdiffs/issues/846)) ([b38b49e](https://github.com/brawer/osmdiffs/commit/b38b49e8773f03da72f2643e84919e8e410f0c16))
+* compute OSMViews ranks for AllThePlaces locations ([#851](https://github.com/brawer/osmdiffs/issues/851)) ([6e383c4](https://github.com/brawer/osmdiffs/commit/6e383c44ec6e0d7423b35661f125fae342de3cc8))
+* compute QRank quantiles for brand Wikidata IDs ([#848](https://github.com/brawer/osmdiffs/issues/848)) ([e1b6a99](https://github.com/brawer/osmdiffs/commit/e1b6a99365742371f1830c44c0fe3e091ab2daac))
+* **conflate:** match transit features one to one within a spider ([#864](https://github.com/brawer/osmdiffs/issues/864)) ([0343aae](https://github.com/brawer/osmdiffs/commit/0343aaeca73fd9c3255de0fecb3a5ff4e64008ee))
+* **matchers:** match by phone number and email address ([#850](https://github.com/brawer/osmdiffs/issues/850)) ([ca68536](https://github.com/brawer/osmdiffs/commit/ca68536ffc39e43b837a450f8e6cb138ef800863))
+* **matchers:** match public transport stops, platforms and tracks ([#863](https://github.com/brawer/osmdiffs/issues/863)) ([4093e8b](https://github.com/brawer/osmdiffs/commit/4093e8ba7ae3d41a4f1df3c9db1ba88b1f2a2b39))
+* **matchers:** split MatchMask into category and modifier bits, add importance ([#852](https://github.com/brawer/osmdiffs/issues/852)) ([e3bcdd9](https://github.com/brawer/osmdiffs/commit/e3bcdd94a7cb537adb1dfd19e61fefa67bbba4d6))
+* **tiles:** show the most important places at coarse zooms ([#854](https://github.com/brawer/osmdiffs/issues/854)) ([2f85f6d](https://github.com/brawer/osmdiffs/commit/2f85f6d6a6f7b9eb6e3e3ae35bf7e104ae543338))
+
+
+### 🐞 Bug Fixes
+
+* **deps:** bump tokio to 1.54.1 for RUSTSEC-2026-0386 ([#849](https://github.com/brawer/osmdiffs/issues/849)) ([8eab159](https://github.com/brawer/osmdiffs/commit/8eab159dc851a8ef012148e420f7d0b967914a56))
+* **deps:** bump zstd crates for RUSTSEC-2026-0410 ([#869](https://github.com/brawer/osmdiffs/issues/869)) ([a44b9be](https://github.com/brawer/osmdiffs/commit/a44b9bea6db8f00e1e70a3e688a049a35c7a1cd7))
+* **deps:** bump zstd crates for RUSTSEC-2026-0410 and related advisories ([a44b9be](https://github.com/brawer/osmdiffs/commit/a44b9bea6db8f00e1e70a3e688a049a35c7a1cd7))
+* **deps:** upgrade to Rust 1.99.1 and bump dependencies ([#870](https://github.com/brawer/osmdiffs/issues/870)) ([aedffd7](https://github.com/brawer/osmdiffs/commit/aedffd7403f831b903da891a0c80cd10f3d4329b))
+* **matchers:** match multi-valued brand:wikidata tags ([#842](https://github.com/brawer/osmdiffs/issues/842)) ([e883f63](https://github.com/brawer/osmdiffs/commit/e883f63d6738a717c40140b161e8411029b06581))
+* **matchers:** treat bike-share stations as street furniture ([#843](https://github.com/brawer/osmdiffs/issues/843)) ([c298614](https://github.com/brawer/osmdiffs/commit/c298614fcf556592b63bc7803476ef0550508d43))
+
+
+### 📚 Documentation
+
+* add design note on merging ranks into importance ([#855](https://github.com/brawer/osmdiffs/issues/855)) ([0706845](https://github.com/brawer/osmdiffs/commit/07068458951438299215068ed013c3f6140adc2c))
+* list protoc as a build prerequisite in CONTRIBUTING.md ([#840](https://github.com/brawer/osmdiffs/issues/840)) ([5eb4d45](https://github.com/brawer/osmdiffs/commit/5eb4d454478b9edf3a6597c3593c1cf28127ef23))
+* **outputs:** add Windows download instructions ([#865](https://github.com/brawer/osmdiffs/issues/865)) ([d436fd4](https://github.com/brawer/osmdiffs/commit/d436fd40d505cecfc0c2a5c33d5b64fd34098df4))
+
+
+### 🚧 Maintenance
+
+* **ci:** Bump actions/download-artifact from 8.0.1 to 8.0.2 ([#857](https://github.com/brawer/osmdiffs/issues/857)) ([4ccc765](https://github.com/brawer/osmdiffs/commit/4ccc76596cf94a68bd5b5922677400f79e9159ac))
+* **ci:** Bump docker/login-action from 4.6.0 to 4.7.0 ([#859](https://github.com/brawer/osmdiffs/issues/859)) ([9968e32](https://github.com/brawer/osmdiffs/commit/9968e32ea33fc98c71ac0a344cd1ad7d528763cc))
+* **ci:** Bump Swatinem/rust-cache from 2.9.2 to 2.9.3 ([#860](https://github.com/brawer/osmdiffs/issues/860)) ([fb35a43](https://github.com/brawer/osmdiffs/commit/fb35a439148ba3dbd1f522c10b1b7faf548fd2f4))
+* **ci:** Bump taiki-e/install-action from 2.87.27 to 2.88.0 ([#858](https://github.com/brawer/osmdiffs/issues/858)) ([d1bd3c7](https://github.com/brawer/osmdiffs/commit/d1bd3c79165c01e6287c5cd0b73bb2266e814a5e))
+* **ci:** Bump the codeql group with 3 updates ([#856](https://github.com/brawer/osmdiffs/issues/856)) ([684150a](https://github.com/brawer/osmdiffs/commit/684150aad1a4b2df5dafc871ad88268e4983e96c))
+* embed dependency list with cargo-auditable ([#861](https://github.com/brawer/osmdiffs/issues/861)) ([373eeca](https://github.com/brawer/osmdiffs/commit/373eecaddda9693a344b08d13331a93630e91ed4))
+* rename phone denylist to nondescript phones ([#845](https://github.com/brawer/osmdiffs/issues/845)) ([f30f130](https://github.com/brawer/osmdiffs/commit/f30f13044d442cb2a2713d7a83b1891bbd9eb533))
+
 ## [0.8.7](https://github.com/brawer/osmdiffs/compare/v0.8.6...v0.8.7) (2026-10-23)
 
 
