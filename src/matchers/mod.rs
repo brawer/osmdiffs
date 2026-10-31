@@ -13,6 +13,7 @@ use wkb::reader::read_wkb;
 mod address;
 pub mod contact;
 mod poi_matcher;
+mod transit_matcher;
 
 /// Mean Earth radius, in meters -- used throughout this module to turn
 /// S2 `Angle`s (dimensionless, on the unit sphere) into real-world
@@ -356,12 +357,12 @@ impl<'a> OsmCandidate<'a> {
     /// `StringPool` indices -- into `(key, value)` string pairs. Cheap: a
     /// handful of string-pool lookups.
     pub fn tags(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
-        self.feature.tags.chunks_exact(2).map(move |kv| {
-            (
-                self.strings.get(kv[0] as usize),
-                self.strings.get(kv[1] as usize),
-            )
-        })
+        self.feature
+            .tags
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(move |[k, v]| (self.strings.get(*k as usize), self.strings.get(*v as usize)))
     }
 
     /// Decodes `feature.geometry_wkb` into a `geo::Geometry`. Not cheap
@@ -381,6 +382,23 @@ impl<'a> OsmCandidate<'a> {
 /// `crate::edit_suggesters` instead.
 pub trait Matcher {
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64;
+
+    /// True if no two AllThePlaces features of the same spider should
+    /// match the same OpenStreetMap feature, such as two bus platforms
+    /// of a stop. False where several may share one, such as car
+    /// dealers of several brands in one OSM building. See
+    /// `pipeline::conflate` for how conflicts are resolved.
+    fn is_exclusive(&self) -> bool {
+        false
+    }
+
+    /// For an exclusive matcher, true if `candidate` may match even
+    /// when another AllThePlaces feature of the same spider matches it
+    /// too, such as an OSM platform that carries the IDs of several
+    /// quays. Only called for candidates with a positive score.
+    fn may_share(&self, _candidate: &OsmCandidate) -> bool {
+        false
+    }
 }
 
 /// Construct a matcher for a given AllThePlaces feature.
@@ -397,6 +415,8 @@ pub fn create_matcher<'a>(
     nondescript: &contact::Nondescript,
 ) -> Option<Box<dyn Matcher + 'a>> {
     if let Some(matcher) = poi_matcher::PoiMatcher::for_place(place, nondescript) {
+        Some(Box::new(matcher))
+    } else if let Some(matcher) = transit_matcher::TransitMatcher::for_place(place) {
         Some(Box::new(matcher))
     } else {
         // TODO: Implement matchers for fire hydrants, defibrillators, etc.

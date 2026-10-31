@@ -35,6 +35,31 @@ curl -s "$host/data/datapackage.json" \
   | jq -r --arg h "$host" '.resources[] | "\($h)/data/\(.path)  \(.name)"'
 ```
 
+On Windows, PowerShell can do the same without `jq`, since
+`Invoke-RestMethod` parses the JSON for you:
+
+```powershell
+$base = 'https://osmdiffs.brawer.ch/data'
+$pkg = Invoke-RestMethod "$base/datapackage.json"
+$pkg.resources | ForEach-Object { "$base/$($_.path)  $($_.name)" }
+```
+
+To download a resource and check its hash, use `curl.exe` (part of
+Windows 10 and later; write `curl.exe`, not `curl`, because in Windows
+PowerShell `curl` is an alias for `Invoke-WebRequest`, which is much
+slower on large files):
+
+```powershell
+$r = $pkg.resources | Where-Object name -eq 'conflated'
+curl.exe -fL -o $r.path "$base/$($r.path)"
+$hash = (Get-FileHash $r.path -Algorithm SHA256).Hash.ToLower()
+if ("sha256:$hash" -ne $r.hash) { Write-Error "hash mismatch: $($r.path)" }
+```
+
+The `sh` example above also works as is under
+[WSL](https://learn.microsoft.com/windows/wsl/) or Git Bash, if you
+have `jq` installed there.
+
 The `conflated` resource is [`conflated.parquet`](CONFLATED_PARQUET.md);
 `bom` is its [CycloneDX](CONFLATED_PARQUET.md#data-provenance)
 provenance BOM as a standalone file. The two `*-tiles` resources are

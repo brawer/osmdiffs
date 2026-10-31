@@ -65,14 +65,14 @@ jobs:
         # it on PATH.
         which tile-join
     - name: Install Rust coverage tool
-      uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+      uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
       with:
         tool: cargo-llvm-cov
     - name: Cache Cargo registry and build artifacts
       # This cache only ever feeds this test workflow. release.yml builds
       # release binaries from scratch on purpose, without touching this
       # (or any other) build cache.
-      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
       with:
         # GitHub Actions caches are scoped per ref, so PR and merge-queue
         # runs would otherwise each save their own full (~1 GB) copy of
