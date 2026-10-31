@@ -357,12 +357,12 @@ impl<'a> OsmCandidate<'a> {
     /// `StringPool` indices -- into `(key, value)` string pairs. Cheap: a
     /// handful of string-pool lookups.
     pub fn tags(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
-        self.feature.tags.chunks_exact(2).map(move |kv| {
-            (
-                self.strings.get(kv[0] as usize),
-                self.strings.get(kv[1] as usize),
-            )
-        })
+        self.feature
+            .tags
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(move |[k, v]| (self.strings.get(*k as usize), self.strings.get(*v as usize)))
     }
 
     /// Decodes `feature.geometry_wkb` into a `geo::Geometry`. Not cheap

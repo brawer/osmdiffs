@@ -680,11 +680,13 @@ impl ParquetRow {
             osm_modified_version = NonZeroU32::new(feature.version);
             osm_tags = feature
                 .tags
-                .chunks_exact(2)
-                .map(|kv| {
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|[k, v]| {
                     (
-                        osm_strings.get(kv[0] as usize).to_owned(),
-                        osm_strings.get(kv[1] as usize).to_owned(),
+                        osm_strings.get(*k as usize).to_owned(),
+                        osm_strings.get(*v as usize).to_owned(),
                     )
                 })
                 .collect();
