@@ -35,6 +35,20 @@ ignore = [
   # only `--target all` shows it). Drop this line once postcard moves to
   # heapless 0.8, or phonenumber stops using postcard.
   "RUSTSEC-2023-0089",
+  # zstd 0.13.3 / zstd-safe 7.3.0 come in via s3 -> reqx 0.1.41, which uses
+  # zstd only to decode `Content-Encoding: zstd` HTTP responses from the S3
+  # endpoint, through `zstd::stream::read::Decoder::new`. None of these three
+  # advisories reach that path: 0391 needs `with_context` with a reused
+  # context, 0398 needs the `seekable` feature (not enabled), and 0403 only
+  # affects `zstd::stream::write::Decoder` (the advisory says the read decoder
+  # is not affected). The fixed releases are zstd >=0.14.3 / zstd-safe >=8.2.0,
+  # which reqx 0.1.x can't use; s3 0.1.38 moves to reqx 0.2 but needs Rust
+  # 1.99.1 (we pin 1.96.0 in rust-toolchain.toml). Our direct zstd use, via
+  # parquet, is already on the fixed versions. Drop these three lines once s3
+  # is upgraded.
+  "RUSTSEC-2026-0391", # abandoned stream data leaks into the next stream
+  "RUSTSEC-2026-0398", # Seekable::decompress sets Vec length past capacity
+  "RUSTSEC-2026-0403", # uninitialized memory on failed legacy-frame streaming
 ]
 
 # ── licenses: only accept licenses we've reviewed as OK to redistribute ─────
