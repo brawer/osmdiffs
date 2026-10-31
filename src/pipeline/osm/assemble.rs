@@ -905,9 +905,11 @@ fn relation_type_tag<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Opti
 /// the time [`assemble_super_relations`] runs has already gone through
 /// [`assemble_tags`] once, in [`assemble_leaf_relations`]).
 fn relation_type_from_feature_tags<'a>(tags: &[u32], strings: &'a StringPool) -> Option<&'a str> {
-    tags.chunks_exact(2)
-        .find(|pair| strings.get(pair[0] as usize) == "type")
-        .map(|pair| strings.get(pair[1] as usize))
+    tags.as_chunks::<2>()
+        .0
+        .iter()
+        .find(|[k, _]| strings.get(*k as usize) == "type")
+        .map(|[_, v]| strings.get(*v as usize))
 }
 
 /// OSM documents `type=multipolygon` and `type=boundary` relations as
