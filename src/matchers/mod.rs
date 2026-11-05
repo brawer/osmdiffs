@@ -14,6 +14,7 @@ mod address;
 pub mod contact;
 mod poi_matcher;
 mod transit_matcher;
+pub(crate) use transit_matcher::{IFOPT_KEYS, is_stop as is_transit_stop, split_values, swiss_uic};
 
 /// Mean Earth radius, in meters -- used throughout this module to turn
 /// S2 `Angle`s (dimensionless, on the unit sphere) into real-world
@@ -356,7 +357,7 @@ impl<'a> OsmCandidate<'a> {
     /// Decodes `feature.tags` -- flat `[key_id, value_id, ...]` pairs of
     /// `StringPool` indices -- into `(key, value)` string pairs. Cheap: a
     /// handful of string-pool lookups.
-    pub fn tags(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
+    pub fn tags(&self) -> impl Iterator<Item = (&'a str, &'a str)> + Clone + '_ {
         self.feature
             .tags
             .as_chunks::<2>()

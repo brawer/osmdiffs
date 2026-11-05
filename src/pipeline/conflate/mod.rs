@@ -10,6 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Ok, Result};
 use ext_sort::{ExternalSorter, ExternalSorterBuilder, buffer::mem::MemoryLimitedBufferBuilder};
+use geo::Centroid;
 use indicatif::{MultiProgress, ProgressBar};
 use rayon::prelude::*;
 use std::{
@@ -18,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
     thread,
@@ -32,8 +33,11 @@ use std::{
 /// tables, not RSS at a fixed fraction of progress.
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
+mod deletion;
 mod s2_util;
+mod switzerland;
 mod writer;
+use deletion::{AtpCoverage, Reason, deletion_reason};
 use s2_util::MergedCellRanges;
 use writer::{ParquetRow, ParquetWriter};
 
@@ -136,6 +140,9 @@ struct ExclusiveCandidates {
 /// away; for exclusive ones, it keeps the best few candidates. Then
 /// [assign_exclusive] gives each OSM feature to at most one ATP feature
 /// per spider. The second pass sends the rows of the exclusive ones.
+/// Finally, [send_deletion_candidates] sends rows for the OSM features
+/// that nothing matched, if there is a strong signal that they are
+/// gone.
 fn produce_rows(
     atp_reader: &PlaceReader,
     osm: &OsmFeatures,
@@ -160,10 +167,16 @@ fn produce_rows(
     // snapshot at the boundary is fine for a diagnostic like this.
     let last_progress_log_ms = AtomicU64::new(0);
     let exclusive = Mutex::new(Vec::new());
+    let matched = MatchedSet::new(osm.index.len());
+    let mut coverage = AtpCoverage::default();
 
     let mut batch_start: u64 = 0;
     for batch in atp_reader.read_all()? {
         let batch = batch?;
+        // Which ATP features of this batch have a matcher: only these
+        // count for `coverage`, since ATP features of a kind that we
+        // don't match say nothing about unmatched OSM features.
+        let has_matcher: Vec<AtomicBool> = batch.iter().map(|_| AtomicBool::new(false)).collect();
         // Each batch is processed by the Rayon thread pool in parallel,
         // but the outer loop is sequential — so nearby places (within a
         // batch) always go to nearby workers, preserving spatial locality.
@@ -180,6 +193,7 @@ fn produce_rows(
             let Some(matcher) = create_matcher(atp, nondescript) else {
                 return Ok(());
             };
+            has_matcher[i].store(true, Ordering::Relaxed);
             let keep = if matcher.is_exclusive() {
                 EXCLUSIVE_CANDIDATES
             } else {
@@ -229,8 +243,16 @@ fn produce_rows(
                 return Ok(());
             }
             let osm_match = best.first().map(|&(_, r)| r);
+            if let Some(r) = osm_match {
+                matched.insert(r);
+            }
             send_row(atp, osm_match, osm, signals, &out)
         })?;
+        for (atp, has_matcher) in batch.iter().zip(has_matcher) {
+            if has_matcher.into_inner() {
+                coverage.add(atp);
+            }
+        }
         batch_start += batch.len() as u64;
     }
 
@@ -241,11 +263,16 @@ fn produce_rows(
     for batch in atp_reader.read_all()? {
         for atp in batch? {
             if let Some(&osm_match) = assigned.get(&ordinal) {
+                if let Some(r) = osm_match {
+                    matched.insert(r);
+                }
                 send_row(&atp, osm_match, osm, signals, &out)?;
             }
             ordinal += 1;
         }
     }
+
+    send_deletion_candidates(osm, &coverage, &matched, signals, &out)?;
 
     progress_bar.finish();
     log::info!(
@@ -255,6 +282,91 @@ fn produce_rows(
         exclusive_atp_features = num_exclusive,
         exclusive_matched = assigned.values().filter(|m| m.is_some()).count();
         "conflate.match: done"
+    );
+    Ok(())
+}
+
+/// The OSM features that some ATP feature matched, as one bit per
+/// feature in the index.
+struct MatchedSet(Vec<AtomicU64>);
+
+impl MatchedSet {
+    fn new(num_features: usize) -> Self {
+        MatchedSet(
+            (0..num_features.div_ceil(64))
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+        )
+    }
+
+    fn insert(&self, r: LocalFeatureRef) {
+        let i = r.ordinal();
+        self.0[i / 64].fetch_or(1 << (i % 64), Ordering::Relaxed);
+    }
+
+    fn contains(&self, r: LocalFeatureRef) -> bool {
+        let i = r.ordinal();
+        self.0[i / 64].load(Ordering::Relaxed) & (1 << (i % 64)) != 0
+    }
+}
+
+/// Sends an OSM-only row for every OSM feature that no ATP feature
+/// matched, but that [deletion_reason] considers a candidate for
+/// deletion. See the [deletion] module for the signals.
+fn send_deletion_candidates(
+    osm: &OsmFeatures,
+    coverage: &AtpCoverage,
+    matched: &MatchedSet,
+    signals: &Signals,
+    out: &SyncSender<ParquetRow>,
+) -> Result<()> {
+    let start = Instant::now();
+    let counts: Mutex<HashMap<Reason, u64>> = Mutex::new(HashMap::new());
+    osm.index
+        .all_refs()
+        .filter(|&r| !matched.contains(r))
+        .try_for_each(|r| {
+            let feature = osm.index.get_feature(r)?;
+            let candidate = OsmCandidate {
+                feature: &feature,
+                strings: &osm.strings,
+            };
+            let location = || {
+                let centroid = candidate.geometry().ok()?.centroid()?;
+                Some((centroid.x(), centroid.y()))
+            };
+            let Some(reason) = deletion_reason(candidate.tags(), coverage, location) else {
+                return Ok(());
+            };
+            // A feature without a location can't be put on a map, nor
+            // sorted into the output file.
+            let Some((lng, lat)) = location() else {
+                return Ok(());
+            };
+            *counts
+                .lock()
+                .expect("counts lock")
+                .entry(reason)
+                .or_default() += 1;
+            let score = signals.score_osm(lng, lat, candidate.tags());
+            let conflated = ConflatedFeature {
+                atp: None,
+                osm: Some(feature),
+                score,
+            };
+            out.send(ParquetRow::from_conflated(conflated, &osm.strings)?)?;
+            Ok(())
+        })?;
+    let counts = counts.into_inner().expect("counts lock");
+    let count = |reason| counts.get(&reason).copied().unwrap_or(0);
+    log::info!(
+        elapsed_seconds = start.elapsed().as_secs_f64(),
+        atp_wikidata_ids = coverage.num_wikidata_ids(),
+        atp_has_swiss_transit = coverage.has_swiss_transit(),
+        wikidata = count(Reason::Wikidata),
+        swiss_transit_id = count(Reason::SwissTransitId),
+        swiss_transit_stop = count(Reason::SwissTransitStop);
+        "conflate.deletion_candidates: done"
     );
     Ok(())
 }
