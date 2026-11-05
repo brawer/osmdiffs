@@ -188,6 +188,7 @@ pub fn build_bom_for_conflated_parquet(
             osm_component(&osm_metadata)?,
             packaged_component(&pipeline::qrank::QRANK, &qrank_metadata),
             packaged_component(&pipeline::osm_views::OSMVIEWS, &osmviews_metadata),
+            country_boundaries_component(),
         ],
         // Declares conflated.parquet's inputs as *its* dependencies,
         // so the dependency graph has a single root (conflated.parquet)
@@ -216,12 +217,13 @@ pub(crate) fn anchor_timestamp(atp: &AtpMetadata, osm: &OsmMetadata) -> UtcDateT
 
 /// The `bom-ref`s of conflated.parquet's inputs, in the order the BOM
 /// lists them.
-fn input_refs() -> [&'static str; 4] {
+fn input_refs() -> [&'static str; 5] {
     [
         "alltheplaces.zip",
         pipeline::PLANET_PBF_FILENAME,
         pipeline::qrank::QRANK.filename,
         pipeline::osm_views::OSMVIEWS.filename,
+        COUNTRY_BOUNDARIES_REF,
     ]
 }
 
@@ -418,6 +420,40 @@ fn packaged_component(resource: &PackagedResource, metadata: &PackagedMetadata) 
     })
 }
 
+/// `bom-ref` of [country_boundaries_component].
+const COUNTRY_BOUNDARIES_REF: &str = "country-boundaries";
+
+/// The country boundaries that `pipeline::conflate` looks up countries
+/// in, to decide which unmatched OSM features may be gone. Built into
+/// the binary by the `country-boundaries` crate, so its version is the
+/// crate's; the data itself is derived from OpenStreetMap.
+fn country_boundaries_component() -> Value {
+    use pipeline::conflate::countries;
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, countries::DATA);
+    let sha256: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    json!({
+        "bom-ref": COUNTRY_BOUNDARIES_REF,
+        "type": "data",
+        "name": "country-boundaries",
+        "version": countries::VERSION,
+        // Whoever packaged the data for the crate, as with the other
+        // packaged inputs; the data's own origin is OpenStreetMap.
+        "supplier": {
+            "name": "Tobias Zwick",
+            "url": ["https://github.com/westnordost/country-boundaries-rust"]
+        },
+        "licenses": license("ODbL-1.0", ODBL_URL),
+        "copyright": OSM_COPYRIGHT,
+        "hashes": [{"alg": "SHA-256", "content": sha256}],
+        "purl": format!("pkg:cargo/country-boundaries@{}", countries::VERSION),
+        "data": [{"type": "dataset", "contents": {"url": countries::SOURCE_URL}}],
+        "externalReferences": [
+            {"type": "distribution", "url": countries::SOURCE_URL},
+            license_external_reference(ODBL_URL),
+        ],
+    })
+}
+
 /// Ties `tool_component()`, the input `*_component()`s, and
 /// `output_component()` together into one workflow: which tool consumed
 /// which inputs to produce which output.
@@ -541,7 +577,7 @@ mod tests {
         assert_eq!(output["copyright"], OSM_COPYRIGHT);
 
         let components = bom["components"].as_array().expect("components array");
-        assert_eq!(components.len(), 4);
+        assert_eq!(components.len(), 5);
 
         let atp = &components[0];
         assert_eq!(atp["bom-ref"], "alltheplaces.zip");
@@ -623,6 +659,16 @@ mod tests {
             "https://osmviews.brawer.ch/data/osmviews-20261018.tiff"
         );
 
+        let boundaries = &components[4];
+        assert_eq!(boundaries["bom-ref"], "country-boundaries");
+        assert_eq!(boundaries["type"], "data");
+        assert_eq!(boundaries["version"], "1.2.0");
+        assert_eq!(boundaries["licenses"][0]["license"]["id"], "ODbL-1.0");
+        assert_eq!(boundaries["copyright"], OSM_COPYRIGHT);
+        assert_eq!(boundaries["purl"], "pkg:cargo/country-boundaries@1.2.0");
+        let sha256 = boundaries["hashes"][0]["content"].as_str().expect("sha256");
+        assert_eq!(sha256.len(), 64);
+
         // Single-rooted dependency graph: conflated.parquet depends on
         // every input, so none shows up as an orphan root.
         assert_eq!(bom["dependencies"][0]["ref"], "conflated.parquet");
@@ -638,7 +684,8 @@ mod tests {
                 "alltheplaces.zip",
                 pipeline::PLANET_PBF_FILENAME,
                 "qrank.csv.gz",
-                "osmviews.tiff"
+                "osmviews.tiff",
+                "country-boundaries",
             ]
         );
 
@@ -670,6 +717,7 @@ mod tests {
             pipeline::PLANET_PBF_FILENAME,
             "qrank.csv.gz",
             "osmviews.tiff",
+            "country-boundaries",
         ];
         let workflow = &bom["formulation"][0]["workflows"][0];
         assert_eq!(workflow["uid"], "k8s-job-42");
@@ -680,7 +728,7 @@ mod tests {
         assert_eq!(workflow["timeStart"], "2026-03-04T15:16:17Z");
         assert_eq!(workflow["timeEnd"], bom["metadata"]["timestamp"]);
         assert_eq!(workflow["resourceReferences"][0]["ref"], "tool-osmdiffs");
-        assert_eq!(workflow["inputs"].as_array().expect("inputs").len(), 4);
+        assert_eq!(workflow["inputs"].as_array().expect("inputs").len(), 5);
         for input in workflow["inputs"].as_array().expect("inputs") {
             let r = input["resource"]["ref"].as_str().expect("ref");
             assert!(known_refs.contains(&r), "unknown bom-ref {r}");

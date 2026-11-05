@@ -27,7 +27,7 @@ use geo::Centroid;
 use s2::{cell::Cell, cellid::CellID, point::Point};
 
 /// Keys that hold IFOPT IDs, on either side.
-const IFOPT_KEYS: [&str; 3] = ["ref:IFOPT", "ref:sloid", "railway:ref:sloid"];
+pub(crate) const IFOPT_KEYS: [&str; 3] = ["ref:IFOPT", "ref:sloid", "railway:ref:sloid"];
 
 /// A candidate with the same IFOPT ID scores at least this much, so
 /// that it wins over any candidate that merely belongs to the same
@@ -171,8 +171,15 @@ impl Modes {
     }
 }
 
+/// Whether `tags` make a feature a part of a public transport stop,
+/// of a kind that [TransitMatcher] can match: a station, stop area,
+/// platform or stop position.
+pub(crate) fn is_stop<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> bool {
+    Kind::from_tags(tags).is_some()
+}
+
 /// Splits a `;`-separated tag value into trimmed, non-empty parts.
-fn split_values(value: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn split_values(value: &str) -> impl Iterator<Item = &str> {
     value.split(';').map(str::trim).filter(|s| !s.is_empty())
 }
 
@@ -214,7 +221,7 @@ impl Ids {
 /// belongs to UIC `8503000`. Stops abroad have SLOIDs with longer
 /// numbers, such as `ch:1:sloid:1100020` for a bus stop in Germany,
 /// which are not UIC codes.
-fn swiss_uic(ifopt: &str) -> Option<String> {
+pub(crate) fn swiss_uic(ifopt: &str) -> Option<String> {
     let number = ifopt.strip_prefix("ch:1:sloid:")?.split(':').next()?;
     if number.is_empty() || number.len() > 5 || !number.bytes().all(|b| b.is_ascii_digit()) {
         return None;

@@ -149,9 +149,9 @@ pub struct ConflatedLayers {
 /// One decoded row of `conflated.parquet`, kept whether or not it has
 /// an OSM match -- unlike `edits::ConflatedRow`, which only exists for
 /// matched rows (nothing to suggest an edit for otherwise). `None`
-/// means this row has no ATP side either -- the schema allows it even
-/// though `conflate()` never actually produces such a row -- and is
-/// skipped entirely, the same defensive handling `edits.rs` applies.
+/// means this row has no ATP side either -- an OSM feature that may be
+/// gone, see `conflate::deletion` -- and is skipped for now, the same
+/// as in `edits.rs`.
 struct ConflatedTileRow {
     spider: String,
     /// See `pipeline::importance`.
@@ -535,10 +535,10 @@ fn extract_rows(
     Ok(counts)
 }
 
-/// `None` means this row has no ATP side -- the schema allows it even
-/// though `conflate()` never actually produces such a row -- nothing to
-/// visualize, but still a real row the caller should count against its
-/// progress bar. Unlike `edits::extract_conflated_row`, a `None` `osm`
+/// `None` means this row has no ATP side -- an OSM feature that may be
+/// gone, see `conflate::deletion` -- which these tiles don't show yet,
+/// but still a real row the caller should count against its progress
+/// bar. Unlike `edits::extract_conflated_row`, a `None` `osm`
 /// is kept, not skipped: an unmatched ATP feature is exactly what this
 /// module exists to show.
 fn extract_conflated_tile_row(batch: &RecordBatch, row: usize) -> Result<Option<ConflatedTileRow>> {
