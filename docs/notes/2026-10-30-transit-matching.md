@@ -64,7 +64,12 @@ those ATP features and gave them only their stop's `uic_ref`. Of the
   stop. A trolleybus is a bus, and light rail fits both trains and
   trams.
 - **Names only count without IDs to compare**, within 100 m, because
-  names repeat ("Bahnhof").
+  names repeat ("Bahnhof"). Punctuation doesn't count, so
+  `Lausanne-Flon` equals `Lausanne, Flon`. A name without its place,
+  such as OSM `Central` for `Zürich, Central`, scores a bit lower
+  than the full name (0.35 instead of 0.4), so the full name wins
+  where both exist. Two names with different places, such as
+  `Bern, Central` and `Zürich, Central`, never match.
 
 ## One to one
 
@@ -95,11 +100,31 @@ Fewer platforms match, but those that no longer match are mostly the
 second direction of a stop that OSM maps as one node: a useful signal
 that OSM lacks a platform. Matches for other spiders stay the same.
 
+## Short names
+
+Swiss stop names have the form "Place, Stop", but OSM often leaves
+out the place, especially on tram platforms in Zürich, Basel and
+Geneva, and sometimes writes the name with other punctuation
+(`Luzern Bahnhof`). Accepting both raised the matched Swiss platforms
+from 36,858 to 39,769 (68% to 73%), with the hold-out and all
+exact-ID matches unchanged and no change for other spiders. In a
+random sample of 30 new matches, name and `local_ref` agreed on
+all of them.
+
+Names that differ more, with words reordered or left out (OSM
+`Riedbach` for `Bern Riedbach`, `Bahnhof Selnau` for
+`Zürich Selnau, Bahnhof`) or with a registry qualifier
+(`Montreux (lac)`), still don't match. Loosening further mostly
+invites false matches, so these go to OSM as sloid edits
+([#880](https://github.com/brawer/osmdiffs/issues/880)).
+
 ## Known limits
 
-- **Zürich HB tracks 31–34 and 41–44**: OSM gives them the UIC codes
-  of the former stations Löwenstrasse and Museumstrasse, the Swiss
-  registry the code of Zürich HB, so they don't match.
+- **Tracks of private railways at shared stations**, such as Zürich HB
+  tracks 31–34 and 41–44 or Bern RBS: OSM gives them the railway's
+  own UIC code, the Swiss registry that of the main station, so they
+  don't match. The fix is to add their sloids in OSM
+  ([#866](https://github.com/brawer/osmdiffs/issues/866)).
 - **Other countries**: IFOPT handling follows EN 28701 (stop, area,
   quay), with Switzerland's extra `sloid` field. The unit tests have
   German cases; other countries need real examples in the test table

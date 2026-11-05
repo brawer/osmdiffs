@@ -44,6 +44,11 @@ const SAME_STOP_FACTOR: f64 = 0.8;
 /// many towns have a stop called "Bahnhof".
 const NAME_FACTOR: f64 = 0.4;
 
+/// Evidence factor when one name is the other without its place, such
+/// as `Central` for `Zürich, Central` ([name_factor]). Below
+/// [NAME_FACTOR], so that a full name wins where both exist.
+const SHORT_NAME_FACTOR: f64 = 0.35;
+
 /// Name-only matches must be closer than this.
 const NAME_MAX_METERS: f64 = 100.0;
 
@@ -351,6 +356,39 @@ fn normalize_name(name: &str) -> String {
         .to_lowercase()
 }
 
+/// The words of a name, without punctuation: `Lausanne-Flon` and
+/// `lausanne, flon` both give `lausanne flon`. OSM and the registries
+/// often differ only in commas, hyphens and dots.
+fn name_words(name: &str) -> String {
+    name.split(|c: char| !c.is_alphanumeric() && c != '+')
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// How well two normalized names agree: [NAME_FACTOR] if they have the
+/// same words, and [SHORT_NAME_FACTOR] if one is the other without its
+/// place. Swiss and German stop names have the form "Place, Stop", but
+/// OSM often leaves out the place, especially on tram platforms:
+/// `Central` for `Zürich, Central`. Two names that both have a place
+/// must agree in full, so `Bern, Central` doesn't match
+/// `Zürich, Central`.
+fn name_factor(a: &str, b: &str) -> f64 {
+    let short = |long: &str, short: &str| {
+        !short.contains(',')
+            && long
+                .split_once(',')
+                .is_some_and(|(_, stop)| name_words(stop) == name_words(short))
+    };
+    if name_words(a) == name_words(b) {
+        NAME_FACTOR
+    } else if short(a, b) || short(b, a) {
+        SHORT_NAME_FACTOR
+    } else {
+        0.0
+    }
+}
+
 /// Matches public transport features. A candidate must be the same
 /// kind of thing ([Kind::fit]) with compatible means of transport
 /// ([Modes::compatible]). Then, by evidence:
@@ -366,7 +404,8 @@ fn normalize_name(name: &str) -> String {
 ///   whatever else agrees.
 /// - No IDs to compare, but equal names within [NAME_MAX_METERS]:
 ///   [NAME_FACTOR] times the `local_ref` factor times the distance
-///   score.
+///   score; [SHORT_NAME_FACTOR] if one name lacks the place
+///   ([name_factor]).
 ///
 /// Scores are then multiplied by the kind fit.
 pub struct TransitMatcher {
@@ -446,11 +485,13 @@ impl TransitMatcher {
                 let Some(name) = &self.name else {
                     return (0.0, 0.0, 0.0);
                 };
-                let same_name = candidate
+                let names = candidate
                     .tags()
-                    .any(|(k, v)| k == "name" && normalize_name(v) == *name);
-                if same_name {
-                    (fit * NAME_FACTOR * local_refs(), 0.0, NAME_MAX_METERS)
+                    .filter(|&(k, _)| k == "name")
+                    .map(|(_, v)| name_factor(name, &normalize_name(v)))
+                    .fold(0.0, f64::max);
+                if names > 0.0 {
+                    (fit * names * local_refs(), 0.0, NAME_MAX_METERS)
                 } else {
                     (0.0, 0.0, 0.0)
                 }
@@ -1048,6 +1089,87 @@ mod tests {
             want: NO_MATCH,
         },
         Case {
+            what: "same words, different punctuation",
+            atp: BUS_PLATFORM,
+            osm: &[
+                ("public_transport", "platform"),
+                ("highway", "bus_stop"),
+                ("name", "Zürich Bahnhofquai-HB"),
+            ],
+            meters: 0.0,
+            want: (0.32, 0.32),
+        },
+        Case {
+            what: "OSM name without the place",
+            atp: BUS_PLATFORM,
+            osm: &[
+                ("public_transport", "platform"),
+                ("highway", "bus_stop"),
+                ("name", "Bahnhofquai/HB"),
+            ],
+            meters: 0.0,
+            want: (0.28, 0.28),
+        },
+        Case {
+            what: "ATP name without the place",
+            atp: &[
+                ("public_transport", "platform"),
+                ("highway", "bus_stop"),
+                ("name", "Bahnhofquai/HB"),
+            ],
+            osm: &[
+                ("public_transport", "platform"),
+                ("highway", "bus_stop"),
+                ("name", "Zürich, Bahnhofquai/HB"),
+            ],
+            meters: 0.0,
+            want: (0.28, 0.28),
+        },
+        Case {
+            what: "OSM name without the place, no space after the comma",
+            atp: &[
+                ("public_transport", "platform"),
+                ("highway", "bus_stop"),
+                ("name", "Zürich,Kalkbreite/Bhf.Wiedikon"),
+            ],
+            osm: &[
+                ("public_transport", "platform"),
+                ("highway", "bus_stop"),
+                ("name", "Kalkbreite/Bhf. Wiedikon"),
+            ],
+            meters: 0.0,
+            want: (0.28, 0.28),
+        },
+        Case {
+            what: "same stop name in another place",
+            atp: NAME_ONLY_PLATFORM,
+            osm: &[
+                ("public_transport", "platform"),
+                ("highway", "bus_stop"),
+                ("name", "Basel, Bahnhofquai/HB"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "OSM name is the place, not the stop",
+            atp: NAME_ONLY_PLATFORM,
+            osm: &[
+                ("public_transport", "platform"),
+                ("highway", "bus_stop"),
+                ("name", "Zürich"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "short name, but too far for a name-only match",
+            atp: NAME_ONLY_PLATFORM,
+            osm: &[("public_transport", "platform"), ("name", "Bahnhofquai/HB")],
+            meters: 150.0,
+            want: NO_MATCH,
+        },
+        Case {
             what: "no IDs, no name",
             atp: BUS_PLATFORM,
             osm: &[("public_transport", "platform")],
@@ -1112,6 +1234,27 @@ mod tests {
         let node = score(BUS_PLATFORM, &combined, 0.0).unwrap();
         let way = score(BUS_PLATFORM, &platform, 15.0).unwrap();
         assert!(way > node, "{way} vs {node}");
+    }
+
+    /// Where OSM has the full name and the short one at about the same
+    /// distance, the full name must win.
+    #[test]
+    fn test_full_name_beats_short_name() {
+        let platform = |name: &'static str| {
+            vec![
+                ("public_transport", "platform"),
+                ("highway", "bus_stop"),
+                ("name", name),
+            ]
+        };
+        let full = score(
+            NAME_ONLY_PLATFORM,
+            &platform("Zürich, Bahnhofquai/HB"),
+            10.0,
+        )
+        .unwrap();
+        let short = score(NAME_ONLY_PLATFORM, &platform("Bahnhofquai/HB"), 5.0).unwrap();
+        assert!(full > short, "{full} vs {short}");
     }
 
     #[test]
