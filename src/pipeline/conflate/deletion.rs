@@ -9,9 +9,11 @@
 //!
 //! - [Reason::Wikidata]: its `brand:wikidata`, `network:wikidata` or
 //!   `operator:wikidata` names a brand, network or operator for which
-//!   ATP has features of the same kind, such as a shop of a chain
-//!   whose shops ATP lists. The kind matters: ATP may list the
-//!   supermarkets of a chain, but not its restaurants.
+//!   ATP has features of the same kind in the same country, such as a
+//!   shop of a chain whose shops ATP lists. The kind matters, since
+//!   ATP may list the supermarkets of a chain but not its restaurants;
+//!   and so does the country, since ATP may list a chain's shops in
+//!   one country but not in another.
 //! - [Reason::SwissTransitId]: it is a public transport stop with a
 //!   Swiss ID, which ATP gets from the authoritative Swiss register,
 //!   but ATP knows none of its Swiss IDs. Swiss IDs are IFOPT IDs
@@ -35,7 +37,7 @@
 //! Tag values can hold several `;`-separated values; any one of them
 //! counts.
 
-use super::switzerland;
+use super::countries::{Country, country};
 use crate::matchers::{
     IFOPT_KEYS, MatchMask, is_transit_stop, parse_wikidata_ids, split_values, swiss_uic,
 };
@@ -69,9 +71,11 @@ pub(super) enum Reason {
 #[derive(Debug, Default)]
 pub(super) struct AtpCoverage {
     /// For each Wikidata ID in ATP's `brand:wikidata`,
-    /// `network:wikidata` and `operator:wikidata` tags, the union of
-    /// the match masks of the ATP features that carry it.
-    wikidata: HashMap<u64, MatchMask>,
+    /// `network:wikidata` and `operator:wikidata` tags, and each
+    /// country with ATP features that carry it, the union of the match
+    /// masks of those features. A feature in no country, such as on an
+    /// oil rig at sea, counts for `None`.
+    wikidata: HashMap<(u64, Option<Country>), MatchMask>,
 
     /// The Swiss IFOPT IDs in ATP, lowercased.
     swiss_ifopt: HashSet<String>,
@@ -88,13 +92,30 @@ pub(super) struct AtpCoverage {
     swiss_transit_features: u64,
 }
 
+/// The country of `place`, if it matters for [AtpCoverage::add]: that
+/// is, if `place` has a Wikidata ID that [AtpCoverage] collects. Else
+/// `None`, without the cost of looking up its country.
+pub(super) fn place_country(place: &Place) -> Option<Country> {
+    if !place
+        .tags
+        .iter()
+        .any(|(key, _)| WIKIDATA_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let ll = s2::latlng::LatLng::from(CellID(place.s2_cell_id));
+    country(ll.lng.deg(), ll.lat.deg())
+}
+
 impl AtpCoverage {
-    pub(super) fn add(&mut self, place: &Place) {
+    /// Adds `place`, which lies in `country` as [place_country] gives
+    /// it.
+    pub(super) fn add(&mut self, place: &Place, country: Option<Country>) {
         let mut swiss = false;
         for (key, value) in &place.tags {
             if WIKIDATA_KEYS.contains(&key.as_str()) {
                 for id in parse_wikidata_ids(value) {
-                    let mask = self.wikidata.entry(id).or_default();
+                    let mask = self.wikidata.entry((id, country)).or_default();
                     *mask = MatchMask(mask.0 | place.mask.0);
                 }
             } else if IFOPT_KEYS.contains(&key.as_str()) {
@@ -119,13 +140,17 @@ impl AtpCoverage {
         self.swiss_transit_features >= MIN_SWISS_TRANSIT_FEATURES
     }
 
-    pub(super) fn num_wikidata_ids(&self) -> usize {
+    /// How many pairs of Wikidata ID and country ATP has.
+    pub(super) fn num_wikidata_countries(&self) -> usize {
         self.wikidata.len()
     }
 
-    /// Whether ATP has features of kind `mask` with Wikidata ID `id`.
-    fn covers_wikidata(&self, id: u64, mask: MatchMask) -> bool {
-        self.wikidata.get(&id).is_some_and(|m| m.intersects(&mask))
+    /// Whether ATP has features of kind `mask` with Wikidata ID `id`
+    /// in `country`.
+    fn covers_wikidata(&self, id: u64, country: Option<Country>, mask: MatchMask) -> bool {
+        self.wikidata
+            .get(&(id, country))
+            .is_some_and(|m| m.intersects(&mask))
     }
 
     /// Whether ATP has a Swiss stop within about [SWISS_CELL_LEVEL]'s
@@ -156,12 +181,16 @@ fn swiss_uics(value: &str) -> impl Iterator<Item = &str> {
 /// Why the unmatched OSM feature with `tags` is a candidate for
 /// deletion, or `None` if nothing suggests so. `location` gives the
 /// feature's (longitude, latitude); it is only called when needed,
-/// since it means decoding the geometry.
+/// and at most once, since it means decoding the geometry.
 pub(super) fn deletion_reason<'a>(
     tags: impl Iterator<Item = (&'a str, &'a str)> + Clone,
     atp: &AtpCoverage,
     location: impl FnOnce() -> Option<(f64, f64)>,
 ) -> Option<Reason> {
+    let mut location = Some(location);
+    let mut located = None;
+    let mut locate = || *located.get_or_insert_with(|| location.take().and_then(|f| f()));
+
     if is_transit_stop(tags.clone()) && atp.has_swiss_transit() {
         let mut has_any_id = false;
         let mut has_swiss_id = false;
@@ -189,22 +218,29 @@ pub(super) fn deletion_reason<'a>(
         // that are carry its IDs.
         let is_aerialway = tags.clone().any(|(key, _)| key == "aerialway");
         if !has_any_id && !is_aerialway {
-            let (lng, lat) = location()?;
-            if switzerland::contains(lng, lat) {
+            let (lng, lat) = locate()?;
+            if country(lng, lat) == Some(Country::SWITZERLAND) {
                 return (!atp.has_swiss_stop_near(lng, lat)).then_some(Reason::SwissTransitStop);
             }
         }
     }
 
-    let mut mask = MatchMask::default();
-    for (key, value) in tags.clone() {
-        mask.add_tag(key, value);
-    }
-    let covered = tags
+    let ids: Vec<u64> = tags
+        .clone()
         .filter(|(key, _)| WIKIDATA_KEYS.contains(key))
         .flat_map(|(_, value)| parse_wikidata_ids(value))
-        .any(|id| atp.covers_wikidata(id, mask));
-    covered.then_some(Reason::Wikidata)
+        .collect();
+    if ids.is_empty() {
+        return None;
+    }
+    let mut mask = MatchMask::default();
+    for (key, value) in tags {
+        mask.add_tag(key, value);
+    }
+    let country = locate().and_then(|(lng, lat)| country(lng, lat));
+    ids.into_iter()
+        .any(|id| atp.covers_wikidata(id, country, mask))
+        .then_some(Reason::Wikidata)
 }
 
 #[cfg(test)]
@@ -241,35 +277,48 @@ mod tests {
     /// Stadelhofen, unless `swiss` is false.
     fn coverage(swiss: bool) -> AtpCoverage {
         let mut atp = AtpCoverage::default();
-        atp.add(&place(
-            &[("shop", "supermarket"), ("brand:wikidata", "Q1")],
-            SINGEN,
-        ));
-        atp.add(&place(
-            &[("amenity", "fuel"), ("operator:wikidata", "Q7;Q2")],
-            SINGEN,
-        ));
+        add(
+            &mut atp,
+            &place(&[("shop", "supermarket"), ("brand:wikidata", "Q1")], SINGEN),
+        );
+        add(
+            &mut atp,
+            &place(
+                &[("amenity", "fuel"), ("operator:wikidata", "Q7;Q2")],
+                SINGEN,
+            ),
+        );
         if swiss {
-            atp.add(&place(
-                &[
-                    ("public_transport", "station"),
-                    ("ref:IFOPT", "ch:1:sloid:3000"),
-                    ("uic_ref", "8503000"),
-                    ("network:wikidata", "Q3"),
-                ],
-                ZURICH_HB,
-            ));
-            atp.add(&place(
-                &[
-                    ("public_transport", "platform"),
-                    ("ref:IFOPT", "ch:1:sloid:3003:1:1"),
-                    ("network:wikidata", "Q3"),
-                ],
-                (8.5487, 47.3667),
-            ));
+            add(
+                &mut atp,
+                &place(
+                    &[
+                        ("public_transport", "station"),
+                        ("ref:IFOPT", "ch:1:sloid:3000"),
+                        ("uic_ref", "8503000"),
+                        ("network:wikidata", "Q3"),
+                    ],
+                    ZURICH_HB,
+                ),
+            );
+            add(
+                &mut atp,
+                &place(
+                    &[
+                        ("public_transport", "platform"),
+                        ("ref:IFOPT", "ch:1:sloid:3003:1:1"),
+                        ("network:wikidata", "Q3"),
+                    ],
+                    (8.5487, 47.3667),
+                ),
+            );
             atp.swiss_transit_features = MIN_SWISS_TRANSIT_FEATURES;
         }
         atp
+    }
+
+    fn add(atp: &mut AtpCoverage, place: &Place) {
+        atp.add(place, place_country(place));
     }
 
     fn reason(atp: &AtpCoverage, tags: &[(&str, &str)], at: (f64, f64)) -> Option<Reason> {
@@ -286,7 +335,7 @@ mod tests {
         assert_eq!(atp.swiss_uic.len(), 2);
         assert!(atp.has_swiss_stop_near(ZURICH_HB.0, ZURICH_HB.1));
         assert!(!atp.has_swiss_stop_near(ZURICH_NORTH.0, ZURICH_NORTH.1));
-        assert_eq!(atp.num_wikidata_ids(), 4);
+        assert_eq!(atp.num_wikidata_countries(), 4);
     }
 
     #[test]
@@ -307,11 +356,11 @@ mod tests {
             SINGEN,
         );
         for _ in 0..MIN_SWISS_TRANSIT_FEATURES - 1 {
-            atp.add(&stop);
+            add(&mut atp, &stop);
         }
-        atp.add(&german);
+        add(&mut atp, &german);
         assert!(!atp.has_swiss_transit());
-        atp.add(&stop);
+        add(&mut atp, &stop);
         assert!(atp.has_swiss_transit());
         assert!(atp.swiss_ifopt.contains("ch:1:sloid:1100020"));
         assert!(!atp.swiss_ifopt.contains("de:08336:3674"));
@@ -335,14 +384,17 @@ mod tests {
         let restaurant = [("amenity", "restaurant"), ("brand:wikidata", "Q1")];
         assert_eq!(reason(&atp, &restaurant, SINGEN), None);
 
+        // ATP has Q1's supermarkets in Germany, but not in Switzerland.
+        let swiss = [("shop", "supermarket"), ("brand:wikidata", "Q1")];
+        assert_eq!(reason(&atp, &swiss, ZURICH_NORTH), None);
+
         // Q2 is in the second of two values on the ATP side.
         let fuel = [("amenity", "fuel"), ("brand:wikidata", "Q2")];
         assert_eq!(reason(&atp, &fuel, SINGEN), wikidata);
 
-        // A stop of a network whose stops ATP has, outside the scope
-        // of the Swiss signals.
+        // A stop of a network whose stops ATP only has in Switzerland.
         let stop = [("highway", "bus_stop"), ("network:wikidata", "Q3")];
-        assert_eq!(reason(&atp, &stop, SINGEN), wikidata);
+        assert_eq!(reason(&atp, &stop, SINGEN), None);
     }
 
     #[test]

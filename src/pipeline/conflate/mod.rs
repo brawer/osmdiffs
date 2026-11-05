@@ -33,11 +33,11 @@ use std::{
 /// tables, not RSS at a fixed fraction of progress.
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
+pub(crate) mod countries;
 mod deletion;
 mod s2_util;
-mod switzerland;
 mod writer;
-use deletion::{AtpCoverage, Reason, deletion_reason};
+use deletion::{AtpCoverage, Reason, deletion_reason, place_country};
 use s2_util::MergedCellRanges;
 use writer::{ParquetRow, ParquetWriter};
 
@@ -248,9 +248,18 @@ fn produce_rows(
             }
             send_row(atp, osm_match, osm, signals, &out)
         })?;
-        for (atp, has_matcher) in batch.iter().zip(has_matcher) {
-            if has_matcher.into_inner() {
-                coverage.add(atp);
+        let countries: Vec<_> = batch
+            .par_iter()
+            .zip(&has_matcher)
+            .map(|(atp, has_matcher)| {
+                has_matcher
+                    .load(Ordering::Relaxed)
+                    .then(|| place_country(atp))
+            })
+            .collect();
+        for (atp, country) in batch.iter().zip(countries) {
+            if let Some(country) = country {
+                coverage.add(atp, country);
             }
         }
         batch_start += batch.len() as u64;
@@ -361,7 +370,7 @@ fn send_deletion_candidates(
     let count = |reason| counts.get(&reason).copied().unwrap_or(0);
     log::info!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
-        atp_wikidata_ids = coverage.num_wikidata_ids(),
+        atp_wikidata_countries = coverage.num_wikidata_countries(),
         atp_has_swiss_transit = coverage.has_swiss_transit(),
         wikidata = count(Reason::Wikidata),
         swiss_transit_id = count(Reason::SwissTransitId),

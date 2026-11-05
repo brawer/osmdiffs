@@ -45,13 +45,13 @@ Almost none of these are gone from the real world:
   them, but no matcher handles those kinds, so they never match.
   Bicycle rental and charging stations were the same.
 
-## The rules now: 2,358 rows
+## The rules now: 2,252 rows
 
 | signal | rule | rows |
 |---|---|---:|
-| `wikidata` | ATP has features with this Wikidata ID, of the same kind (match mask), and that we have a matcher for | 1,087 |
+| `wikidata` | ATP has features with this Wikidata ID, of the same kind (match mask), in the same country, and that we have a matcher for | 1,058 |
 | `swiss_transit_id` | transit stop whose Swiss IDs are all unknown to ATP (IFOPT IDs, `uic_ref`, and UIC codes derived from SLOIDs) | 1,046 |
-| `swiss_transit_stop` | transit stop in Switzerland without any IFOPT ID or `uic_ref`, not an aerialway, and with no register stop within one S2 level-15 cell (about 280 m) | 225 |
+| `swiss_transit_stop` | transit stop in Switzerland without any IFOPT ID or `uic_ref`, not an aerialway, and with no register stop within one S2 level-15 cell (about 280 m) | 148 |
 
 Counts are by rule; the log line `conflate.deletion_candidates: done`
 has the same numbers.
@@ -65,17 +65,26 @@ Other details:
   apply: the register lists `network:wikidata` for its stops.
 - Values separated by `;` are split, and any one of them counts.
 - `uic_ref` is the right key: Swiss OSM has it on 64,568 objects.
-- "In Switzerland" uses Natural Earth's 1:10m boundary, which is a few
-  hundred meters off in places. Konstanz south of the Rhine counts as
-  Swiss, which gave 7 of the 225 `swiss_transit_stop` rows.
+- Countries come from the
+  [country-boundaries](https://crates.io/crates/country-boundaries)
+  crate, whose data is derived from OpenStreetMap (ODbL) and listed as
+  an input in the provenance BOM. It gets the border cases right:
+  Konstanz, Büsingen and Campione are not Swiss; Kreuzlingen and Basel
+  are. An earlier version used Natural Earth's 1:10m boundary, which
+  counted Konstanz south of the Rhine as Swiss and gave 225
+  `swiss_transit_stop` rows instead of 148.
+- A brand counts as covered only in the countries where ATP has
+  features of it. The country of an ATP feature is that of its
+  location, not its `addr:country`.
 
 What the remaining rows look like:
 
 - `wikidata`: fuel stations (SOCAR, Avia, Eni, BP, Tamoil, Shell),
   Jumbo, k kiosk, Marionnaud, Migros, Denner, Spar, car dealers. These
-  are what the rule is for. 26 of them are just outside Switzerland,
-  which is an artifact of this eval: ATP was filtered to Switzerland,
-  so a brand's German shops look unlisted.
+  are what the rule is for. Before brand coverage was per country, 26
+  more were just outside Switzerland, because ATP was filtered to
+  Switzerland for this eval and a brand's German shops looked
+  unlisted.
 - `swiss_transit_id`: mostly bus platforms and stop positions whose
   `uic_ref` the register doesn't have, such as "Goldgrubenweg"
   (8593333) or "Koppigen, Aspi" (8593259). These are stops the
@@ -87,10 +96,8 @@ What the remaining rows look like:
 
 ## Known gaps
 
-- On the planet, a brand counts as covered as soon as ATP has it
-  somewhere. A chain that ATP only lists in one country will flag its
-  shops in every other country. Checking coverage per country would
-  fix that.
+- Within a country, a brand counts as covered everywhere, even if a
+  spider only covers one region.
 - `conflated.pmtiles` and `suggest_edits` skip OSM-only rows for now.
 - Next: emit OSM-only rows for POIs whose brand, network or operator
   *name* ATP has, for features without Wikidata IDs.
