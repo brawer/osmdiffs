@@ -32,7 +32,8 @@ const WIKIDATA_IDS_FILENAME: &str = "wikidata-ids";
 
 /// Tag keys whose values are Wikidata IDs of brands, operators or
 /// networks.
-const WIKIDATA_KEYS: [&str; 3] = ["brand:wikidata", "network:wikidata", "operator:wikidata"];
+pub(super) const WIKIDATA_KEYS: [&str; 3] =
+    ["brand:wikidata", "network:wikidata", "operator:wikidata"];
 
 /// True for tag keys whose value(s) are the Wikidata IDs of a brand,
 /// operator or network.

@@ -53,12 +53,10 @@ use crate::matchers::{
     IFOPT_KEYS, MatchMask, is_transit_stop, normalize_name, parse_wikidata_ids, split_values,
     swiss_uic,
 };
+use crate::pipeline::wikidata_ids::WIKIDATA_KEYS;
 use crate::places::Place;
 use s2::cellid::CellID;
 use std::collections::{HashMap, HashSet};
-
-/// Tag keys whose Wikidata IDs we look up in [AtpCoverage].
-const WIKIDATA_KEYS: [&str; 3] = ["brand:wikidata", "network:wikidata", "operator:wikidata"];
 
 /// Tag keys whose names we look up in [AtpCoverage].
 const NAME_KEYS: [&str; 3] = ["brand", "network", "operator"];
