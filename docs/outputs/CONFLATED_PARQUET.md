@@ -10,6 +10,10 @@ pairing the AllThePlaces feature with whichever OpenStreetMap feature
 it was matched to — or with no OpenStreetMap match at all, if none was
 found.
 
+It also has rows with an OpenStreetMap feature but no AllThePlaces
+feature, for OpenStreetMap features that may no longer exist; see
+below.
+
 This is a [GeoParquet 2.0-rc.1](https://github.com/opengeospatial/geoparquet/blob/v2.0.0-rc.1/format-specs/geoparquet.md)
 file (2.0 hasn’t had its final release yet, but this is the newest spec
 available, and the on-disk format isn’t expected to change again before
@@ -50,6 +54,20 @@ A few things worth calling out that aren’t obvious from the above:
   can happen for perfectly ordinary reasons — it doesn’t mean anything
   is wrong with the conflation pipeline; rather, it’s a signal that
   the feature may be missing from OpenStreetMap.
+- **`atp` is `null` for OpenStreetMap features that may be gone.**
+  AllThePlaces covers far less than OpenStreetMap, so an OpenStreetMap
+  feature without a match usually means nothing, and gets no row. It
+  only gets one, with `atp` null, when there is a strong signal that
+  AllThePlaces would list it if it still existed: its
+  `brand:wikidata`, `network:wikidata` or `operator:wikidata` names a
+  brand, network or operator whose features of the same kind
+  AllThePlaces lists in that country; or, without such Wikidata IDs,
+  its `brand`, `network` or `operator` has a name for which
+  AllThePlaces lists such features; or it is a Swiss public transport
+  stop with an ID
+  that the Swiss register doesn’t know; or it is a Swiss stop without
+  IDs, far from any stop in the register. See
+  [the evaluation](../notes/2026-11-05-deletion-candidates.md).
 - **`atp_geometry`/`osm_geometry` sit outside the `atp`/`osm` structs**,
   at the top level of the file, rather than next to the rest of each
   side’s data — GeoParquet requires geometry columns to live at the

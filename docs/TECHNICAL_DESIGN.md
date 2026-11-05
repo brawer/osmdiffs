@@ -656,9 +656,10 @@ until the full pipeline was proven out:
   API is the closest fit) is future work, not yet designed in detail.
 - Two matchers are implemented. `PoiMatcher` matches shops,
   restaurants, hotels, schools and fuel stations on an exact
-  `brand:wikidata` tag, or on a shared phone number or email address
-  with a compatible category (see
-  [`notes/2026-10-25-phone-and-email-matching.md`](notes/2026-10-25-phone-and-email-matching.md)).
+  `brand:wikidata` tag, or on a shared phone number, email address or
+  brand name with a compatible category (see
+  [`notes/2026-10-25-phone-and-email-matching.md`](notes/2026-10-25-phone-and-email-matching.md)
+  and [`notes/2026-11-05-brand-name-matching.md`](notes/2026-11-05-brand-name-matching.md)).
   `TransitMatcher` matches public transport stops, platforms and
   tracks by `ref:IFOPT`, `uic_ref` and `local_ref`, so far tuned for
   Switzerland (see

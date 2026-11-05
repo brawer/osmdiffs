@@ -606,16 +606,12 @@ impl ParquetRow {
         let osm = cf.osm;
         let score = cf.score;
 
-        // Internal sort key. Almost always available for free from `atp`
-        // -- `produce_rows` only ever calls this with `atp: Some(..)`,
-        // since it iterates ATP places outward, so the `osm`-only branch
-        // below is unreached today, kept only so this function stays
-        // correct if a caller ever does construct an OSM-only row (e.g.
-        // a future "suggest creating this as a new OSM feature" flow).
-        // Feature carries no precomputed position the way Place does
-        // (see https://github.com/brawer/osmdiffs/issues/662), so
-        // that branch has to decode geometry and compute a centroid --
-        // fine for a today-unreached path, not fine to do unconditionally.
+        // Internal sort key. Available for free from `atp`. OSM-only
+        // rows (deletion candidates, see `conflate::deletion`) are
+        // rare, so for them it's fine to decode the geometry and
+        // compute a centroid: Feature carries no precomputed position
+        // the way Place does (see
+        // https://github.com/brawer/osmdiffs/issues/662).
         let s2_cell_id = if let Some(ref atp) = atp {
             atp.s2_cell_id
         } else if let Some(ref feature) = osm {

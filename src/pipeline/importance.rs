@@ -80,6 +80,24 @@ impl Signals<'_> {
             .or_else(|| self.brands.brand_quantile(osm_tags));
         score(location, brand, category(atp.mask))
     }
+
+    /// The [`score`] of an OpenStreetMap feature at (`lng`, `lat`)
+    /// with `tags` that no AllThePlaces feature matched.
+    pub fn score_osm<'t, I>(&self, lng: f64, lat: f64, tags: I) -> f32
+    where
+        I: IntoIterator<Item = (&'t str, &'t str)>,
+        I::IntoIter: Clone,
+    {
+        let tags = tags.into_iter();
+        let rank = self.osmviews.rank(lng, lat);
+        let location = self.locations.quantile(rank) as f32;
+        let mut mask = MatchMask::default();
+        for (key, value) in tags.clone() {
+            mask.add_tag(key, value);
+        }
+        let brand = self.brands.brand_quantile(tags);
+        score(location, brand, category(mask))
+    }
 }
 
 fn category(mask: MatchMask) -> f32 {

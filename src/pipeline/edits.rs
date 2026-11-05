@@ -271,10 +271,10 @@ fn read_conflated_rows(
     }))
 }
 
-/// `None` means this row has no OSM match (or, in principle, no ATP
-/// side either -- the schema allows it even though `conflate()` never
-/// actually produces such a row) -- nothing to suggest an edit for, but
-/// still a real row the caller should count against its progress bar.
+/// `None` means this row has no OSM match, or no ATP side (an OSM
+/// feature that may be gone, see `conflate::deletion`) -- nothing to
+/// suggest an edit for, but still a real row the caller should count
+/// against its progress bar.
 fn extract_conflated_row(batch: &RecordBatch, row: usize) -> Result<Option<ConflatedRow>> {
     let atp = get_struct(batch, "atp")?;
     if atp.is_null(row) {
