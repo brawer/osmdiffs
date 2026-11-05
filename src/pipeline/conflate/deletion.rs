@@ -14,6 +14,15 @@
 //!   ATP may list the supermarkets of a chain but not its restaurants;
 //!   and so does the country, since ATP may list a chain's shops in
 //!   one country but not in another.
+//! - [Reason::Name]: it has no such Wikidata IDs, but its `brand`,
+//!   `network` or `operator` names one for which ATP has features of
+//!   the same kind in the same country. Names are compared without
+//!   regard to case and spacing. Since names are weaker evidence than
+//!   Wikidata IDs, ATP must have at least [MIN_NAME_FEATURES] features
+//!   with the name in the country, and tag values listing more than
+//!   [MAX_NAME_VALUES] names are ignored: a bicycle shop tagged
+//!   `brand=Trek;Cube;Scott;Specialized` lists what it sells, and is
+//!   no Trek store.
 //! - [Reason::SwissTransitId]: it is a public transport stop with a
 //!   Swiss ID, which ATP gets from the authoritative Swiss register,
 //!   but ATP knows none of its Swiss IDs. Swiss IDs are IFOPT IDs
@@ -25,13 +34,14 @@
 //! - [Reason::SwissTransitStop]: it is a public transport stop in
 //!   Switzerland or Liechtenstein without any IFOPT ID or `uic_ref`,
 //!   and ATP has no Swiss stop anywhere near it. The Swiss register
-//!   covers Liechtenstein too, with the same kinds of IDs. Aerialway stations are left out,
-//!   since the register lacks most ski lifts.
+//!   covers Liechtenstein too, with the same kinds of IDs. Aerialway
+//!   stations are left out, since the register lacks most ski lifts.
 //!
-//! For stops that one of the Swiss signals is about, the Wikidata
-//! signal doesn't apply: the Swiss register lists `network:wikidata`
-//! for its stops, and that would flag every unmatched stop of a
-//! network. The Swiss signals only apply when ATP actually has the
+//! For stops that one of the Swiss signals is about, including ski
+//! lift stations in Switzerland and Liechtenstein, the Wikidata and
+//! name signals don't apply: the Swiss register lists
+//! `network:wikidata` and `operator` for its stops, and that would
+//! flag every unmatched stop of a network or operator. The Swiss signals only apply when ATP actually has the
 //! Swiss register, so that a week in which its spider failed doesn't
 //! turn every Swiss stop into a deletion candidate.
 //!
@@ -40,7 +50,8 @@
 
 use super::countries::{Country, country};
 use crate::matchers::{
-    IFOPT_KEYS, MatchMask, is_transit_stop, parse_wikidata_ids, split_values, swiss_uic,
+    IFOPT_KEYS, MatchMask, is_transit_stop, normalize_name, parse_wikidata_ids, split_values,
+    swiss_uic,
 };
 use crate::places::Place;
 use s2::cellid::CellID;
@@ -48,6 +59,21 @@ use std::collections::{HashMap, HashSet};
 
 /// Tag keys whose Wikidata IDs we look up in [AtpCoverage].
 const WIKIDATA_KEYS: [&str; 3] = ["brand:wikidata", "network:wikidata", "operator:wikidata"];
+
+/// Tag keys whose names we look up in [AtpCoverage].
+const NAME_KEYS: [&str; 3] = ["brand", "network", "operator"];
+
+/// For [Reason::Name], ATP must have at least this many features
+/// with the name in the country. In Switzerland, ATP has a single
+/// Trek store, while hundreds of OSM bicycle shops list Trek among
+/// the brands they sell.
+const MIN_NAME_FEATURES: u32 = 3;
+
+/// For [Reason::Name], OSM tag values with more than this many names
+/// are ignored, such as `brand=Trek;Cube;Scott;Specialized`. Car
+/// dealers are often tagged with two or three brands, such as
+/// `brand=Renault;Dacia;Alpine`.
+const MAX_NAME_VALUES: usize = 3;
 
 /// ATP must have at least this many features with a Swiss IFOPT ID
 /// for the Swiss transit signals to apply. The Swiss register has
@@ -64,6 +90,7 @@ const SWISS_CELL_LEVEL: u64 = 15;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Reason {
     Wikidata,
+    Name,
     SwissTransitId,
     SwissTransitStop,
 }
@@ -77,6 +104,11 @@ pub(super) struct AtpCoverage {
     /// masks of those features. A feature in no country, such as on an
     /// oil rig at sea, counts for `None`.
     wikidata: HashMap<(u64, Option<Country>), MatchMask>,
+
+    /// Like `wikidata`, but for the [normalize_name]d values of ATP's
+    /// `brand`, `network` and `operator` tags, with the number of ATP
+    /// features that have them.
+    names: HashMap<(String, Option<Country>), (MatchMask, u32)>,
 
     /// The Swiss IFOPT IDs in ATP, lowercased.
     swiss_ifopt: HashSet<String>,
@@ -100,7 +132,7 @@ pub(super) fn place_country(place: &Place) -> Option<Country> {
     if !place
         .tags
         .iter()
-        .any(|(key, _)| WIKIDATA_KEYS.contains(&key.as_str()))
+        .any(|(key, _)| WIKIDATA_KEYS.contains(&key.as_str()) || NAME_KEYS.contains(&key.as_str()))
     {
         return None;
     }
@@ -118,6 +150,12 @@ impl AtpCoverage {
                 for id in parse_wikidata_ids(value) {
                     let mask = self.wikidata.entry((id, country)).or_default();
                     *mask = MatchMask(mask.0 | place.mask.0);
+                }
+            } else if NAME_KEYS.contains(&key.as_str()) {
+                for name in split_values(value).map(normalize_name) {
+                    let (mask, count) = self.names.entry((name, country)).or_default();
+                    *mask = MatchMask(mask.0 | place.mask.0);
+                    *count += 1;
                 }
             } else if IFOPT_KEYS.contains(&key.as_str()) {
                 for id in swiss_ifopts(value) {
@@ -152,6 +190,21 @@ impl AtpCoverage {
         self.wikidata
             .get(&(id, country))
             .is_some_and(|m| m.intersects(&mask))
+    }
+
+    /// How many pairs of name and country ATP has.
+    pub(super) fn num_name_countries(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Whether ATP has features of kind `mask` with the
+    /// [normalize_name]d brand, network or operator `name` in
+    /// `country`, and at least [MIN_NAME_FEATURES] features with that
+    /// name in `country`.
+    fn covers_name(&self, name: String, country: Option<Country>, mask: MatchMask) -> bool {
+        self.names
+            .get(&(name, country))
+            .is_some_and(|(m, count)| m.intersects(&mask) && *count >= MIN_NAME_FEATURES)
     }
 
     /// Whether ATP has a Swiss stop within about [SWISS_CELL_LEVEL]'s
@@ -215,15 +268,18 @@ pub(super) fn deletion_reason<'a>(
         if has_swiss_id {
             return (!known).then_some(Reason::SwissTransitId);
         }
-        // Most ski lift stations aren't in the register, and those
-        // that are carry its IDs.
-        let is_aerialway = tags.clone().any(|(key, _)| key == "aerialway");
-        if !has_any_id && !is_aerialway {
+        if !has_any_id {
             let (lng, lat) = locate()?;
             if matches!(
                 country(lng, lat),
                 Some(Country::SWITZERLAND | Country::LIECHTENSTEIN)
             ) {
+                // Most ski lift stations aren't in the register, and
+                // those that are carry its IDs. Their operators often
+                // are, though, so the name signal doesn't apply either.
+                if tags.clone().any(|(key, _)| key == "aerialway") {
+                    return None;
+                }
                 return (!atp.has_swiss_stop_near(lng, lat)).then_some(Reason::SwissTransitStop);
             }
         }
@@ -234,7 +290,19 @@ pub(super) fn deletion_reason<'a>(
         .filter(|(key, _)| WIKIDATA_KEYS.contains(key))
         .flat_map(|(_, value)| parse_wikidata_ids(value))
         .collect();
-    if ids.is_empty() {
+    // Names only count for features without Wikidata IDs: a Wikidata
+    // ID says better which brand is meant than its name.
+    let names: Vec<String> = if ids.is_empty() {
+        tags.clone()
+            .filter(|(key, value)| {
+                NAME_KEYS.contains(key) && split_values(value).count() <= MAX_NAME_VALUES
+            })
+            .flat_map(|(_, value)| split_values(value).map(normalize_name))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if ids.is_empty() && names.is_empty() {
         return None;
     }
     let mut mask = MatchMask::default();
@@ -242,9 +310,16 @@ pub(super) fn deletion_reason<'a>(
         mask.add_tag(key, value);
     }
     let country = locate().and_then(|(lng, lat)| country(lng, lat));
-    ids.into_iter()
+    if ids
+        .into_iter()
         .any(|id| atp.covers_wikidata(id, country, mask))
-        .then_some(Reason::Wikidata)
+    {
+        return Some(Reason::Wikidata);
+    }
+    names
+        .into_iter()
+        .any(|name| atp.covers_name(name, country, mask))
+        .then_some(Reason::Name)
 }
 
 #[cfg(test)]
@@ -371,6 +446,76 @@ mod tests {
         assert!(!atp.swiss_ifopt.contains("de:08336:3674"));
         // A foreign stop in the Swiss register has no UIC code.
         assert!(atp.swiss_uic.is_empty());
+    }
+
+    #[test]
+    fn test_name() {
+        let mut atp = AtpCoverage::default();
+        let station = place(&[("amenity", "fuel"), ("brand", "Avia")], SINGEN);
+        for _ in 0..MIN_NAME_FEATURES - 1 {
+            add(&mut atp, &station);
+        }
+        // Too few ATP features with the name.
+        let avia = [("amenity", "fuel"), ("brand", "Avia")];
+        assert_eq!(reason(&atp, &avia, SINGEN), None);
+
+        add(&mut atp, &station);
+        let fuel = |key, value| reason(&atp, &[("amenity", "fuel"), (key, value)], SINGEN);
+        let name = Some(Reason::Name);
+        assert_eq!(fuel("brand", "Avia"), name);
+        assert_eq!(fuel("brand", "  AVIA "), name);
+        assert_eq!(fuel("operator", "avia"), name);
+        assert_eq!(fuel("brand", "Shell;Avia"), name);
+        assert_eq!(fuel("brand", "Shell;Avia;BP"), name);
+        assert_eq!(fuel("brand", "Shell"), None);
+        assert_eq!(fuel("name", "Avia"), None);
+        // A list of what the shop sells, not its brand.
+        assert_eq!(fuel("brand", "Shell;Avia;BP;Eni"), None);
+
+        // Not of the same kind, or not in the same country.
+        let shop = [("shop", "supermarket"), ("brand", "Avia")];
+        assert_eq!(reason(&atp, &shop, SINGEN), None);
+        let swiss = [("amenity", "fuel"), ("brand", "Avia")];
+        assert_eq!(reason(&atp, &swiss, ZURICH_NORTH), None);
+
+        // A Wikidata ID says which brand is meant, so the name does
+        // not count.
+        let other = [
+            ("amenity", "fuel"),
+            ("brand", "Avia"),
+            ("brand:wikidata", "Q9"),
+        ];
+        assert_eq!(reason(&atp, &other, SINGEN), None);
+    }
+
+    /// The register lists some cable cars, with the names of their
+    /// operators, but few ski lifts.
+    #[test]
+    fn test_name_aerialway() {
+        let mut atp = coverage(true);
+        let cable_car = place(
+            &[
+                ("public_transport", "station"),
+                ("aerialway", "station"),
+                ("operator", "Téléverbier"),
+                ("ref:IFOPT", "ch:1:sloid:9000"),
+            ],
+            ZURICH_HB,
+        );
+        for _ in 0..MIN_NAME_FEATURES {
+            add(&mut atp, &cable_car);
+        }
+        let lift = [
+            ("public_transport", "station"),
+            ("aerialway", "station"),
+            ("operator", "Téléverbier"),
+        ];
+        assert_eq!(reason(&atp, &lift, ZURICH_NORTH), None);
+        let stop = [("highway", "bus_stop"), ("operator", "Téléverbier")];
+        assert_eq!(
+            reason(&atp, &stop, ZURICH_NORTH),
+            Some(Reason::SwissTransitStop)
+        );
     }
 
     #[test]
