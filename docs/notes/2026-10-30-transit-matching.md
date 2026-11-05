@@ -118,6 +118,19 @@ Names that differ more, with words reordered or left out (OSM
 invites false matches, so these go to OSM as sloid edits
 ([#880](https://github.com/brawer/osmdiffs/issues/880)).
 
+## Track numbers in `ref`
+
+About 2,500 Swiss OSM platforms and tracks have their number only in
+`ref`, not `local_ref` (Bern RBS: `ref=21;22`). Where all values of
+`ref` look like track numbers (`7`, `11A`, `2;3`, `2/3`), they now
+count as `local_ref`; stop codes such as `ref=1076` don't. This
+changed 189 Swiss rows: about 80 matches got better (50 had taken
+the platform with the wrong number, such as Allaman 1 and 2;3
+swapped), 49 wrong matches were dropped (Samedan track 2 had matched
+`ref=1`), and about 10 changed where the registry has no
+`local_ref`. Matched platforms went from 39,769 to 39,746; the
+hold-out, exact-ID matches and other spiders stayed the same.
+
 ## Known limits
 
 - **Tracks of private railways at shared stations**, such as Zürich HB

@@ -321,15 +321,43 @@ fn compare_ids(atp: &Ids, osm: &Ids) -> IdEvidence {
     }
 }
 
-/// Lowercased `local_ref` values, sorted, such as `["3", "4"]`.
-fn local_refs<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<String> {
-    let mut refs: Vec<String> = tags
-        .filter(|&(k, _)| k == "local_ref")
-        .flat_map(|(_, v)| split_values(v).map(str::to_lowercase))
-        .collect();
+/// Lowercased `local_ref` values, sorted, such as `["3", "4"]`. Some
+/// OSM platforms and tracks have their number only in `ref`, such as
+/// `ref=21;22` at Bern RBS; then `ref` counts too, but only if all its
+/// values look like track or platform numbers ([is_track_number]), so
+/// that stop codes such as `ref=1076` are ignored. OSM also writes
+/// `2/3` for `2;3`.
+fn local_refs<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> Vec<String> {
+    let values = |key: &str| -> Vec<String> {
+        tags.clone()
+            .filter(|&(k, _)| k == key)
+            .flat_map(|(_, v)| v.split([';', '/']))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let mut refs = values("local_ref");
+    if refs.is_empty() {
+        refs = values("ref");
+        if !refs.iter().all(|r| is_track_number(r)) {
+            refs.clear();
+        }
+    }
     refs.sort();
     refs.dedup();
     refs
+}
+
+/// True for a track or platform number such as `7`, `11a` or `c`:
+/// one or two digits and an optional letter, or a single letter.
+fn is_track_number(value: &str) -> bool {
+    let digits = value.chars().take_while(char::is_ascii_digit).count();
+    let rest = &value[digits..];
+    digits <= 2
+        && rest.chars().count() <= 1
+        && rest.chars().all(|c| c.is_ascii_alphabetic())
+        && !value.is_empty()
 }
 
 /// How well two `local_ref` lists agree: 1.0 if equal, 0.6 if they
@@ -1170,6 +1198,30 @@ mod tests {
             want: NO_MATCH,
         },
         Case {
+            what: "OSM track number only in ref, wrong track",
+            atp: ZH_HB_TRACK_4,
+            osm: &[
+                ("public_transport", "stop_position"),
+                ("railway", "stop"),
+                ("uic_ref", "8503000"),
+                ("ref", "5"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "OSM track number only in ref, right track",
+            atp: ZH_HB_TRACK_4,
+            osm: &[
+                ("public_transport", "stop_position"),
+                ("railway", "stop"),
+                ("uic_ref", "8503000"),
+                ("ref", "4"),
+            ],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
             what: "no IDs, no name",
             atp: BUS_PLATFORM,
             osm: &[("public_transport", "platform")],
@@ -1255,6 +1307,32 @@ mod tests {
         .unwrap();
         let short = score(NAME_ONLY_PLATFORM, &platform("Bahnhofquai/HB"), 5.0).unwrap();
         assert!(full > short, "{full} vs {short}");
+    }
+
+    #[test]
+    fn test_local_refs() {
+        let refs = |tags: &[(&'static str, &'static str)]| local_refs(tags.iter().copied());
+        assert_eq!(refs(&[("local_ref", "4;3")]), ["3", "4"]);
+        assert_eq!(refs(&[("ref", "21;22")]), ["21", "22"]);
+        assert_eq!(refs(&[("ref", "2/3")]), ["2", "3"]);
+        assert_eq!(refs(&[("ref", "11A")]), ["11a"]);
+        assert_eq!(refs(&[("ref", "C")]), ["c"]);
+        // `local_ref` wins over `ref`.
+        assert_eq!(refs(&[("local_ref", "B"), ("ref", "7")]), ["b"]);
+        // Stop codes and names are no track numbers.
+        assert!(refs(&[("ref", "1076")]).is_empty());
+        assert!(refs(&[("ref", "Quai 5")]).is_empty());
+        assert!(refs(&[("ref", "2;PCHIAA01")]).is_empty());
+    }
+
+    #[test]
+    fn test_is_track_number() {
+        for yes in ["1", "12", "11a", "c"] {
+            assert!(is_track_number(yes), "{yes}");
+        }
+        for no in ["", "123", "ab", "1ab", "12.272", "quai 5"] {
+            assert!(!is_track_number(no), "{no}");
+        }
     }
 
     #[test]
