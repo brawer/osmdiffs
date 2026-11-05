@@ -94,6 +94,24 @@ What the remaining rows look like:
 - `swiss_transit_stop`: platforms and stop positions without IDs, far
   from any register stop.
 
+## Liechtenstein
+
+The Swiss register covers Liechtenstein too. The 2026-10-10 run of
+`opentransportdata_swiss` has 633 features with `addr:country=LI`, all
+with `ch:` IFOPT IDs and `85` UIC codes. For example, Vaduz, Alte
+Rheinbrücke is `ch:1:sloid:81821` and `uic_ref=8581821`, the same
+`uic_ref` as in OSM. So `swiss_transit_id` already works there, and
+`swiss_transit_stop` applies in Liechtenstein as well as in
+Switzerland.
+
+The eval above filtered ATP to `addr:country=CH`, so it lacked
+Liechtenstein's stops, and 19 of the `swiss_transit_id` rows were in
+Liechtenstein for that reason alone. With Liechtenstein's features
+added back, `swiss_transit_id` drops from 1,046 to 1,027, and
+`swiss_transit_stop` stays at 148. The Geofabrik extract only covers a
+strip of Liechtenstein along the Rhine, about 20 stops, so this says
+little about matching there.
+
 ## Known gaps
 
 - Within a country, a brand counts as covered everywhere, even if a

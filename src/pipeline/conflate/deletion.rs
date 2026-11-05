@@ -23,8 +23,9 @@
 //!   has no bus stop positions, for example, and OSM often maps a stop
 //!   with more platforms than the register.
 //! - [Reason::SwissTransitStop]: it is a public transport stop in
-//!   Switzerland without any IFOPT ID or `uic_ref`, and ATP has no
-//!   Swiss stop anywhere near it. Aerialway stations are left out,
+//!   Switzerland or Liechtenstein without any IFOPT ID or `uic_ref`,
+//!   and ATP has no Swiss stop anywhere near it. The Swiss register
+//!   covers Liechtenstein too, with the same kinds of IDs. Aerialway stations are left out,
 //!   since the register lacks most ski lifts.
 //!
 //! For stops that one of the Swiss signals is about, the Wikidata
@@ -219,7 +220,10 @@ pub(super) fn deletion_reason<'a>(
         let is_aerialway = tags.clone().any(|(key, _)| key == "aerialway");
         if !has_any_id && !is_aerialway {
             let (lng, lat) = locate()?;
-            if country(lng, lat) == Some(Country::SWITZERLAND) {
+            if matches!(
+                country(lng, lat),
+                Some(Country::SWITZERLAND | Country::LIECHTENSTEIN)
+            ) {
                 return (!atp.has_swiss_stop_near(lng, lat)).then_some(Reason::SwissTransitStop);
             }
         }
@@ -252,6 +256,7 @@ mod tests {
     /// About 1 km north of Zürich HB.
     const ZURICH_NORTH: (f64, f64) = (8.5402, 47.3872);
     const SINGEN: (f64, f64) = (8.8400, 47.7590);
+    const VADUZ: (f64, f64) = (9.5209, 47.1410);
 
     fn place(tags: &[(&str, &str)], (x, y): (f64, f64)) -> Place {
         let mut mask = MatchMask::default();
@@ -468,9 +473,10 @@ mod tests {
         ] {
             // Far from any stop that ATP has.
             assert_eq!(reason(&atp, tags, ZURICH_NORTH), stop, "{tags:?}");
+            assert_eq!(reason(&atp, tags, VADUZ), stop, "{tags:?}");
             // Near Zürich HB, which ATP has.
             assert_eq!(reason(&atp, tags, ZURICH_HB), None, "{tags:?}");
-            // Outside Switzerland.
+            // Outside Switzerland and Liechtenstein.
             assert_ne!(reason(&atp, tags, SINGEN), stop, "{tags:?}");
         }
 

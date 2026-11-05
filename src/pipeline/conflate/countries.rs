@@ -29,6 +29,7 @@ pub struct Country([u8; 2]);
 
 impl Country {
     pub const SWITZERLAND: Country = Country(*b"CH");
+    pub const LIECHTENSTEIN: Country = Country(*b"LI");
 
     #[cfg(test)]
     pub fn code(&self) -> &str {
