@@ -61,7 +61,10 @@ A few things worth calling out that aren’t obvious from the above:
   AllThePlaces would list it if it still existed: its
   `brand:wikidata`, `network:wikidata` or `operator:wikidata` names a
   brand, network or operator whose features of the same kind
-  AllThePlaces lists; or it is a Swiss public transport stop with an ID
+  AllThePlaces lists in that country; or, without such Wikidata IDs,
+  its `brand`, `network` or `operator` has a name for which
+  AllThePlaces lists such features; or it is a Swiss public transport
+  stop with an ID
   that the Swiss register doesn’t know; or it is a Swiss stop without
   IDs, far from any stop in the register. See
   [the evaluation](../notes/2026-11-05-deletion-candidates.md).

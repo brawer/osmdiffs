@@ -447,6 +447,15 @@ fn geo_point_distance_score(pt: &Point, geo_pt: &geo::Point<f64>, max_meters: f6
     }
 }
 
+/// `name` in lowercase, with runs of whitespace collapsed to one
+/// space, so that "Coop  Pronto" and "coop pronto" are the same.
+pub(crate) fn normalize_name(name: &str) -> String {
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 /// Parses one Wikidata QID such as `Q123`, ignoring surrounding whitespace.
 pub(crate) fn parse_wikidata_id(s: &str) -> Option<u64> {
     let trimmed = s.trim();

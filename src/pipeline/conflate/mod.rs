@@ -371,8 +371,10 @@ fn send_deletion_candidates(
     log::info!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
         atp_wikidata_countries = coverage.num_wikidata_countries(),
+        atp_name_countries = coverage.num_name_countries(),
         atp_has_swiss_transit = coverage.has_swiss_transit(),
         wikidata = count(Reason::Wikidata),
+        name = count(Reason::Name),
         swiss_transit_id = count(Reason::SwissTransitId),
         swiss_transit_stop = count(Reason::SwissTransitStop);
         "conflate.deletion_candidates: done"

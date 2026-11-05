@@ -5,7 +5,8 @@ no AllThePlaces feature. AllThePlaces will never cover as much as OSM,
 so most unmatched OSM features say nothing; we only emit a row when a
 strong signal says that ATP would list the feature if it still
 existed. The rules are in `src/pipeline/conflate/deletion.rs`. This
-note records how they were chosen, measured on Swiss data.
+note records how they were chosen, measured on Swiss data. The
+`name` rule came later; see [Names](#names).
 
 ## Setup
 
@@ -112,10 +113,60 @@ added back, `swiss_transit_id` drops from 1,046 to 1,027, and
 strip of Liechtenstein along the Rhine, about 20 stops, so this says
 little about matching there.
 
+## Names
+
+A fourth rule, `name`, covers features without any of the three
+Wikidata IDs: it flags an unmatched OSM feature if ATP has features of
+the same kind in the same country whose `brand`, `network` or
+`operator` has the same name as the OSM feature's `brand`, `network`
+or `operator`. Names are compared after lowercasing and collapsing
+whitespace. These runs include ATP's Liechtenstein features.
+
+| step | `name` rows |
+|---|---:|
+| first version | 996 |
+| `PoiMatcher` matches by brand name, see [`2026-11-05-brand-name-matching.md`](2026-11-05-brand-name-matching.md) | 543 |
+| ATP must have at least 3 features with the name in the country | 476 |
+| `shop=car;car_repair` agrees with `shop=car_repair` when matching | 445 |
+| no name rule for ski lifts in Switzerland and Liechtenstein | 380 |
+
+- The first version mostly flagged features that ATP had nearby: of
+  931 flagged features that weren't transit stops, 515 had an ATP
+  feature with the same name within 50 m. The matcher only knew
+  `brand:wikidata`, phones and emails, and these OSM features had
+  none of them.
+- Bicycle shops tag the brands they sell, such as
+  `brand=Veloplus;Trek;Specialized;Cube`. ATP has a single Trek store
+  in Switzerland, in Lausanne, so 43 shops were flagged. The minimum
+  of 3 ATP features removed them, plus 3 Guess shops and a Coiff&Co.
+  Values with more than 3 names are also ignored, since a list that
+  long names what a shop sells, not its brand. Car dealers often have
+  2 or 3, such as `brand=Renault;Dacia;Alpine`.
+- The Swiss register lists cable cars with the names of their
+  operators, such as Téléverbier, but few ski lifts, so 65 ski lift
+  stations were flagged by their operator's name.
+- For features with a Wikidata ID, names don't count.
+
+The other rules stay as they were: 1,059 `wikidata` (one more, because
+ATP features with only a brand name now have a matcher),
+1,027 `swiss_transit_id` and 148 `swiss_transit_stop`.
+
+Of the remaining 380 `name` rows (counted without transit stops),
+308 have no unmatched ATP feature with the same name within 1 km.
+Most are fuel stations (SOCAR, Avia, Mini Prix, BP) and car dealers
+or garages (Toyota, Ford, Volkswagen, Mitsubishi, Honda, Renault).
+For the dealers, this mostly means that ATP doesn't list them as
+official dealers of that brand anymore, which a mapper should check
+before changing anything. 34 rows have an unmatched ATP feature
+with the same name within 50 m, mostly where OSM has the brand only
+as `operator` and the categories differ, such as a florist with
+`operator=Migros` next to a Migros supermarket.
+
 ## Known gaps
 
 - Within a country, a brand counts as covered everywhere, even if a
   spider only covers one region.
 - `conflated.pmtiles` and `suggest_edits` skip OSM-only rows for now.
-- Next: emit OSM-only rows for POIs whose brand, network or operator
-  *name* ATP has, for features without Wikidata IDs.
+- The kinds are coarse: a florist with `operator=Migros` is a shop,
+  and so is a Migros supermarket. The name rule flags such florists if
+  ATP doesn't have them.

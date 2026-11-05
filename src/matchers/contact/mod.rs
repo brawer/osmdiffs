@@ -11,6 +11,7 @@
 //! `pipeline::atp::nondescript`. For the background, see
 //! `docs/notes/2026-10-25-phone-and-email-matching.md`.
 
+use crate::matchers::split_values;
 use crate::tables::U64Set;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -202,15 +203,38 @@ static CATEGORY_PAIRS: LazyLock<HashSet<(String, String)>> = LazyLock::new(|| {
 
 /// How well two main categories agree, for a contact match: 1.0 if
 /// they are equal, [CATEGORY_PAIR_FACTOR] if they are a known pair,
-/// and 0.0 otherwise, also when either side has no main category.
+/// and 0.0 otherwise, also when either side has no main category. A
+/// category with several `;`-separated values, such as
+/// `shop=car;car_repair`, agrees as well as its best value does.
 pub fn category_factor(atp: Option<&str>, osm: Option<&str>) -> f64 {
-    match (atp, osm) {
-        (Some(a), Some(o)) if a == o => 1.0,
-        (Some(a), Some(o)) if CATEGORY_PAIRS.contains(&(a.to_string(), o.to_string())) => {
-            CATEGORY_PAIR_FACTOR
+    let (Some(atp), Some(osm)) = (atp, osm) else {
+        return 0.0;
+    };
+    let mut best = 0.0_f64;
+    for a in split_category(atp) {
+        for o in split_category(osm) {
+            let factor = if a == o {
+                1.0
+            } else if CATEGORY_PAIRS.contains(&(a.clone(), o.clone())) {
+                CATEGORY_PAIR_FACTOR
+            } else {
+                0.0
+            };
+            best = best.max(factor);
         }
-        _ => 0.0,
     }
+    best
+}
+
+/// `shop=car;car_repair` as `shop=car` and `shop=car_repair`.
+fn split_category(category: &str) -> Vec<String> {
+    let Some((key, values)) = category.split_once('=') else {
+        return vec![category.to_string()];
+    };
+    if !values.contains(';') {
+        return vec![category.to_string()];
+    }
+    split_values(values).map(|v| format!("{key}={v}")).collect()
 }
 
 #[cfg(test)]
@@ -248,6 +272,12 @@ mod tests {
             0.0
         );
         assert_eq!(f(Some("shop=florist"), Some("shop=supermarket")), 0.0);
+        assert_eq!(f(Some("shop=car_repair"), Some("shop=car;car_repair")), 1.0);
+        assert_eq!(
+            f(Some("shop=car_repair"), Some("shop=car; tyres")),
+            CATEGORY_PAIR_FACTOR
+        );
+        assert_eq!(f(Some("shop=florist"), Some("shop=car;car_repair")), 0.0);
         assert_eq!(f(None, Some("shop=car")), 0.0);
         assert_eq!(f(None, None), 0.0);
     }
