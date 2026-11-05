@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.8.9](https://github.com/brawer/osmdiffs/compare/v0.8.8...v0.8.9) (2026-11-05)
+
+
+### 🆕 Enhancements
+
+* **conflate:** Emit OSM-only rows by brand name; match POIs by brand name ([#879](https://github.com/brawer/osmdiffs/issues/879)) ([c07c81b](https://github.com/brawer/osmdiffs/commit/c07c81b43c49d607879848af171c2976513cb7a9))
+* **conflate:** Emit OSM-only rows for deletion candidates ([#876](https://github.com/brawer/osmdiffs/issues/876)) ([87c7dc2](https://github.com/brawer/osmdiffs/commit/87c7dc235b1f5ab10324123a4901e506b27d422e))
+* **conflate:** Flag Swiss-style stops in Liechtenstein too ([#878](https://github.com/brawer/osmdiffs/issues/878)) ([8ca8f5a](https://github.com/brawer/osmdiffs/commit/8ca8f5a8b6679a7c01b640c9db142f2d514811c5))
+* **matchers:** match stop names without their place or punctuation ([#881](https://github.com/brawer/osmdiffs/issues/881)) ([8ead196](https://github.com/brawer/osmdiffs/commit/8ead196fff31dfde50002c9fef54e5ac3f66c819))
+* **matchers:** read track numbers from ref when local_ref is missing ([#882](https://github.com/brawer/osmdiffs/issues/882)) ([dd0ec38](https://github.com/brawer/osmdiffs/commit/dd0ec386ad192b2e3da7ff0c6ce562f6d02f80e1))
+
+
+### 🚧 Maintenance
+
+* **ci:** Bump actions/create-github-app-token from 3.2.0 to 3.3.0 ([#875](https://github.com/brawer/osmdiffs/issues/875)) ([18f4b8f](https://github.com/brawer/osmdiffs/commit/18f4b8f6d819191cef40e1ada3da8aa6d1871543))
+* **ci:** Bump astral-sh/setup-uv from 10.3.0 to 10.3.3 ([#874](https://github.com/brawer/osmdiffs/issues/874)) ([9a6368a](https://github.com/brawer/osmdiffs/commit/9a6368a8cf0a6c08497d24cba5f6d9d9cc499a4d))
+* **ci:** Bump taiki-e/install-action from 2.88.0 to 2.89.1 ([#873](https://github.com/brawer/osmdiffs/issues/873)) ([ce64c28](https://github.com/brawer/osmdiffs/commit/ce64c28ee35476ed9844b35780990ce585ccede2))
+* **deps:** Bump the uv group in /scripts with 3 updates ([#871](https://github.com/brawer/osmdiffs/issues/871)) ([ca4d24a](https://github.com/brawer/osmdiffs/commit/ca4d24a6910b85782ebc20e733ed334e16346b6a))
+
 ## [0.8.8](https://github.com/brawer/osmdiffs/compare/v0.8.7...v0.8.8) (2026-10-31)
 
 
