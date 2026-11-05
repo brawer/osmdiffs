@@ -117,6 +117,12 @@ const INVERTED_INDEX_FILE_SIGNATURE: &[u8; 8] = b"featinv0";
 pub struct LocalFeatureRef(u32);
 
 impl LocalFeatureRef {
+    /// The feature's position in storage, from 0 to the index's
+    /// [OsmFeatureIndex::len].
+    pub fn ordinal(self) -> usize {
+        self.0 as usize
+    }
+
     /// A made-up reference, for tests that don't need an index.
     #[cfg(test)]
     pub(crate) fn for_test(i: u32) -> LocalFeatureRef {

@@ -1,7 +1,7 @@
 use super::contact::{AtpContacts, CONTACT_FACTOR, Nondescript, category_factor, main_category};
 use super::{
     MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
-    parse_wikidata_ids,
+    normalize_name, parse_wikidata_ids, split_values,
 };
 use crate::places::Place;
 use geo::Centroid;
@@ -22,6 +22,40 @@ fn find_brand_wikidata<'a>(
         .flat_map(|(_, v)| parse_wikidata_ids(v))
 }
 
+/// The [normalize_name]d parts of the first `brand` tag in `tags`,
+/// which may list several `;`-separated brands.
+fn find_brand_names<'a>(
+    tags: impl Iterator<Item = (&'a str, &'a str)>,
+) -> impl Iterator<Item = String> + 'a {
+    tags.into_iter()
+        .find(|&(k, _)| k == "brand")
+        .into_iter()
+        .flat_map(|(_, v)| split_values(v).map(normalize_name))
+}
+
+/// The [normalize_name]d brands of an OSM feature: those in its
+/// `brand` tag, or if it has none, those in its `operator` tag. Many
+/// OSM fuel stations name their brand only as `operator`, such as
+/// `operator=Tamoil`.
+fn find_osm_brand_names<'a>(
+    tags: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+) -> impl Iterator<Item = String> + 'a {
+    let key = if tags.clone().any(|(k, _)| k == "brand") {
+        "brand"
+    } else {
+        "operator"
+    };
+    tags.into_iter()
+        .find(move |&(k, _)| k == key)
+        .into_iter()
+        .flat_map(|(_, v)| split_values(v).map(normalize_name))
+}
+
+/// The evidence factor for an equal `brand` name, when the two sides
+/// do not both have `brand:wikidata`. Below [CONTACT_FACTOR], because
+/// a brand name says less than a shared phone number.
+const BRAND_NAME_FACTOR: f64 = 0.96;
+
 /// AllThePlaces features of these kinds get a [PoiMatcher].
 const POI_MASK: MatchMask = MatchMask(
     MatchMask::SHOP.0
@@ -31,8 +65,9 @@ const POI_MASK: MatchMask = MatchMask(
         | MatchMask::FUEL.0,
 );
 
-/// Beyond this distance, a contact match needs the OSM street address
-/// to appear in the ATP address, see [address::osm_address_in_atp_text].
+/// Beyond this distance, a contact or brand name match needs the OSM
+/// street address to appear in the ATP address, see
+/// [address::osm_address_in_atp_text].
 /// On the planet, only a third of the far contact matches through a
 /// category pair were right without this check.
 const CONTACT_ADDRESS_CHECK_BEYOND_METERS: f64 = 150.0;
@@ -43,8 +78,15 @@ const CONTACT_ADDRESS_CHECK_BEYOND_METERS: f64 = 150.0;
 /// - Equal `brand:wikidata`: the distance score.
 /// - Both sides have `brand:wikidata`, but share no ID: no match,
 ///   whatever else agrees.
-/// - Otherwise, a shared descriptive phone number or email address:
-///   [CONTACT_FACTOR] times [category_factor] times the distance score.
+/// - Otherwise, the better of two kinds of evidence, each times
+///   [category_factor] times the distance score:
+///   - a shared descriptive phone number or email address, with
+///     [CONTACT_FACTOR];
+///   - an equal brand name, compared without regard to case and
+///     spacing, with [BRAND_NAME_FACTOR]. Many OSM features name
+///     their brand but lack `brand:wikidata`. On the OSM side, see
+///     [find_osm_brand_names].
+///
 ///   Beyond [CONTACT_ADDRESS_CHECK_BEYOND_METERS], the street address
 ///   must agree too.
 ///
@@ -55,11 +97,13 @@ pub struct PoiMatcher {
     center: Point,
     /// Usually a single ID; see [find_brand_wikidata].
     brand_wikidata: Vec<u64>,
+    /// Usually a single name; see [find_brand_names].
+    brand_names: Vec<String>,
     contacts: AtpContacts,
-    /// Main category as `key=value`, for contact matches.
+    /// Main category as `key=value`, for contact and name matches.
     category: Option<String>,
-    /// The ATP feature's `addr:*` tags, for far contact matches. Empty
-    /// if `contacts` is empty.
+    /// The ATP feature's `addr:*` tags, for far contact and name
+    /// matches. Empty if `contacts` and `brand_names` are empty.
     address: Vec<(String, String)>,
 }
 
@@ -73,11 +117,12 @@ impl PoiMatcher {
         }
         let tags = || place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
         let brand_wikidata: Vec<u64> = find_brand_wikidata(tags()).collect();
+        let brand_names: Vec<String> = find_brand_names(tags()).collect();
         let contacts = AtpContacts::from_tags(tags(), nondescript);
-        if brand_wikidata.is_empty() && contacts.is_empty() {
+        if brand_wikidata.is_empty() && brand_names.is_empty() && contacts.is_empty() {
             return None;
         }
-        let (category, address) = if contacts.is_empty() {
+        let (category, address) = if contacts.is_empty() && brand_names.is_empty() {
             (None, Vec::new())
         } else {
             let address = tags()
@@ -89,6 +134,7 @@ impl PoiMatcher {
         Some(PoiMatcher {
             center: Cell::from(CellID(place.s2_cell_id)).center(),
             brand_wikidata,
+            brand_names,
             contacts,
             category,
             address,
@@ -96,8 +142,8 @@ impl PoiMatcher {
     }
 
     /// The evidence factor for `candidate`, before distance: 1.0 for
-    /// equal `brand:wikidata`, below 1.0 for a contact match, 0.0 for
-    /// no match.
+    /// equal `brand:wikidata`, below 1.0 for a contact or brand name
+    /// match, 0.0 for no match.
     fn factor(&self, candidate: &OsmCandidate) -> f64 {
         if !self.brand_wikidata.is_empty() {
             let mut osm = find_brand_wikidata(candidate.tags()).peekable();
@@ -106,11 +152,16 @@ impl PoiMatcher {
                 return if shared { 1.0 } else { 0.0 };
             }
         }
-        if self.contacts.is_empty() || !self.contacts.agrees(candidate.tags()) {
-            return 0.0;
-        }
+        let contact = !self.contacts.is_empty() && self.contacts.agrees(candidate.tags());
+        let name = !self.brand_names.is_empty()
+            && find_osm_brand_names(candidate.tags()).any(|n| self.brand_names.contains(&n));
+        let evidence = match (contact, name) {
+            (true, _) => CONTACT_FACTOR,
+            (false, true) => BRAND_NAME_FACTOR,
+            (false, false) => return 0.0,
+        };
         let osm_category = main_category(candidate.tags());
-        CONTACT_FACTOR * category_factor(self.category.as_deref(), osm_category.as_deref())
+        evidence * category_factor(self.category.as_deref(), osm_category.as_deref())
     }
 
     fn address_agrees(&self, candidate: &OsmCandidate) -> bool {
@@ -513,5 +564,108 @@ mod tests {
         // No brand:wikidata and no contacts: no matcher at all.
         let bare = atp(&[("shop", "florist")]);
         assert!(PoiMatcher::for_place(&bare, &Nondescript::none()).is_none());
+    }
+
+    /// Brand name evidence: an equal `brand` name matches when the
+    /// categories agree, without regard to case and spacing, and
+    /// never against a `brand:wikidata` conflict.
+    #[test]
+    fn test_poi_matcher_brand_name() {
+        use crate::tables::{Feature, StringPool};
+        use s2::{cellid::CellID, latlng::LatLng};
+        use tempfile::TempDir;
+        use wkb::writer::{WriteOptions, write_point};
+
+        let dir = TempDir::new().expect("tempdir");
+        let strings = [
+            "amenity",
+            "brand",
+            "brand:wikidata",
+            "fuel",
+            "shop",
+            "supermarket",
+            "Avia",
+            "AVIA",
+            "Avia;Shell",
+            "Shell",
+            "Q1",
+            "Q2",
+        ];
+        let pool = StringPool::create(
+            strings.iter().map(|s| s.to_string()),
+            dir.path(),
+            &dir.path().join("strings"),
+        )
+        .expect("StringPool::create");
+        let s2_cell_id = CH_CLOTHES_ATP.s2_cell_id;
+        let score = |matcher: &PoiMatcher, tags: &[(&str, &str)]| {
+            let mut flat_tags = Vec::with_capacity(tags.len() * 2);
+            for (k, v) in tags {
+                flat_tags.push(pool.lookup(k).expect("key in pool") as u32);
+                flat_tags.push(pool.lookup(v).expect("value in pool") as u32);
+            }
+            let ll = LatLng::from(CellID(s2_cell_id));
+            let mut geometry_wkb = Vec::new();
+            write_point(
+                &mut geometry_wkb,
+                &geo::Point::new(ll.lng.deg(), ll.lat.deg()),
+                &WriteOptions {
+                    endianness: wkb::Endianness::LittleEndian,
+                },
+            )
+            .expect("wkb encode");
+            let feature = Feature {
+                id: 1,
+                tags: flat_tags,
+                geometry_wkb,
+                ..Default::default()
+            };
+            matcher.score_osm_candidate(&OsmCandidate {
+                feature: &feature,
+                strings: &pool,
+            })
+        };
+        let atp = |tags: &[(&str, &str)]| Place {
+            s2_cell_id,
+            spider: String::from("test"),
+            mask: MatchMask::FUEL,
+            fetched: test_timestamp(),
+            shape_wkb: test_shape(s2_cell_id),
+            tags: self::tags(tags),
+        };
+
+        // ATP without brand:wikidata still gets a matcher.
+        let avia = atp(&[("amenity", "fuel"), ("brand", "Avia")]);
+        let m = PoiMatcher::for_place(&avia, &Nondescript::none()).expect("matcher");
+        let same = score(&m, &[("amenity", "fuel"), ("brand", "AVIA")]);
+        assert!(same > 0.9 && same < BRAND_NAME_FACTOR + 1e-9, "{same}");
+        assert_eq!(
+            score(&m, &[("amenity", "fuel"), ("brand", "Avia;Shell")]),
+            same
+        );
+        assert_eq!(score(&m, &[("amenity", "fuel"), ("brand", "Shell")]), 0.0);
+        assert_eq!(
+            score(&m, &[("shop", "supermarket"), ("brand", "Avia")]),
+            0.0
+        );
+
+        // ATP has brand:wikidata, OSM only the brand name.
+        let branded = atp(&[
+            ("amenity", "fuel"),
+            ("brand", "Avia"),
+            ("brand:wikidata", "Q1"),
+        ]);
+        let m = PoiMatcher::for_place(&branded, &Nondescript::none()).expect("matcher");
+        assert_eq!(score(&m, &[("amenity", "fuel"), ("brand", "Avia")]), same);
+        // Both sides have brand:wikidata, and they differ: no match.
+        let vetoed = score(
+            &m,
+            &[
+                ("amenity", "fuel"),
+                ("brand", "Avia"),
+                ("brand:wikidata", "Q2"),
+            ],
+        );
+        assert_eq!(vetoed, 0.0);
     }
 }
