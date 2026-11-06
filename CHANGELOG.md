@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.11](https://github.com/brawer/osmdiffs/compare/v0.8.10...v0.8.11) (2026-11-06)
+
+
+### 🆕 Enhancements
+
+* **matchers:** Match benches ([#887](https://github.com/brawer/osmdiffs/issues/887)) ([03e92ad](https://github.com/brawer/osmdiffs/commit/03e92ad1123a8cd829c1b24d83fd5b5d99c796b6))
+* **matchers:** Match fire hydrants, public bookcases and bicycle parking ([#889](https://github.com/brawer/osmdiffs/issues/889)) ([3ae5d9c](https://github.com/brawer/osmdiffs/commit/3ae5d9cbaeac0de8f5440a26a3df979bd84f96af))
+* **matchers:** Match waste baskets, fountains and toilets ([#890](https://github.com/brawer/osmdiffs/issues/890)) ([dd31fe9](https://github.com/brawer/osmdiffs/commit/dd31fe9c04fcf7964669b4bd81f67a7263c4f11e))
+
 ## [0.8.10](https://github.com/brawer/osmdiffs/compare/v0.8.9...v0.8.10) (2026-11-06)
 
 
