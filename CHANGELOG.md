@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.10](https://github.com/brawer/osmdiffs/compare/v0.8.9...v0.8.10) (2026-11-06)
+
+
+### 🆕 Enhancements
+
+* **matchers:** Match post boxes and defibrillators ([#885](https://github.com/brawer/osmdiffs/issues/885)) ([8097684](https://github.com/brawer/osmdiffs/commit/8097684e5409f465557472265aa7667ca00c82d7))
+
+
+### 🚧 Maintenance
+
+* **conflate:** Share the list of brand/network/operator Wikidata keys ([#883](https://github.com/brawer/osmdiffs/issues/883)) ([c7fa72d](https://github.com/brawer/osmdiffs/commit/c7fa72d6b38b0127687331bdae6b2b3084c8fcbe))
+
 ## [0.8.9](https://github.com/brawer/osmdiffs/compare/v0.8.8...v0.8.9) (2026-11-05)
 
 
