@@ -79,6 +79,38 @@ matches were all the same place on both sides. The three beyond 150 m
 are two Caffè Spettacolo cafés and a Nissan dealer, all with agreeing
 street addresses.
 
+## Results on the eval regions
+
+Main on the [eval regions](2026-11-06-eval-regions.md), with the
+setup described there. These are matched points of interest whose
+`brand` (or OSM `operator`) is equal while no `brand:wikidata`,
+phone or email agrees, so roughly the matches that this rule adds.
+
+| region | brand name matches | share of matches | under 25 m | 25 to 50 m | 50 to 150 m | 150 m or more | most common spiders |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Switzerland | 774 | 7% | 570 | 120 | 81 | 3 | `maes_dkv` (222), Toyota (126), Renault (68), BP (44) |
+| Japan | 21,516 | 22% | 18,929 | 1,741 | 846 | 0 | `japan_post_jp` (18,431), ENEOS (552), Lawson (406) |
+| US: Massachusetts | 92 | 1% | 83 | 7 | 2 | 0 | Red E chargers (72), Shell (5) |
+| Germany: Berlin | 115 | 3% | 59 | 15 | 36 | 5 | ubitricity (38), Deutsche Post (22), car dealers |
+| Brazil: Sudeste | 410 | 6% | 275 | 72 | 62 | 1 | Petrobras (170), Shell (94), Ipiranga (76) |
+| Thailand | 554 | 6% | 311 | 150 | 93 | 0 | Isuzu (141), 7-Eleven (107), Shell (74), Ford (58) |
+| Kenya | 26 | 6% | 18 | 6 | 2 | 0 | Shell (18), Rubis (7) |
+| United Arab Emirates | 31 | 4% | 13 | 6 | 12 | 0 | hotels, Aster pharmacies, car dealers |
+| India: Karnataka | 78 | 6% | 53 | 18 | 7 | 0 | Hindustan Petroleum (50) |
+| India: Tamil Nadu | 33 | 3% | 24 | 7 | 2 | 0 | Hindustan Petroleum (19) |
+
+- Japan gains most: Japanese OSM tags most post offices with
+  `operator=日本郵便` but no Wikidata, and ATP's Japan Post spider has
+  `brand=日本郵便`. Samples were all the same post office on both
+  sides, mostly within 15 m.
+- Fuel stations are the common case elsewhere, as in Switzerland,
+  with car dealers in Thailand and Berlin, and charging stations
+  (ubitricity in Berlin, Red E in Massachusetts) where OSM has the
+  operator but no Wikidata.
+- Names in other scripts only count when both sides write them the
+  same way. Thai OSM tags PTT stations `brand=ป.ต.ท.`, while ATP has
+  `brand=PTT`; most of them share `brand:wikidata` and match anyway.
+
 ## Known gaps
 
 - Only the brand is compared. ATP's `name`, such as "Garage Bussard

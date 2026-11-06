@@ -140,6 +140,48 @@ values near ATP features, they make up 38% in India, 25% in Thailand,
 Mexico, but under 2% in most of Europe and North America. In France
 (1.3%), the crate can parse only 22% of them.
 
+## Results on the eval regions
+
+Main on the [eval regions](2026-11-06-eval-regions.md), with the
+setup described there. "Phone or email" counts matched points of
+interest whose phone, fax or email agrees while their
+`brand:wikidata` doesn't, so these are roughly the matches that
+contact evidence adds. The last two columns are for the country's
+whole ATP, from which the pipeline builds its nondescript sets.
+
+| region | ATP POIs | matched | phone or email | share of matches | median distance | ATP POIs with phone or email | nondescript phones / emails |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Switzerland | 22,519 | 10,655 | 2,303 | 22% | 9 m | 68% | 67 / 121 |
+| Japan | 212,845 | 96,961 | 1,695 | 1.7% | 9 m | 71% | 449 / 22 |
+| US: Massachusetts | 15,231 | 7,341 | 212 | 2.9% | 7 m | 90% | 7,059 / 1,180 |
+| Germany: Berlin | 6,710 | 4,219 | 107 | 2.5% | 19 m | 65% | 896 / 1,877 |
+| Brazil: Sudeste | 23,322 | 7,067 | 39 | 0.6% | 17 m | 51% | 711 / 217 |
+| Thailand | 31,392 | 9,187 | 42 | 0.5% | 22 m | 71% | 179 / 17 |
+| Kenya | 2,384 | 461 | 0 | 0% | | 57% | 64 / 3 |
+| United Arab Emirates | 3,539 | 755 | 46 | 6% | 45 m | 67% | 54 / 19 |
+| India: Karnataka | 7,700 | 1,335 | 4 | 0.3% | 22 m | 69% | 1,569 / 97 |
+| India: Tamil Nadu | 7,920 | 956 | 3 | 0.3% | 14 m | 69% | 1,569 / 97 |
+
+- Switzerland is the exception. 1,406 of its contact matches come
+  from `discover_swiss` (the tourism board) and 256 from
+  `stadt_zuerich_ch`, public data without brand tags. Elsewhere, ATP
+  has few such spiders for the country.
+- In Massachusetts, USPS post offices (81) and WorldCat libraries
+  (28) lead, as on the planet. In Berlin and the UAE, it's mostly car
+  dealers and hotels, which OSM maps by their own name. In Japan,
+  convenience stores and pharmacies whose OSM feature has no
+  `brand:wikidata`.
+- Thailand, Brazil and India gain almost nothing, although about two
+  thirds of their ATP features have a phone. OSM there rarely has
+  one, and in India and Thailand many OSM phones are in national
+  format (see [Phone parsing](#phone-parsing)).
+- Contact matches in the UAE lie farther apart (median 45 m), as do
+  all matches there (39 m for `brand:wikidata`).
+- The nondescript sets come out very differently per country:
+  Massachusetts gets 7,059 nondescript phones from the whole US
+  ATP, Switzerland 67. Production builds them from the whole ATP
+  run.
+
 ## Caveats and follow-ups
 
 - Same-site errors remain where the categories are equal or paired:

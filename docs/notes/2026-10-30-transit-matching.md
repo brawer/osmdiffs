@@ -131,6 +131,28 @@ swapped), 49 wrong matches were dropped (Samedan track 2 had matched
 `local_ref`. Matched platforms went from 39,769 to 39,746; the
 hold-out, exact-ID matches and other spiders stayed the same.
 
+## Results on the eval regions
+
+Main on the [eval regions](2026-11-06-eval-regions.md), with the
+setup described there. The 2026-10-10 ATP run has no public
+transport for any of the other eval countries, so only the Swiss
+numbers mean something:
+
+| region | ATP feature | count | matched | median / 90th percentile distance |
+|---|---|---:|---:|---:|
+| Switzerland | `platform` | 44,581 | 32,454 (73%) | 5.7 m / 21.8 m |
+| Switzerland | `station` | 2,551 | 1,631 (64%) | 8.7 m / 33.4 m |
+| Switzerland | `stop_area` | 28,160 | 5,380 (19%) | 12.6 m / 46.3 m |
+| Germany: Berlin | `stop_area` | 119 | 19 (16%) | 21.2 m / 52.5 m |
+
+Counts include Liechtenstein, and this ATP run predates the spider
+fixes that add railway tracks, so there are no `stop_position` rows.
+The Berlin rows are German stops that the Swiss register lists, with
+its own `ch:` IDs; 19 of them matched. The same
+register stops make DB stop areas look covered for the deletion
+candidates' name rule
+([`2026-11-05-deletion-candidates.md`](2026-11-05-deletion-candidates.md)).
+
 ## Known limits
 
 - **Tracks of private railways at shared stations**, such as Zürich HB

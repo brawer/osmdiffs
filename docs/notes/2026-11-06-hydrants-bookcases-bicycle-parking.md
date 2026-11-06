@@ -144,6 +144,23 @@ Switzerland has no hydrants in ATP. No other row changed. No OSM
 bicycle parking in Zürich took several ATP features, since Zürich's
 ATP data has no capacities.
 
+## Results on the eval regions
+
+On the [eval regions](2026-11-06-eval-regions.md), only bookcases
+and bicycle parking show up; the table for all kinds is in
+[`2026-11-05-infrastructure-matching.md`](2026-11-05-infrastructure-matching.md#results-on-the-eval-regions).
+
+- Little Free Libraries: 4 of 16 matched in Switzerland, 81 of 2,670
+  in Massachusetts (median 15 m), and none of 48 in Japan or 39 in
+  Brazil's Sudeste.
+- Bicycle parking: 1,571 of 2,865 in Zürich, as above, and 146 of 702
+  in Japan, from parking operators such as `cyca_parking_jp` and
+  `tobu_park_jp`.
+- No eval region has fire hydrants in ATP. Cambridge's hydrants and
+  bicycle parking, measured above, have no license in ATP's
+  metadata, so the pipeline skips them and they aren't in the
+  Massachusetts run.
+
 ## Known limits
 
 - OSM has few hydrants where ATP has many, so this kind is mostly
