@@ -401,8 +401,8 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
     }
 
     assert_eq!(
-        total_rows, 6,
-        "expected 6 conflated rows (matched + unmatched)"
+        total_rows, 8,
+        "expected 8 conflated rows (matched + unmatched)"
     );
     assert_eq!(
         matched.len(),
@@ -549,9 +549,10 @@ fn assert_shops_jsonl(path: &Path) -> Result<()> {
 }
 
 /// Checks `extract_conflated_layers`'s four output layers against the
-/// same fixture data `assert_conflated_parquet` checks: 3 matched + 3
-/// unmatched ATP features (see `assert_conflated_parquet`'s own
-/// "expected 6 conflated rows" / "expected 3 ATP features matched"
+/// same fixture data `assert_conflated_parquet` checks: 3 matched + 5
+/// unmatched ATP features, two of them Winterthur benches that the
+/// Zugerland extract can't match (see `assert_conflated_parquet`'s own
+/// "expected 8 conflated rows" / "expected 3 ATP features matched"
 /// assertions above). The overview layers are deliberately minimal
 /// (no tags); the detail layers carry the full tag set, keyed back to
 /// the overview by `fid`.
@@ -577,8 +578,8 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     );
     assert_eq!(
         overview_unmatched.len(),
-        3,
-        "expected 3 overview-unmatched features, got:\n{overview_unmatched:#?}"
+        5,
+        "expected 5 overview-unmatched features, got:\n{overview_unmatched:#?}"
     );
 
     // Overview features are minimal: spider + matched, plus
@@ -630,8 +631,8 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     );
     assert_eq!(
         detail_unmatched.len(),
-        3,
-        "expected 3 unmatched-detail features, got:\n{detail_unmatched:#?}"
+        5,
+        "expected 5 unmatched-detail features, got:\n{detail_unmatched:#?}"
     );
     for feature in detail_matched.iter().chain(&detail_unmatched) {
         assert!(

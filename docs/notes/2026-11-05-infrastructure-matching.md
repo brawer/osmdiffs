@@ -1,4 +1,4 @@
-# Matching post boxes and defibrillators
+# Matching post boxes, defibrillators and benches
 
 Investigation note behind `InfrastructureMatcher`
 ([`src/matchers/infrastructure_matcher.rs`](../../src/matchers/infrastructure_matcher.rs)).
@@ -91,6 +91,38 @@ Two issues are for the spiders rather than the matcher: Steiger's
 Gymnasium - Foyer EG"), and about 98 of its AEDs are carried on
 vehicles ("Feuerwehr - auf dem Einsatzwagen"), with no fixed place.
 
+## Benches
+
+ATP has about 15,000 benches from city registries: Zürich
+(`stadt_zuerich_ch`), Winterthur (`winterthur_ch`), Seattle, Sheffield
+and Glen Eira (Melbourne). Each spider was paired with OSM benches
+within 300 m of its own, as above; Winterthur from the 2026-09-26 run,
+since the spider has delivered nothing since 2026-10-03 (ATP's crawler
+times out connecting to `stadtplan.winterthur.ch`).
+
+| spider | ATP | OSM | pairs 0–5 m | 5–10 m | 10–20 m | chance pairs 0–10 m / 10–20 m |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Zürich | 7,267 | 8,398 | 3,727 | 240 | 149 | 126 / 237 |
+| Winterthur | 2,203 | 1,715 | 910 | 107 | 95 | 15 / 25 |
+| Seattle | 3,131 | 2,260 | 1,020 | 159 | 78 | 8 / 14 |
+| Sheffield | 1,493 | 1,157 | 332 | 83 | 34 | 1 / 6 |
+| Glen Eira | 1,062 | 246 | 129 | 18 | 7 | 0 / 0 |
+
+The registries are precise: most right pairs are within 5 m. Benches
+are also dense: half of the benches in Zürich and Winterthur are less
+than 5 m from the next one, so one-to-one matching matters more than
+for post boxes. Benches get 15 m by default, and Zürich 10 m, where
+its chance pairs already outnumber the right ones at 10–20 m.
+
+- `backrest` agrees on 98% of close pairs in Zürich, so it confirms a
+  match. `material` doesn't: ATP has `metal;wood` where OSM has
+  `wood`, and it agrees on only 19% of close pairs in Seattle.
+- Seattle's asset IDs are in OSM, under `ref:US-WA:DPR:AMWO_ID`
+  rather than `ref`; all 55 of them agree. So a spider can name the
+  OSM key that holds its refs.
+- Many close pairs (752 of Winterthur's within 2 m) come from earlier
+  imports of the same data.
+
 ## Results on Switzerland
 
 Swiss OSM extract and ATP 2026-10-10 filtered to `addr:country=CH`,
@@ -103,6 +135,13 @@ as for the deletion-candidate note:
 | matched post box distance, median / 90th percentile | | 8 m / 35 m |
 | deletion candidates `wikidata` | 1,059 | 1,303 |
 | deletion candidates `name` | 380 | 416 |
+
+With benches added, against the post box matcher as a baseline, 4,026
+of the 7,267 Zürich benches match (55%), at a median distance of
+0.8 m and a 90th percentile of 3.7 m. Deletion candidates stay the
+same (1,303 `wikidata`, 416 `name`), and so does everything else. The
+Swiss ATP extract of 2026-10-10 has no Winterthur benches, because the
+spider failed.
 
 The 280 new deletion candidates are unmatched OSM post boxes of Swiss
 Post (264 with `operator=Die Post`), which the rules now consider
@@ -125,9 +164,10 @@ The 5 Swiss AEDs in this ATP extract match nothing.
 - The radius and ref rules per spider come from these three evals.
   Thousands of spiders can't be tuned by hand; a way to derive them
   from statistics of production runs is still open.
-- Only post boxes and AEDs so far. Benches, street lamps, power poles
+- Only post boxes, AEDs and benches so far. Street lamps, power poles
   and others will reuse the same matcher with their own settings.
   Trees are left out: comparing species needs code of its own.
 - Edits for these kinds aren't suggested yet. Most unmatched ATP
-  features (6,002 Swiss Post boxes, about 66,000 Japanese AEDs) would
+  features (6,002 Swiss Post boxes, about 66,000 Japanese AEDs, 3,241
+  Zürich benches) would
   be additions at import scale, which need community review.

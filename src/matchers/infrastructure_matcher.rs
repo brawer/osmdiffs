@@ -1,5 +1,5 @@
-//! Matches street infrastructure: post boxes and defibrillators (AEDs)
-//! for now, with benches, street lamps and the like to follow.
+//! Matches street infrastructure: post boxes, defibrillators (AEDs)
+//! and benches for now, with street lamps and the like to follow.
 //!
 //! Such features have no brand and rarely a name, and many of them
 //! stand close together, so the match rests on position. Each kind has
@@ -35,6 +35,7 @@ const CONFIRM_BONUS: f64 = 0.04;
 enum Kind {
     PostBox,
     Defibrillator,
+    Bench,
 }
 
 impl Kind {
@@ -42,6 +43,7 @@ impl Kind {
         tags.find_map(|kv| match kv {
             ("amenity", "post_box") => Some(Kind::PostBox),
             ("emergency", "defibrillator") => Some(Kind::Defibrillator),
+            ("amenity", "bench") => Some(Kind::Bench),
             _ => None,
         })
     }
@@ -50,6 +52,19 @@ impl Kind {
         match self {
             Kind::PostBox => "post_box",
             Kind::Defibrillator => "defibrillator",
+            Kind::Bench => "bench",
+        }
+    }
+
+    /// Tags that confirm a match when equal on both sides. Other tags
+    /// say little: bench `material` agrees on only 19% of close pairs
+    /// in Seattle, since ATP has `metal;wood` where OSM has `wood`.
+    fn confirming_keys(self) -> &'static [&'static str] {
+        match self {
+            Kind::PostBox => &["collection_times"],
+            Kind::Defibrillator => &[],
+            // 98% equal on close pairs in Zürich.
+            Kind::Bench => &["backrest"],
         }
     }
 
@@ -90,6 +105,8 @@ struct Settings {
     /// Search radius; the distance score falls linearly to 0 there.
     max_meters: f64,
     refs: RefRule,
+    /// The OSM key that holds the ATP ref, usually `ref`.
+    osm_ref_key: &'static str,
 }
 
 impl Settings {
@@ -101,13 +118,26 @@ impl Settings {
             (Kind::PostBox, "japan_post_jp") => Some((20.0, RefRule::Equal)),
             (Kind::Defibrillator, "steiger_stiftung_aed") => Some((50.0, RefRule::LastWord)),
             (Kind::Defibrillator, "aed_jp") => Some((20.0, RefRule::Ignore)),
+            (Kind::Bench, "stadt_zuerich_ch") => Some((10.0, RefRule::Ignore)),
+            (Kind::Bench, "seattle_parks_and_recreation_benches_us") => {
+                return Settings {
+                    max_meters: 15.0,
+                    refs: RefRule::Equal,
+                    osm_ref_key: "ref:US-WA:DPR:AMWO_ID",
+                };
+            }
             _ => None,
         };
         let (max_meters, refs) = by_spider.unwrap_or(match kind {
             Kind::PostBox => (50.0, RefRule::Ignore),
             Kind::Defibrillator => (30.0, RefRule::Ignore),
+            Kind::Bench => (15.0, RefRule::Ignore),
         });
-        Settings { max_meters, refs }
+        Settings {
+            max_meters,
+            refs,
+            osm_ref_key: "ref",
+        }
     }
 }
 
@@ -124,9 +154,9 @@ fn normalize_ref(value: &str, last_word: bool) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-/// `collection_times` without spaces, lowercased, so that
+/// A tag value without spaces, lowercased, so that
 /// `Mo-Fr 17:30; Sa 08:00` equals `Mo-Fr 17:30;Sa 08:00`.
-fn normalize_times(value: &str) -> String {
+fn normalize_value(value: &str) -> String {
     value
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -146,7 +176,7 @@ fn normalize_times(value: &str) -> String {
 ///   and 456 of them are more than 200 m away.
 /// - Otherwise [KIND_FACTOR], plus [CONFIRM_BONUS] for each confirming
 ///   tag that agrees, times the distance score. Confirming tags are
-///   equal `collection_times`, and an OSM `ref` that contains the ATP
+///   those of [Kind::confirming_keys], and an OSM `ref` that contains the ATP
 ///   street, as German OSM describes the box location in `ref`
 ///   (`Lütticher Str. 76`). Tags that differ never lower a score: half
 ///   of the right post box matches in Switzerland and Germany have
@@ -154,7 +184,9 @@ fn normalize_times(value: &str) -> String {
 ///   fix.
 ///
 /// Matches are one to one within a spider ([Matcher::is_exclusive]),
-/// since several post boxes or AEDs often stand within a few meters.
+/// since several post boxes, AEDs or benches often stand within a few
+/// meters: half of the benches in Zürich and Winterthur are less than
+/// 5 m from the next one.
 pub struct InfrastructureMatcher {
     center: Point,
     kind: Kind,
@@ -162,8 +194,9 @@ pub struct InfrastructureMatcher {
     /// See [normalize_ref]; `None` if the spider's refs say nothing.
     reference: Option<String>,
     operators: Vec<u64>,
-    /// See [normalize_times].
-    collection_times: Option<String>,
+    /// The [Kind::confirming_keys] the ATP feature has, with their
+    /// [normalize_value]d values.
+    confirming: Vec<(&'static str, String)>,
     /// Lowercased `addr:street`.
     street: Option<String>,
 }
@@ -187,7 +220,11 @@ impl InfrastructureMatcher {
             operators: tag("operator:wikidata")
                 .map(|v| parse_wikidata_ids(v).collect())
                 .unwrap_or_default(),
-            collection_times: tag("collection_times").map(normalize_times),
+            confirming: kind
+                .confirming_keys()
+                .iter()
+                .filter_map(|&key| tag(key).map(|v| (key, normalize_value(v))))
+                .collect(),
             street: tag("addr:street")
                 .map(normalize_name)
                 .filter(|s| !s.is_empty()),
@@ -210,20 +247,20 @@ impl InfrastructureMatcher {
                 return (0.0, 0.0);
             }
         }
-        let osm_ref = tag("ref");
         if let (Some(atp), Some(osm)) = (
             &self.reference,
-            osm_ref.and_then(|v| normalize_ref(v, false)),
+            tag(self.settings.osm_ref_key).and_then(|v| normalize_ref(v, false)),
         ) && *atp == osm
         {
             return (1.0, SAME_REF_MIN_SCORE);
         }
         let mut factor = KIND_FACTOR;
-        if let (Some(atp), Some(osm)) = (&self.collection_times, tag("collection_times"))
-            && *atp == normalize_times(osm)
-        {
-            factor += CONFIRM_BONUS;
+        for (key, atp) in &self.confirming {
+            if tag(key).is_some_and(|osm| normalize_value(osm) == *atp) {
+                factor += CONFIRM_BONUS;
+            }
         }
+        let osm_ref = tag("ref");
         if let (Some(street), Some(osm)) = (&self.street, osm_ref)
             && normalize_name(osm).contains(street.as_str())
         {
@@ -252,7 +289,7 @@ impl Matcher for InfrastructureMatcher {
         worst + (best - worst) * geo_point_distance_score(&self.center, &centroid, max_meters)
     }
 
-    /// Two post boxes or AEDs in a feed are two real things, so they
+    /// Two post boxes or benches in a feed are two real things, so they
     /// shouldn't both take the same OSM feature.
     fn is_exclusive(&self) -> bool {
         true
@@ -375,6 +412,14 @@ mod tests {
         ("operator", "Steiger-Stiftung"),
         ("operator:wikidata", "Q879521"),
     ];
+
+    const ZURICH_BENCH: &[(&str, &str)] = &[
+        ("amenity", "bench"),
+        ("ref", "B-4711"),
+        ("backrest", "yes"),
+        ("operator", "Grün Stadt Zürich"),
+    ];
+    const SEATTLE_BENCH: &[(&str, &str)] = &[("amenity", "bench"), ("ref", "BEN-1234")];
 
     const CASES: &[Case] = &[
         Case {
@@ -521,6 +566,62 @@ mod tests {
             want: NO_MATCH,
         },
         Case {
+            what: "Zürich bench, same spot, same backrest",
+            spider: "stadt_zuerich_ch",
+            atp: ZURICH_BENCH,
+            osm: &[("amenity", "bench"), ("backrest", "yes")],
+            meters: 0.0,
+            want: (0.84, 0.84),
+        },
+        Case {
+            what: "Zürich bench, different backrest doesn't lower the score",
+            spider: "stadt_zuerich_ch",
+            atp: ZURICH_BENCH,
+            osm: &[("amenity", "bench"), ("backrest", "no")],
+            meters: 5.0,
+            want: (0.4, 0.4),
+        },
+        Case {
+            what: "Zürich bench beyond 10 m",
+            spider: "stadt_zuerich_ch",
+            atp: ZURICH_BENCH,
+            osm: &[("amenity", "bench")],
+            meters: 12.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "Seattle bench with its asset ID in OSM",
+            spider: "seattle_parks_and_recreation_benches_us",
+            atp: SEATTLE_BENCH,
+            osm: &[("amenity", "bench"), ("ref:US-WA:DPR:AMWO_ID", "BEN-1234")],
+            meters: 0.0,
+            want: (1.0, 1.0),
+        },
+        Case {
+            what: "Seattle asset ID under plain ref doesn't count",
+            spider: "seattle_parks_and_recreation_benches_us",
+            atp: SEATTLE_BENCH,
+            osm: &[("amenity", "bench"), ("ref", "BEN-1234")],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "default radius for an unknown bench spider",
+            spider: "some_bench_spider",
+            atp: &[("amenity", "bench")],
+            osm: &[("amenity", "bench")],
+            meters: 16.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "a bench is not a picnic table",
+            spider: "some_bench_spider",
+            atp: &[("amenity", "bench")],
+            osm: &[("leisure", "picnic_table")],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
             what: "default radius for an unknown AED spider",
             spider: "some_aed_spider",
             atp: &[("emergency", "defibrillator")],
@@ -546,7 +647,9 @@ mod tests {
 
     #[test]
     fn test_no_matcher_for_other_kinds() {
-        assert!(InfrastructureMatcher::for_place(&place("x", &[("amenity", "bench")])).is_none());
+        assert!(
+            InfrastructureMatcher::for_place(&place("x", &[("amenity", "waste_basket")])).is_none()
+        );
         assert!(InfrastructureMatcher::for_place(&place("x", &[("shop", "bakery")])).is_none());
     }
 
