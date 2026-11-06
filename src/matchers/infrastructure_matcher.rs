@@ -1,5 +1,6 @@
-//! Matches street infrastructure: post boxes, defibrillators (AEDs)
-//! and benches for now, with street lamps and the like to follow.
+//! Matches street infrastructure: post boxes, defibrillators (AEDs),
+//! benches, fire hydrants, public bookcases and bicycle parking for
+//! now, with street lamps and the like to follow.
 //!
 //! Such features have no brand and rarely a name, and many of them
 //! stand close together, so the match rests on position. Each kind has
@@ -36,6 +37,9 @@ enum Kind {
     PostBox,
     Defibrillator,
     Bench,
+    FireHydrant,
+    PublicBookcase,
+    BicycleParking,
 }
 
 impl Kind {
@@ -44,6 +48,9 @@ impl Kind {
             ("amenity", "post_box") => Some(Kind::PostBox),
             ("emergency", "defibrillator") => Some(Kind::Defibrillator),
             ("amenity", "bench") => Some(Kind::Bench),
+            ("emergency", "fire_hydrant") => Some(Kind::FireHydrant),
+            ("amenity", "public_bookcase") => Some(Kind::PublicBookcase),
+            ("amenity", "bicycle_parking") => Some(Kind::BicycleParking),
             _ => None,
         })
     }
@@ -53,18 +60,30 @@ impl Kind {
             Kind::PostBox => "post_box",
             Kind::Defibrillator => "defibrillator",
             Kind::Bench => "bench",
+            Kind::FireHydrant => "fire_hydrant",
+            Kind::PublicBookcase => "public_bookcase",
+            Kind::BicycleParking => "bicycle_parking",
         }
     }
 
     /// Tags that confirm a match when equal on both sides. Other tags
     /// say little: bench `material` agrees on only 19% of close pairs
-    /// in Seattle, since ATP has `metal;wood` where OSM has `wood`.
+    /// in Seattle, since ATP has `metal;wood` where OSM has `wood`, and
+    /// `bicycle_parking` almost never, since ATP has `rack` where OSM
+    /// has `stands`. Little Free Library's `name` (`Paul Downey #51931
+    /// Kalispell MT`) never equals OSM's.
     fn confirming_keys(self) -> &'static [&'static str] {
         match self {
             Kind::PostBox => &["collection_times"],
             Kind::Defibrillator => &[],
             // 98% equal on close pairs in Zürich.
             Kind::Bench => &["backrest"],
+            // All 157 close pairs of Barwon Water hydrants agree.
+            Kind::FireHydrant => &["fire_hydrant:type"],
+            Kind::PublicBookcase => &[],
+            // About 60% equal on close pairs in San Francisco and
+            // Cambridge (US), against 25–33% for random pairs.
+            Kind::BicycleParking => &["capacity"],
         }
     }
 
@@ -119,6 +138,15 @@ impl Settings {
             (Kind::Defibrillator, "steiger_stiftung_aed") => Some((50.0, RefRule::LastWord)),
             (Kind::Defibrillator, "aed_jp") => Some((20.0, RefRule::Ignore)),
             (Kind::Bench, "stadt_zuerich_ch") => Some((10.0, RefRule::Ignore)),
+            (Kind::FireHydrant, "epcor_fire_hydrants_ca") => Some((10.0, RefRule::Equal)),
+            (Kind::PublicBookcase, "little_free_library") => Some((50.0, RefRule::Equal)),
+            (Kind::BicycleParking, "stadt_zuerich_ch") => Some((10.0, RefRule::Ignore)),
+            (Kind::BicycleParking, "cambridge_city_council_bicycle_parking_us") => {
+                Some((10.0, RefRule::Ignore))
+            }
+            (Kind::BicycleParking, "san_francisco_mta_bicycle_parking_us") => {
+                Some((20.0, RefRule::Ignore))
+            }
             (Kind::Bench, "seattle_parks_and_recreation_benches_us") => {
                 return Settings {
                     max_meters: 15.0,
@@ -132,6 +160,9 @@ impl Settings {
             Kind::PostBox => (50.0, RefRule::Ignore),
             Kind::Defibrillator => (30.0, RefRule::Ignore),
             Kind::Bench => (15.0, RefRule::Ignore),
+            Kind::FireHydrant => (10.0, RefRule::Ignore),
+            Kind::PublicBookcase => (30.0, RefRule::Ignore),
+            Kind::BicycleParking => (15.0, RefRule::Ignore),
         });
         Settings {
             max_meters,
@@ -186,7 +217,8 @@ fn normalize_value(value: &str) -> String {
 /// Matches are one to one within a spider ([Matcher::is_exclusive]),
 /// since several post boxes, AEDs or benches often stand within a few
 /// meters: half of the benches in Zürich and Winterthur are less than
-/// 5 m from the next one.
+/// 5 m from the next one. Bicycle parking is the exception
+/// ([Matcher::may_share]).
 pub struct InfrastructureMatcher {
     center: Point,
     kind: Kind,
@@ -199,6 +231,8 @@ pub struct InfrastructureMatcher {
     confirming: Vec<(&'static str, String)>,
     /// Lowercased `addr:street`.
     street: Option<String>,
+    /// For bicycle parking, the ATP `capacity`; see [Matcher::may_share].
+    capacity: Option<u32>,
 }
 
 impl InfrastructureMatcher {
@@ -228,6 +262,9 @@ impl InfrastructureMatcher {
             street: tag("addr:street")
                 .map(normalize_name)
                 .filter(|s| !s.is_empty()),
+            capacity: (kind == Kind::BicycleParking)
+                .then(|| tag("capacity").and_then(parse_capacity))
+                .flatten(),
         })
     }
 
@@ -295,9 +332,28 @@ impl Matcher for InfrastructureMatcher {
         true
     }
 
+    /// Bicycle parking that OSM maps as one feature with a larger
+    /// `capacity` may take several ATP features. Cambridge (US) lists
+    /// each rack of two on its own, with 711 of its 2,684 racks sharing
+    /// a position, where OSM has one node with `capacity=6`.
+    fn may_share(&self, candidate: &OsmCandidate) -> bool {
+        let Some(atp) = self.capacity else {
+            return false;
+        };
+        candidate
+            .tags()
+            .find(|&(k, _)| k == "capacity")
+            .and_then(|(_, v)| parse_capacity(v))
+            .is_some_and(|osm| osm > atp)
+    }
+
     fn max_distance(&self) -> Option<ChordAngle> {
         Some(meters_to_chord_angle(self.settings.max_meters))
     }
+}
+
+fn parse_capacity(value: &str) -> Option<u32> {
+    value.trim().parse().ok()
 }
 
 #[cfg(test)]
@@ -337,6 +393,24 @@ mod tests {
     /// the ATP feature gets no [InfrastructureMatcher].
     fn score(spider: &str, atp: &[(&str, &str)], osm: &[(&str, &str)], meters: f64) -> Option<f64> {
         let matcher = InfrastructureMatcher::for_place(&place(spider, atp))?;
+        Some(with_candidate_at(osm, meters, |c| {
+            matcher.score_osm_candidate(c)
+        }))
+    }
+
+    /// Calls `f` with an OSM candidate with `osm` tags, at the ATP
+    /// feature's position.
+    fn with_candidate<T>(osm: &[(&str, &str)], f: impl FnOnce(&OsmCandidate) -> T) -> T {
+        with_candidate_at(osm, 0.0, f)
+    }
+
+    /// Calls `f` with an OSM candidate with `osm` tags, `meters` north
+    /// of the ATP feature.
+    fn with_candidate_at<T>(
+        osm: &[(&str, &str)],
+        meters: f64,
+        f: impl FnOnce(&OsmCandidate) -> T,
+    ) -> T {
         let dir = TempDir::new().expect("tempdir");
         let mut strings: Vec<String> = osm
             .iter()
@@ -362,11 +436,10 @@ mod tests {
             geometry_wkb: crate::geometry::encode_wkb(&geo::Geometry::from(point)),
             ..Default::default()
         };
-        let candidate = OsmCandidate {
+        f(&OsmCandidate {
             feature: &feature,
             strings: &pool,
-        };
-        Some(matcher.score_osm_candidate(&candidate))
+        })
     }
 
     struct Case {
@@ -420,6 +493,26 @@ mod tests {
         ("operator", "Grün Stadt Zürich"),
     ];
     const SEATTLE_BENCH: &[(&str, &str)] = &[("amenity", "bench"), ("ref", "BEN-1234")];
+
+    const BARWON_HYDRANT: &[(&str, &str)] = &[
+        ("emergency", "fire_hydrant"),
+        ("ref", "1098992"),
+        ("fire_hydrant:type", "underground"),
+        ("operator", "Barwon Water"),
+    ];
+    const LITTLE_FREE_LIBRARY: &[(&str, &str)] = &[
+        ("amenity", "public_bookcase"),
+        ("ref", "51931"),
+        ("name", "Paul Downey #51931 Kalispell MT"),
+        ("brand", "Little Free Library"),
+        ("brand:wikidata", "Q6650101"),
+    ];
+    const SF_BICYCLE_PARKING: &[(&str, &str)] = &[
+        ("amenity", "bicycle_parking"),
+        ("ref", "8505"),
+        ("capacity", "2"),
+        ("bicycle_parking", "rack"),
+    ];
 
     const CASES: &[Case] = &[
         Case {
@@ -622,6 +715,76 @@ mod tests {
             want: NO_MATCH,
         },
         Case {
+            what: "hydrant of the same type",
+            spider: "barwon_water_potable_fire_hydrants_au",
+            atp: BARWON_HYDRANT,
+            osm: &[
+                ("emergency", "fire_hydrant"),
+                ("fire_hydrant:type", "underground"),
+            ],
+            meters: 0.0,
+            want: (0.84, 0.84),
+        },
+        Case {
+            what: "hydrant beyond 10 m",
+            spider: "barwon_water_potable_fire_hydrants_au",
+            atp: BARWON_HYDRANT,
+            osm: &[("emergency", "fire_hydrant")],
+            meters: 12.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "EPCOR hydrant with the same ref",
+            spider: "epcor_fire_hydrants_ca",
+            atp: &[("emergency", "fire_hydrant"), ("ref", "27772")],
+            osm: &[("emergency", "fire_hydrant"), ("ref", "27772")],
+            meters: 5.0,
+            want: (0.95, 0.95),
+        },
+        Case {
+            what: "Little Free Library 40 m away, same charter number",
+            spider: "little_free_library",
+            atp: LITTLE_FREE_LIBRARY,
+            osm: &[("amenity", "public_bookcase"), ("ref", "51931")],
+            meters: 40.0,
+            want: (0.92, 0.92),
+        },
+        Case {
+            what: "Little Free Library 40 m away, no ref",
+            spider: "little_free_library",
+            atp: LITTLE_FREE_LIBRARY,
+            osm: &[("amenity", "public_bookcase")],
+            meters: 40.0,
+            want: (0.16, 0.16),
+        },
+        Case {
+            what: "default radius for an unknown bookcase spider",
+            spider: "some_bookcase_spider",
+            atp: &[("amenity", "public_bookcase")],
+            osm: &[("amenity", "public_bookcase")],
+            meters: 35.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "bicycle parking with the same capacity",
+            spider: "san_francisco_mta_bicycle_parking_us",
+            atp: SF_BICYCLE_PARKING,
+            osm: &[("amenity", "bicycle_parking"), ("capacity", "2")],
+            meters: 10.0,
+            want: (0.42, 0.42),
+        },
+        Case {
+            what: "bicycle parking with another type still matches",
+            spider: "san_francisco_mta_bicycle_parking_us",
+            atp: SF_BICYCLE_PARKING,
+            osm: &[
+                ("amenity", "bicycle_parking"),
+                ("bicycle_parking", "stands"),
+            ],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
             what: "default radius for an unknown AED spider",
             spider: "some_aed_spider",
             atp: &[("emergency", "defibrillator")],
@@ -660,6 +823,28 @@ mod tests {
                 .unwrap();
         assert!(matcher.max_distance() == Some(meters_to_chord_angle(100.0)));
         assert!(matcher.is_exclusive());
+    }
+
+    #[test]
+    fn test_may_share() {
+        let may_share = |atp: &[(&str, &str)], osm: &[(&str, &str)]| {
+            with_candidate(osm, |candidate| {
+                InfrastructureMatcher::for_place(&place("x", atp))
+                    .unwrap()
+                    .may_share(candidate)
+            })
+        };
+        let rack = &[("amenity", "bicycle_parking"), ("capacity", "2")];
+        let six = &[("amenity", "bicycle_parking"), ("capacity", "6")];
+        assert!(may_share(rack, six));
+        assert!(!may_share(rack, rack));
+        assert!(!may_share(six, rack));
+        assert!(!may_share(&[("amenity", "bicycle_parking")], six));
+        let bench = &[("amenity", "bench"), ("capacity", "2")];
+        assert!(!may_share(
+            bench,
+            &[("amenity", "bench"), ("capacity", "6")]
+        ));
     }
 
     #[test]

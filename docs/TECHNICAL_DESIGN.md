@@ -664,10 +664,13 @@ until the full pipeline was proven out:
   tracks by `ref:IFOPT`, `uic_ref` and `local_ref`, so far tuned for
   Switzerland (see
   [`notes/2026-10-30-transit-matching.md`](notes/2026-10-30-transit-matching.md)).
-  `InfrastructureMatcher` matches post boxes, defibrillators and benches by
+  `InfrastructureMatcher` matches post boxes, defibrillators, benches,
+  fire hydrants, public bookcases and bicycle parking by
   distance, one to one, with a search radius and ref rules per spider
   (see
-  [`notes/2026-11-05-infrastructure-matching.md`](notes/2026-11-05-infrastructure-matching.md)).
+  [`notes/2026-11-05-infrastructure-matching.md`](notes/2026-11-05-infrastructure-matching.md)
+  and
+  [`notes/2026-11-06-hydrants-bookcases-bicycle-parking.md`](notes/2026-11-06-hydrants-bookcases-bicycle-parking.md)).
   We’d like to extend this well beyond it: matching by name too, and
   matching well beyond points of interest (a tree matcher
   conflating municipal tree datasets against OSM by spatial distance

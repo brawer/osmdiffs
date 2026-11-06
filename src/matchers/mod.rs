@@ -145,6 +145,7 @@ impl MatchMask {
             // staffed rental shop (`bicycle_rental=shop`) is still a shop.
             ("amenity", "bicycle_rental") => Self::STREET_FURNITURE.0,
             ("amenity", "bbq") => Self::STREET_FURNITURE.0,
+            ("amenity", "bicycle_parking") => Self::STREET_FURNITURE.0,
             ("amenity", "bicycle_repair_station") => Self::STREET_FURNITURE.0,
             ("amenity", "bureau_de_change") => Self::SHOP.0,
             ("amenity", "cafe") => Self::RESTAURANT.0,
@@ -438,7 +439,7 @@ pub fn create_matcher<'a>(
     } else if let Some(matcher) = infrastructure_matcher::InfrastructureMatcher::for_place(place) {
         Some(Box::new(matcher))
     } else {
-        // TODO: Implement matchers for benches, street lamps, trees, etc.
+        // TODO: Implement matchers for street lamps, trees, etc.
         None
     }
 }

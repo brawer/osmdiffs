@@ -370,7 +370,14 @@ pub(super) fn deletion_reason<'a>(
     let kind = if mask.has_only(MatchMask::STREET_FURNITURE) {
         // Street furniture we can't match, such as a camera, says
         // nothing: ATP has none of its kind.
-        Kind::Infrastructure(infrastructure_kind(tags)?)
+        let kind = infrastructure_kind(tags)?;
+        // Nor does a public bookcase. OSM tags many as Little Free
+        // Libraries that aren't in its registry, and the registry's
+        // positions are often more than 50 m off.
+        if kind == "public_bookcase" {
+            return None;
+        }
+        Kind::Infrastructure(kind)
     } else {
         Kind::Mask(mask)
     };
@@ -647,6 +654,20 @@ mod tests {
         // A post office of the same operator is a shop, not a post box.
         let post_office = [("amenity", "post_office"), ("operator:wikidata", "Q614803")];
         assert_eq!(reason(&atp, &post_office, ZURICH_NORTH), None);
+    }
+
+    #[test]
+    fn test_public_bookcase_never_flagged() {
+        let mut atp = AtpCoverage::default();
+        let bookcase = [
+            ("amenity", "public_bookcase"),
+            ("brand", "Little Free Library"),
+            ("brand:wikidata", "Q6650101"),
+        ];
+        for _ in 0..MIN_NAME_FEATURES {
+            add(&mut atp, &place(&bookcase, ZURICH_HB));
+        }
+        assert_eq!(reason(&atp, &bookcase, ZURICH_NORTH), None);
     }
 
     #[test]

@@ -136,13 +136,6 @@ as for the deletion-candidate note:
 | deletion candidates `wikidata` | 1,059 | 1,303 |
 | deletion candidates `name` | 380 | 416 |
 
-With benches added, against the post box matcher as a baseline, 4,026
-of the 7,267 Zürich benches match (55%), at a median distance of
-0.8 m and a 90th percentile of 3.7 m. Deletion candidates stay the
-same (1,303 `wikidata`, 416 `name`), and so does everything else. The
-Swiss ATP extract of 2026-10-10 has no Winterthur benches, because the
-spider failed.
-
 The 280 new deletion candidates are unmatched OSM post boxes of Swiss
 Post (264 with `operator=Die Post`), which the rules now consider
 because ATP's post boxes have a matcher. Half of them have no ATP box
@@ -159,13 +152,23 @@ furniture without a matcher is never flagged.
 
 The 5 Swiss AEDs in this ATP extract match nothing.
 
+With benches added, against the post box matcher as a baseline, 4,026
+of the 7,267 Zürich benches match (55%), at a median distance of
+0.8 m and a 90th percentile of 3.7 m. Deletion candidates stay the
+same (1,303 `wikidata`, 416 `name`), and so does everything else. The
+Swiss ATP extract of 2026-10-10 has no Winterthur benches, because the
+spider failed.
+
 ## Known limits
 
 - The radius and ref rules per spider come from these three evals.
   Thousands of spiders can't be tuned by hand; a way to derive them
   from statistics of production runs is still open.
-- Only post boxes, AEDs and benches so far. Street lamps, power poles
-  and others will reuse the same matcher with their own settings.
+- Only post boxes, AEDs and benches here. Fire hydrants, public
+  bookcases and bicycle parking followed
+  ([`2026-11-06-hydrants-bookcases-bicycle-parking.md`](2026-11-06-hydrants-bookcases-bicycle-parking.md)).
+  Street lamps, power poles and others will reuse the same matcher
+  with their own settings.
   Trees are left out: comparing species needs code of its own.
 - Edits for these kinds aren't suggested yet. Most unmatched ATP
   features (6,002 Swiss Post boxes, about 66,000 Japanese AEDs, 3,241
