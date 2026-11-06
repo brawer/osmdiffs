@@ -13,7 +13,9 @@
 //!   shop of a chain whose shops ATP lists. The kind matters, since
 //!   ATP may list the supermarkets of a chain but not its restaurants;
 //!   and so does the country, since ATP may list a chain's shops in
-//!   one country but not in another.
+//!   one country but not in another. For street infrastructure, the
+//!   kind is finer than the match mask: ATP's post boxes of Swiss Post
+//!   say nothing about its cameras.
 //! - [Reason::Name]: it has no such Wikidata IDs, but its `brand`,
 //!   `network` or `operator` names one for which ATP has features of
 //!   the same kind in the same country. Names are compared without
@@ -50,8 +52,8 @@
 
 use super::countries::{Country, country};
 use crate::matchers::{
-    IFOPT_KEYS, MatchMask, is_transit_stop, normalize_name, parse_wikidata_ids, split_values,
-    swiss_uic,
+    IFOPT_KEYS, MatchMask, infrastructure_kind, is_transit_stop, normalize_name,
+    parse_wikidata_ids, split_values, swiss_uic,
 };
 use crate::pipeline::wikidata_ids::WIKIDATA_KEYS;
 use crate::places::Place;
@@ -108,6 +110,16 @@ pub(super) struct AtpCoverage {
     /// features that have them.
     names: HashMap<(String, Option<Country>), (MatchMask, u32)>,
 
+    /// Like `wikidata`, but for street infrastructure such as post
+    /// boxes, by its kind ([infrastructure_kind]) instead of its match
+    /// mask. The mask lumps all street furniture together, so that
+    /// ATP's Swiss Post boxes would make every unmatched OSM camera
+    /// or vending machine of Swiss Post a candidate.
+    infrastructure_wikidata: HashSet<(u64, Option<Country>, &'static str)>,
+
+    /// Like `names`, but for street infrastructure, by its kind.
+    infrastructure_names: HashMap<(String, Option<Country>, &'static str), u32>,
+
     /// The Swiss IFOPT IDs in ATP, lowercased.
     swiss_ifopt: HashSet<String>,
 
@@ -143,17 +155,32 @@ impl AtpCoverage {
     /// it.
     pub(super) fn add(&mut self, place: &Place, country: Option<Country>) {
         let mut swiss = false;
+        let infrastructure = infrastructure_of(
+            place.mask,
+            place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        );
         for (key, value) in &place.tags {
             if WIKIDATA_KEYS.contains(&key.as_str()) {
                 for id in parse_wikidata_ids(value) {
-                    let mask = self.wikidata.entry((id, country)).or_default();
-                    *mask = MatchMask(mask.0 | place.mask.0);
+                    if let Some(kind) = infrastructure {
+                        self.infrastructure_wikidata.insert((id, country, kind));
+                    } else {
+                        let mask = self.wikidata.entry((id, country)).or_default();
+                        *mask = MatchMask(mask.0 | place.mask.0);
+                    }
                 }
             } else if NAME_KEYS.contains(&key.as_str()) {
                 for name in split_values(value).map(normalize_name) {
-                    let (mask, count) = self.names.entry((name, country)).or_default();
-                    *mask = MatchMask(mask.0 | place.mask.0);
-                    *count += 1;
+                    if let Some(kind) = infrastructure {
+                        *self
+                            .infrastructure_names
+                            .entry((name, country, kind))
+                            .or_default() += 1;
+                    } else {
+                        let (mask, count) = self.names.entry((name, country)).or_default();
+                        *mask = MatchMask(mask.0 | place.mask.0);
+                        *count += 1;
+                    }
                 }
             } else if IFOPT_KEYS.contains(&key.as_str()) {
                 for id in swiss_ifopts(value) {
@@ -182,12 +209,18 @@ impl AtpCoverage {
         self.wikidata.len()
     }
 
-    /// Whether ATP has features of kind `mask` with Wikidata ID `id`
+    /// Whether ATP has features of kind `kind` with Wikidata ID `id`
     /// in `country`.
-    fn covers_wikidata(&self, id: u64, country: Option<Country>, mask: MatchMask) -> bool {
-        self.wikidata
-            .get(&(id, country))
-            .is_some_and(|m| m.intersects(&mask))
+    fn covers_wikidata(&self, id: u64, country: Option<Country>, kind: Kind) -> bool {
+        match kind {
+            Kind::Mask(mask) => self
+                .wikidata
+                .get(&(id, country))
+                .is_some_and(|m| m.intersects(&mask)),
+            Kind::Infrastructure(kind) => {
+                self.infrastructure_wikidata.contains(&(id, country, kind))
+            }
+        }
     }
 
     /// How many pairs of name and country ATP has.
@@ -199,10 +232,17 @@ impl AtpCoverage {
     /// [normalize_name]d brand, network or operator `name` in
     /// `country`, and at least [MIN_NAME_FEATURES] features with that
     /// name in `country`.
-    fn covers_name(&self, name: String, country: Option<Country>, mask: MatchMask) -> bool {
-        self.names
-            .get(&(name, country))
-            .is_some_and(|(m, count)| m.intersects(&mask) && *count >= MIN_NAME_FEATURES)
+    fn covers_name(&self, name: String, country: Option<Country>, kind: Kind) -> bool {
+        match kind {
+            Kind::Mask(mask) => self
+                .names
+                .get(&(name, country))
+                .is_some_and(|(m, count)| m.intersects(&mask) && *count >= MIN_NAME_FEATURES),
+            Kind::Infrastructure(kind) => self
+                .infrastructure_names
+                .get(&(name, country, kind))
+                .is_some_and(|count| *count >= MIN_NAME_FEATURES),
+        }
     }
 
     /// Whether ATP has a Swiss stop within about [SWISS_CELL_LEVEL]'s
@@ -216,6 +256,26 @@ impl AtpCoverage {
                 .iter()
                 .any(|n| self.swiss_cells.contains(&n.0))
     }
+}
+
+/// What kind of thing a feature is, for [AtpCoverage]: its match
+/// mask, or for street infrastructure, its finer kind.
+#[derive(Clone, Copy)]
+enum Kind {
+    Mask(MatchMask),
+    Infrastructure(&'static str),
+}
+
+/// The [infrastructure_kind] of a feature with `mask` and `tags`, if
+/// it is street furniture and nothing else. For a shop that also has a
+/// defibrillator, `None`: it counts as a shop.
+fn infrastructure_of<'a>(
+    mask: MatchMask,
+    tags: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Option<&'static str> {
+    mask.has_only(MatchMask::STREET_FURNITURE)
+        .then(|| infrastructure_kind(tags))
+        .flatten()
 }
 
 /// The Swiss IFOPT IDs in a tag value, lowercased.
@@ -304,19 +364,26 @@ pub(super) fn deletion_reason<'a>(
         return None;
     }
     let mut mask = MatchMask::default();
-    for (key, value) in tags {
+    for (key, value) in tags.clone() {
         mask.add_tag(key, value);
     }
+    let kind = if mask.has_only(MatchMask::STREET_FURNITURE) {
+        // Street furniture we can't match, such as a camera, says
+        // nothing: ATP has none of its kind.
+        Kind::Infrastructure(infrastructure_kind(tags)?)
+    } else {
+        Kind::Mask(mask)
+    };
     let country = locate().and_then(|(lng, lat)| country(lng, lat));
     if ids
         .into_iter()
-        .any(|id| atp.covers_wikidata(id, country, mask))
+        .any(|id| atp.covers_wikidata(id, country, kind))
     {
         return Some(Reason::Wikidata);
     }
     names
         .into_iter()
-        .any(|name| atp.covers_name(name, country, mask))
+        .any(|name| atp.covers_name(name, country, kind))
         .then_some(Reason::Name)
 }
 
@@ -543,6 +610,43 @@ mod tests {
         // A stop of a network whose stops ATP only has in Switzerland.
         let stop = [("highway", "bus_stop"), ("network:wikidata", "Q3")];
         assert_eq!(reason(&atp, &stop, SINGEN), None);
+    }
+
+    #[test]
+    fn test_wikidata_infrastructure() {
+        let mut atp = AtpCoverage::default();
+        let post_box = [
+            ("amenity", "post_box"),
+            ("operator", "Die Post"),
+            ("operator:wikidata", "Q614803"),
+        ];
+        for _ in 0..MIN_NAME_FEATURES {
+            add(&mut atp, &place(&post_box, ZURICH_HB));
+        }
+        let wikidata = Some(Reason::Wikidata);
+        assert_eq!(reason(&atp, &post_box, ZURICH_NORTH), wikidata);
+
+        // Other street furniture of the same operator, which ATP
+        // doesn't list and we don't match.
+        let camera = [
+            ("man_made", "surveillance"),
+            ("operator", "Die Post"),
+            ("operator:wikidata", "Q614803"),
+        ];
+        assert_eq!(reason(&atp, &camera, ZURICH_NORTH), None);
+        let camera_by_name = [("man_made", "surveillance"), ("operator", "Die Post")];
+        assert_eq!(reason(&atp, &camera_by_name, ZURICH_NORTH), None);
+
+        // By name, a post box without `operator:wikidata`.
+        let post_box_by_name = [("amenity", "post_box"), ("operator", "Die Post")];
+        assert_eq!(
+            reason(&atp, &post_box_by_name, ZURICH_NORTH),
+            Some(Reason::Name)
+        );
+
+        // A post office of the same operator is a shop, not a post box.
+        let post_office = [("amenity", "post_office"), ("operator:wikidata", "Q614803")];
+        assert_eq!(reason(&atp, &post_office, ZURICH_NORTH), None);
     }
 
     #[test]

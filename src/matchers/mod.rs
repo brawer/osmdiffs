@@ -12,8 +12,10 @@ use wkb::reader::read_wkb;
 
 mod address;
 pub mod contact;
+mod infrastructure_matcher;
 mod poi_matcher;
 mod transit_matcher;
+pub(crate) use infrastructure_matcher::kind_name as infrastructure_kind;
 pub(crate) use transit_matcher::{IFOPT_KEYS, is_stop as is_transit_stop, split_values, swiss_uic};
 
 /// Mean Earth radius, in meters -- used throughout this module to turn
@@ -300,6 +302,12 @@ impl MatchMask {
         }
     }
 
+    /// True if `category` is the only category bit of `self`, such as
+    /// `STREET_FURNITURE` for a bench.
+    pub fn has_only(&self, category: MatchMask) -> bool {
+        self.0 & Self::CATEGORY_BITS == category.0
+    }
+
     /// True if `self` and `other` share a category bit, i.e. features
     /// with these masks may match. Modifier bits are ignored.
     #[inline]
@@ -400,6 +408,14 @@ pub trait Matcher {
     fn may_share(&self, _candidate: &OsmCandidate) -> bool {
         false
     }
+
+    /// How far away candidates may be, if the matcher knows better than
+    /// [match_distance], which goes by the ATP feature's kind alone. For
+    /// example, Deutsche Post boxes need 100 m, while [match_distance]
+    /// gives all street furniture 10 m.
+    fn max_distance(&self) -> Option<ChordAngle> {
+        None
+    }
 }
 
 /// Construct a matcher for a given AllThePlaces feature.
@@ -419,8 +435,10 @@ pub fn create_matcher<'a>(
         Some(Box::new(matcher))
     } else if let Some(matcher) = transit_matcher::TransitMatcher::for_place(place) {
         Some(Box::new(matcher))
+    } else if let Some(matcher) = infrastructure_matcher::InfrastructureMatcher::for_place(place) {
+        Some(Box::new(matcher))
     } else {
-        // TODO: Implement matchers for fire hydrants, defibrillators, etc.
+        // TODO: Implement matchers for benches, street lamps, trees, etc.
         None
     }
 }
