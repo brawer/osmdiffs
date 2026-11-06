@@ -98,9 +98,9 @@ const CONTACT_ADDRESS_CHECK_BEYOND_METERS: f64 = 150.0;
 /// - Equal `brand:wikidata`: the distance score.
 /// - Both sides have `brand:wikidata`, but share no ID: no match,
 ///   whatever else agrees.
-/// - Otherwise, the better of two kinds of evidence, each times
+/// - Otherwise, the best of three kinds of evidence, each times
 ///   [category_factor] times the distance score:
-///   - a shared descriptive phone number or email address, with
+///   - a shared descriptive phone number, email address or website, with
 ///     [CONTACT_FACTOR];
 ///   - an equal brand name, compared without regard to case and
 ///     spacing, with [BRAND_NAME_FACTOR]. Many OSM features name
@@ -113,7 +113,7 @@ const CONTACT_ADDRESS_CHECK_BEYOND_METERS: f64 = 150.0;
 ///   Beyond [CONTACT_ADDRESS_CHECK_BEYOND_METERS], the street address
 ///   must agree too.
 ///
-/// Phones or emails that differ never lower a score: about one in six
+/// Contacts that differ never lower a score: about one in six
 /// right `brand:wikidata` matches has different numbers on the two
 /// sides.
 pub struct PoiMatcher<'a> {
@@ -245,8 +245,13 @@ impl Matcher for PoiMatcher<'_> {
     /// kind are only partly in ATP: the Swiss Post spider lists post
     /// offices, but not the post agencies in village shops that OSM
     /// tags with the same `operator:wikidata`.
+    ///
+    /// A website alone doesn't count either, for the same reason: the
+    /// Swiss Post spider gives each post office a page of its own.
     fn counts_for_coverage(&self) -> bool {
-        !self.brand_wikidata.is_empty() || !self.brand_names.is_empty() || !self.contacts.is_empty()
+        !self.brand_wikidata.is_empty()
+            || !self.brand_names.is_empty()
+            || self.contacts.has_phone_or_email()
     }
 
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64 {
@@ -898,5 +903,19 @@ mod tests {
         assert!(PoiMatcher::for_place(&unknown, &Nondescript::none(), &domains).is_none());
         // Nor without domains at all.
         assert!(PoiMatcher::for_place(&operated, &Nondescript::none(), &NO_DOMAINS).is_none());
+
+        // Matchers from operator:wikidata and websites don't count for
+        // the coverage of deletion candidates.
+        assert!(!m.counts_for_coverage());
+        let with_website = atp(&[
+            ("operator:wikidata", "Q1"),
+            ("shop", "supermarket"),
+            ("website", "https://www.denner.ch/de/filialen/zug"),
+        ]);
+        let m =
+            PoiMatcher::for_place(&with_website, &Nondescript::none(), &domains).expect("matcher");
+        assert!(!m.counts_for_coverage());
+        let m = PoiMatcher::for_place(&denner, &Nondescript::none(), &domains).expect("matcher");
+        assert!(m.counts_for_coverage());
     }
 }

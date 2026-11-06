@@ -196,6 +196,7 @@ graph TD
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
     IMPORT_ATP --> NONDESCRIPT_PHONES[alltheplaces.nondescript-phones]
     IMPORT_ATP --> NONDESCRIPT_EMAILS[alltheplaces.nondescript-emails]
+    IMPORT_ATP --> NONDESCRIPT_WEBSITES[alltheplaces.nondescript-websites]
     IMPORT_ATP --> BRAND_DOMAINS[alltheplaces.brand-domains.tsv]
     ATP_PARQUET --> OSMVIEWS_RANKS(compute_osmviews_ranks)
     OSMVIEWS_TIFF --> OSMVIEWS_RANKS
@@ -214,6 +215,7 @@ graph TD
     OSM_INDEX --> CONFLATE
     NONDESCRIPT_PHONES --> CONFLATE
     NONDESCRIPT_EMAILS --> CONFLATE
+    NONDESCRIPT_WEBSITES --> CONFLATE
     BRAND_DOMAINS --> CONFLATE
     OSMVIEWS_TIFF --> CONFLATE
     OSMVIEWS_R --> CONFLATE
@@ -314,14 +316,15 @@ fetch away.
   [`src/pipeline/atp/mod.rs`](../src/pipeline/atp/mod.rs)), and writing
   the rest out as `alltheplaces.parquet`, sorted for spatial locality
   (see [`src/places/`](../src/places/)). While writing, it also
-  external-sorts every (phone or fax number, location) and (email
-  address, location) pair by value and, in one streaming pass, writes
-  the values whose places span at least 1 km to
-  `alltheplaces.nondescript-phones` and
-  `alltheplaces.nondescript-emails`, two `U64Set`s
-  ([`nondescript/`](../src/pipeline/atp/nondescript/); emails are
-  stored as a 64-bit hash): hotlines, switchboards and central or
-  regional mailboxes that say nothing about which place a feature is,
+  external-sorts every (phone or fax number, location), (email
+  address, location) and (website, location) pair by value and, in one
+  streaming pass, writes the values whose places span at least 1 km to
+  `alltheplaces.nondescript-phones`, `alltheplaces.nondescript-emails`
+  and `alltheplaces.nondescript-websites`, three `U64Set`s
+  ([`nondescript/`](../src/pipeline/atp/nondescript/); emails and
+  normalized websites are stored as a 64-bit hash): hotlines,
+  switchboards, central or regional mailboxes and brand home pages
+  that say nothing about which place a feature is,
   so a match on them should add little confidence. Values shared only
   by features at the same site stay usable; see
   [`notes/2026-10-24-shared-phone-numbers.md`](notes/2026-10-24-shared-phone-numbers.md)
@@ -666,10 +669,11 @@ until the full pipeline was proven out:
 - Three matchers are implemented. `PoiMatcher` matches shops,
   restaurants, hotels, schools and fuel stations on an exact
   `brand:wikidata` tag, or on a shared phone number, email address,
-  brand name or brand website domain with a compatible category (see
+  website, brand name or brand website domain with a compatible category (see
   [`notes/2026-10-25-phone-and-email-matching.md`](notes/2026-10-25-phone-and-email-matching.md),
-  [`notes/2026-11-05-brand-name-matching.md`](notes/2026-11-05-brand-name-matching.md)
-  and [`notes/2026-11-06-brand-domains.md`](notes/2026-11-06-brand-domains.md)).
+  [`notes/2026-11-05-brand-name-matching.md`](notes/2026-11-05-brand-name-matching.md),
+  [`notes/2026-11-06-brand-domains.md`](notes/2026-11-06-brand-domains.md)
+  and [`notes/2026-11-06-website-matching.md`](notes/2026-11-06-website-matching.md)).
   `TransitMatcher` matches public transport stops, platforms and
   tracks by `ref:IFOPT`, `uic_ref` and `local_ref`, so far tuned for
   Switzerland (see

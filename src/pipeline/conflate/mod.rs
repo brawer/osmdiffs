@@ -61,11 +61,13 @@ pub fn conflate(
 ) -> Result<PathBuf> {
     let nondescript_phones = Signal::Phone.path(workdir);
     let nondescript_emails = Signal::Email.path(workdir);
+    let nondescript_websites = Signal::Website.path(workdir);
     let brand_domains_path = super::atp::brand_domains_path(workdir);
     let input_modified = last_modified(&[
         atp,
         &nondescript_phones,
         &nondescript_emails,
+        &nondescript_websites,
         &brand_domains_path,
         importance.osmviews,
         importance.osmviews_ranks,
@@ -77,7 +79,11 @@ pub fn conflate(
         return Ok(out_path);
     }
 
-    let nondescript = Nondescript::open(&nondescript_phones, &nondescript_emails)?;
+    let nondescript = Nondescript::open(
+        &nondescript_phones,
+        &nondescript_emails,
+        &nondescript_websites,
+    )?;
     let brand_domains = BrandDomains::open(&brand_domains_path)?;
     log::info!(count = brand_domains.len(); "conflate: read brand domains");
     let signals = Signals::open(

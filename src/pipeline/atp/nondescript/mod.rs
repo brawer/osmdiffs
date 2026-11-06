@@ -1,7 +1,7 @@
-//! Finds *nondescript* phone numbers and email addresses: values that
-//! AllThePlaces lists for places far apart from each other, such as
-//! hotlines, call centers, central switchboards or a chain's customer
-//! service mailbox. Writes them to one [U64Set] per [Signal] on disk, so
+//! Finds *nondescript* phone numbers, email addresses and websites:
+//! values that AllThePlaces lists for places far apart from each other,
+//! such as hotlines, call centers, central switchboards, a chain's
+//! customer service mailbox or its home page. Writes them to one [U64Set] per [Signal] on disk, so
 //! that matching can give them less weight. A nondescript value is no
 //! reason against a match; it just doesn't make one more likely.
 //!
@@ -26,8 +26,8 @@
 //! Computed on the side while `import_atp` writes `alltheplaces.parquet`:
 //! one [Sighting] per (place, signal, value) goes into a single external
 //! sort, and a single streaming pass over the sorted sightings finds the
-//! nondescript values of every signal. Not consumed by anything yet;
-//! phones and emails are planned matching signals.
+//! nondescript values of every signal. Contact matching skips them; see
+//! `matchers::contact`.
 
 use anyhow::Result;
 use ext_sort::{ExternalSorter, ExternalSorterBuilder, buffer::LimitedBufferBuilder};
@@ -39,7 +39,9 @@ use std::sync::LazyLock;
 use crate::places::{Place, PlaceReader};
 use crate::tables::U64Set;
 
-use crate::matchers::contact::{is_email_key, is_phone_key, parse_emails, parse_phone_numbers};
+use crate::matchers::contact::{
+    is_email_key, is_phone_key, is_website_key, parse_emails, parse_phone_numbers, parse_urls,
+};
 
 /// Places carrying the same value whose bounding box diagonal is at
 /// least this long make that value nondescript.
@@ -57,10 +59,13 @@ pub enum Signal {
     /// Email addresses, encoded as a 64-bit hash of the normalized
     /// address (see [parse_emails]).
     Email,
+    /// Websites, encoded as a 64-bit hash of the normalized address
+    /// (see [parse_urls]).
+    Website,
 }
 
 impl Signal {
-    pub const ALL: [Signal; 2] = [Signal::Phone, Signal::Email];
+    pub const ALL: [Signal; 3] = [Signal::Phone, Signal::Email, Signal::Website];
 
     /// Filename, within `workdir`, of this signal's set of nondescript
     /// values, as written by [write].
@@ -68,6 +73,7 @@ impl Signal {
         match self {
             Signal::Phone => "alltheplaces.nondescript-phones",
             Signal::Email => "alltheplaces.nondescript-emails",
+            Signal::Website => "alltheplaces.nondescript-websites",
         }
     }
 
@@ -79,6 +85,7 @@ impl Signal {
         match self {
             Signal::Phone => "phones",
             Signal::Email => "emails",
+            Signal::Website => "websites",
         }
     }
 }
@@ -109,6 +116,8 @@ pub fn sightings(place: &Place) -> Vec<Sighting> {
             (Signal::Phone, Box::new(parse_phone_numbers(value)))
         } else if is_email_key(key) {
             (Signal::Email, Box::new(parse_emails(value)))
+        } else if is_website_key(key) {
+            (Signal::Website, Box::new(parse_urls(value)))
         } else {
             continue;
         };
@@ -141,6 +150,7 @@ pub fn sorter(
 pub struct Nondescript {
     pub phones: Vec<u64>,
     pub emails: Vec<u64>,
+    pub websites: Vec<u64>,
 }
 
 impl Nondescript {
@@ -148,6 +158,7 @@ impl Nondescript {
         match signal {
             Signal::Phone => &self.phones,
             Signal::Email => &self.emails,
+            Signal::Website => &self.websites,
         }
     }
 
@@ -155,6 +166,7 @@ impl Nondescript {
         match signal {
             Signal::Phone => self.phones.push(value),
             Signal::Email => self.emails.push(value),
+            Signal::Website => self.websites.push(value),
         }
     }
 }
@@ -279,7 +291,7 @@ pub fn write(nondescript: &Nondescript, workdir: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::matchers::MatchMask;
-    use crate::matchers::contact::email_hash;
+    use crate::matchers::contact::{email_hash, url_hash};
     use crate::utils::UtcTimestamp;
     use geo::Coord;
 
@@ -311,6 +323,7 @@ mod tests {
                 ("email", "Info@Example.ch"),
                 ("contact:email", "sales@example.ch"),
                 ("description", "Write to help@example.ch"),
+                ("contact:website", "https://www.Example.ch/"),
             ],
         );
         let s = sightings(&p);
@@ -323,6 +336,7 @@ mod tests {
                 (Signal::Phone, 41444177779),
                 (Signal::Email, email_hash("info@example.ch")),
                 (Signal::Email, email_hash("sales@example.ch")),
+                (Signal::Website, url_hash("example.ch")),
             ]
         );
         assert!(s.iter().all(|s| s.s2_cell_id == p.s2_cell_id));
