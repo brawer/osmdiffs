@@ -22,11 +22,13 @@ use std::sync::{LazyLock, OnceLock};
 
 mod emails;
 mod phones;
+mod urls;
 
 #[cfg(test)]
 pub(crate) use emails::email_hash;
 pub(crate) use emails::{is_email_key, parse_emails};
 pub(crate) use phones::{is_phone_key, parse_phone_number, parse_phone_numbers};
+pub(crate) use urls::{is_website_key, parse_website_domains};
 
 /// Score factor of a contact match whose main categories are equal.
 /// Below 1.0, so a `brand:wikidata` match at the same distance wins.
