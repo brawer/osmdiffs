@@ -123,6 +123,14 @@ against main with the matchers of the hydrant note:
 Of the 1,018 fountain matches, 874 are OSM `amenity=drinking_water`.
 The Swiss ATP extract has no waste baskets. No other row changed.
 
+## Results on the eval regions
+
+On the [eval regions](2026-11-06-eval-regions.md), only Zürich has
+fountains and toilets in ATP, with the same numbers as above (1,018
+of 1,287 fountains, 86 of 91 toilets), and no region has waste
+baskets. The table for all kinds is in
+[`2026-11-05-infrastructure-matching.md`](2026-11-05-infrastructure-matching.md#results-on-the-eval-regions).
+
 ## Known limits
 
 - Sites that list several toilets or several baskets at one spot
