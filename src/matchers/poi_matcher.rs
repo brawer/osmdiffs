@@ -5,7 +5,7 @@ use super::{
 };
 use crate::places::Place;
 use geo::Centroid;
-use s2::{cell::Cell, cellid::CellID, point::Point};
+use s2::{cell::Cell, cellid::CellID, latlng::LatLng, point::Point};
 
 /// Finds the first `brand:wikidata` tag in `tags` and parses its
 /// value, which may list several `;`-separated IDs -- e.g. a car
@@ -118,7 +118,9 @@ impl PoiMatcher {
         let tags = || place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
         let brand_wikidata: Vec<u64> = find_brand_wikidata(tags()).collect();
         let brand_names: Vec<String> = find_brand_names(tags()).collect();
-        let contacts = AtpContacts::from_tags(tags(), nondescript);
+        let ll = LatLng::from(CellID(place.s2_cell_id));
+        let position = Some((ll.lng.deg(), ll.lat.deg()));
+        let contacts = AtpContacts::from_tags(tags(), position, nondescript);
         if brand_wikidata.is_empty() && brand_names.is_empty() && contacts.is_empty() {
             return None;
         }

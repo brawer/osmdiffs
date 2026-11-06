@@ -4,6 +4,7 @@
 //! home for other such helpers as they accumulate, as long as they're
 //! genuinely small and genuinely cross-cutting.
 
+pub(crate) mod countries;
 pub(crate) mod parquet;
 
 use anyhow::{Context, Result};

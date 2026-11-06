@@ -50,13 +50,13 @@
 //! Tag values can hold several `;`-separated values; any one of them
 //! counts.
 
-use super::countries::{Country, country};
 use crate::matchers::{
     IFOPT_KEYS, MatchMask, infrastructure_kind, is_transit_stop, normalize_name,
     parse_wikidata_ids, split_values, swiss_uic,
 };
 use crate::pipeline::wikidata_ids::WIKIDATA_KEYS;
 use crate::places::Place;
+use crate::utils::countries::{Country, country};
 use s2::cellid::CellID;
 use std::collections::{HashMap, HashSet};
 

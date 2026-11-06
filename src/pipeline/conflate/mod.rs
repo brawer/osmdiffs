@@ -33,7 +33,6 @@ use std::{
 /// tables, not RSS at a fixed fraction of progress.
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
-pub(crate) mod countries;
 mod deletion;
 mod s2_util;
 mod writer;
