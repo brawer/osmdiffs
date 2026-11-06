@@ -1,6 +1,7 @@
 //! Matches street infrastructure: post boxes, defibrillators (AEDs),
-//! benches, fire hydrants, public bookcases and bicycle parking for
-//! now, with street lamps and the like to follow.
+//! benches, fire hydrants, public bookcases, bicycle parking, waste
+//! baskets, fountains and toilets for now, with street lamps and the
+//! like to follow.
 //!
 //! Such features have no brand and rarely a name, and many of them
 //! stand close together, so the match rests on position. Each kind has
@@ -40,6 +41,13 @@ enum Kind {
     FireHydrant,
     PublicBookcase,
     BicycleParking,
+    WasteBasket,
+    /// Fountains and drinking water points, which OSM tags either
+    /// way: 86% of the OSM features within 2 m of a Zürich fountain
+    /// (ATP `amenity=fountain`, mostly with `drinking_water=yes`) are
+    /// `amenity=drinking_water`.
+    Fountain,
+    Toilets,
 }
 
 impl Kind {
@@ -51,6 +59,10 @@ impl Kind {
             ("emergency", "fire_hydrant") => Some(Kind::FireHydrant),
             ("amenity", "public_bookcase") => Some(Kind::PublicBookcase),
             ("amenity", "bicycle_parking") => Some(Kind::BicycleParking),
+            ("amenity", "waste_basket") => Some(Kind::WasteBasket),
+            ("amenity", "fountain" | "drinking_water") => Some(Kind::Fountain),
+            ("man_made", "drinking_fountain") => Some(Kind::Fountain),
+            ("amenity", "toilets") => Some(Kind::Toilets),
             _ => None,
         })
     }
@@ -63,6 +75,9 @@ impl Kind {
             Kind::FireHydrant => "fire_hydrant",
             Kind::PublicBookcase => "public_bookcase",
             Kind::BicycleParking => "bicycle_parking",
+            Kind::WasteBasket => "waste_basket",
+            Kind::Fountain => "fountain",
+            Kind::Toilets => "toilets",
         }
     }
 
@@ -84,6 +99,10 @@ impl Kind {
             // About 60% equal on close pairs in San Francisco and
             // Cambridge (US), against 25–33% for random pairs.
             Kind::BicycleParking => &["capacity"],
+            // Copenhagen's are all `waste=trash`.
+            Kind::WasteBasket => &[],
+            Kind::Fountain => &[],
+            Kind::Toilets => &[],
         }
     }
 
@@ -116,6 +135,9 @@ enum RefRule {
     /// The last word of the ATP ref equals the OSM ref, such as
     /// Steiger Stiftung's `AEDR 1786` and OSM's `1786`.
     LastWord,
+    /// The ATP ref without this prefix equals the OSM ref, such as
+    /// Zürich's fountain `wvz-22` and OSM's `22`.
+    StripPrefix(&'static str),
 }
 
 /// How to match the features of one kind, or of one spider.
@@ -147,6 +169,15 @@ impl Settings {
             (Kind::BicycleParking, "san_francisco_mta_bicycle_parking_us") => {
                 Some((20.0, RefRule::Ignore))
             }
+            (Kind::WasteBasket, "copenhagen_municipality_waste_baskets_dk") => {
+                Some((10.0, RefRule::Ignore))
+            }
+            (Kind::WasteBasket, "glasgow_city_council_waste_baskets_gb") => {
+                Some((20.0, RefRule::Ignore))
+            }
+            (Kind::Fountain, "stadt_zuerich_ch") => Some((10.0, RefRule::StripPrefix("wvz-"))),
+            (Kind::Toilets, "stadt_zuerich_ch") => Some((20.0, RefRule::Ignore)),
+            (Kind::Toilets, "changing_places_gb") => Some((100.0, RefRule::Ignore)),
             (Kind::Bench, "seattle_parks_and_recreation_benches_us") => {
                 return Settings {
                     max_meters: 15.0,
@@ -163,6 +194,9 @@ impl Settings {
             Kind::FireHydrant => (10.0, RefRule::Ignore),
             Kind::PublicBookcase => (30.0, RefRule::Ignore),
             Kind::BicycleParking => (15.0, RefRule::Ignore),
+            Kind::WasteBasket => (15.0, RefRule::Ignore),
+            Kind::Fountain => (15.0, RefRule::Ignore),
+            Kind::Toilets => (30.0, RefRule::Ignore),
         });
         Settings {
             max_meters,
@@ -245,6 +279,9 @@ impl InfrastructureMatcher {
             RefRule::Ignore => None,
             RefRule::Equal => tag("ref").and_then(|v| normalize_ref(v, false)),
             RefRule::LastWord => tag("ref").and_then(|v| normalize_ref(v, true)),
+            RefRule::StripPrefix(prefix) => tag("ref")
+                .and_then(|v| v.strip_prefix(prefix))
+                .and_then(|v| normalize_ref(v, false)),
         };
         Some(InfrastructureMatcher {
             center: Cell::from(CellID(place.s2_cell_id)).center(),
@@ -512,6 +549,13 @@ mod tests {
         ("ref", "8505"),
         ("capacity", "2"),
         ("bicycle_parking", "rack"),
+    ];
+
+    const ZURICH_FOUNTAIN: &[(&str, &str)] = &[
+        ("amenity", "fountain"),
+        ("ref", "wvz-22"),
+        ("drinking_water", "yes"),
+        ("trough:material", "sandstone"),
     ];
 
     const CASES: &[Case] = &[
@@ -785,6 +829,74 @@ mod tests {
             want: (0.8, 0.8),
         },
         Case {
+            what: "Zürich fountain tagged as drinking water in OSM",
+            spider: "stadt_zuerich_ch",
+            atp: ZURICH_FOUNTAIN,
+            osm: &[("amenity", "drinking_water")],
+            meters: 5.0,
+            want: (0.4, 0.4),
+        },
+        Case {
+            what: "Zürich fountain with its number as OSM ref",
+            spider: "stadt_zuerich_ch",
+            atp: ZURICH_FOUNTAIN,
+            osm: &[("amenity", "drinking_water"), ("ref", "22")],
+            meters: 5.0,
+            want: (0.95, 0.95),
+        },
+        Case {
+            what: "Zürich fountain beyond 10 m, even with the same ref",
+            spider: "stadt_zuerich_ch",
+            atp: ZURICH_FOUNTAIN,
+            osm: &[("amenity", "fountain"), ("ref", "22")],
+            meters: 12.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "a fountain is not a waste basket",
+            spider: "stadt_zuerich_ch",
+            atp: ZURICH_FOUNTAIN,
+            osm: &[("amenity", "waste_basket")],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "Copenhagen waste basket beyond 10 m",
+            spider: "copenhagen_municipality_waste_baskets_dk",
+            atp: &[("amenity", "waste_basket"), ("waste", "trash")],
+            osm: &[("amenity", "waste_basket")],
+            meters: 11.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "waste basket, default radius",
+            spider: "some_waste_basket_spider",
+            atp: &[("amenity", "waste_basket")],
+            osm: &[("amenity", "waste_basket")],
+            meters: 7.5,
+            want: (0.4, 0.4),
+        },
+        Case {
+            what: "Changing Places toilet inside a leisure centre",
+            spider: "changing_places_gb",
+            atp: &[
+                ("amenity", "toilets"),
+                ("brand", "Changing Places"),
+                ("brand:wikidata", "Q104870811"),
+            ],
+            osm: &[("amenity", "toilets"), ("wheelchair", "yes")],
+            meters: 75.0,
+            want: (0.2, 0.2),
+        },
+        Case {
+            what: "toilets, default radius",
+            spider: "some_toilets_spider",
+            atp: &[("amenity", "toilets")],
+            osm: &[("amenity", "toilets")],
+            meters: 35.0,
+            want: NO_MATCH,
+        },
+        Case {
             what: "default radius for an unknown AED spider",
             spider: "some_aed_spider",
             atp: &[("emergency", "defibrillator")],
@@ -811,7 +923,7 @@ mod tests {
     #[test]
     fn test_no_matcher_for_other_kinds() {
         assert!(
-            InfrastructureMatcher::for_place(&place("x", &[("amenity", "waste_basket")])).is_none()
+            InfrastructureMatcher::for_place(&place("x", &[("amenity", "recycling")])).is_none()
         );
         assert!(InfrastructureMatcher::for_place(&place("x", &[("shop", "bakery")])).is_none());
     }
@@ -845,6 +957,16 @@ mod tests {
             bench,
             &[("amenity", "bench"), ("capacity", "6")]
         ));
+    }
+
+    #[test]
+    fn test_kind_name() {
+        let kind = |tags: &[(&'static str, &'static str)]| kind_name(tags.iter().copied());
+        assert_eq!(kind(&[("amenity", "fountain")]), Some("fountain"));
+        assert_eq!(kind(&[("amenity", "drinking_water")]), Some("fountain"));
+        assert_eq!(kind(&[("man_made", "drinking_fountain")]), Some("fountain"));
+        assert_eq!(kind(&[("amenity", "toilets")]), Some("toilets"));
+        assert_eq!(kind(&[("amenity", "waste_basket")]), Some("waste_basket"));
     }
 
     #[test]
