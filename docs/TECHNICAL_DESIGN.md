@@ -318,13 +318,15 @@ fetch away.
   (see [`src/places/`](../src/places/)). While writing, it also
   external-sorts every (phone or fax number, location), (email
   address, location) and (website, location) pair by value and, in one
-  streaming pass, writes the values whose places span at least 1 km to
+  streaming pass, writes the values whose places span at least 1 km
+  (websites: 100 m) to
   `alltheplaces.nondescript-phones`, `alltheplaces.nondescript-emails`
   and `alltheplaces.nondescript-websites`, three `U64Set`s
   ([`nondescript/`](../src/pipeline/atp/nondescript/); emails and
   normalized websites are stored as a 64-bit hash): hotlines,
-  switchboards, central or regional mailboxes and brand home pages
-  that say nothing about which place a feature is,
+  switchboards, central or regional mailboxes, brand home pages and
+  pages for a group of places that say nothing about which place a
+  feature is,
   so a match on them should add little confidence. Values shared only
   by features at the same site stay usable; see
   [`notes/2026-10-24-shared-phone-numbers.md`](notes/2026-10-24-shared-phone-numbers.md)

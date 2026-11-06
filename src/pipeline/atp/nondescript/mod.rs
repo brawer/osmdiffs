@@ -19,7 +19,8 @@
 //!
 //! A value is nondescript if the S2 latitude/longitude rectangle around
 //! every place carrying it, across all spiders, has a diagonal of at
-//! least [MIN_NONDESCRIPT_SPREAD_METERS]. The diagonal is never shorter
+//! least [MIN_NONDESCRIPT_SPREAD_METERS], or for websites
+//! [MIN_NONDESCRIPT_WEBSITE_SPREAD_METERS]. The diagonal is never shorter
 //! than the largest distance between two of the places (and at most
 //! about 1.4 times it), which is precise enough for this threshold.
 //!
@@ -43,12 +44,23 @@ use crate::matchers::contact::{
     is_email_key, is_phone_key, is_website_key, parse_emails, parse_phone_numbers, parse_urls,
 };
 
-/// Places carrying the same value whose bounding box diagonal is at
-/// least this long make that value nondescript.
+/// Places carrying the same phone number or email address whose
+/// bounding box diagonal is at least this long make that value
+/// nondescript.
 pub const MIN_NONDESCRIPT_SPREAD_METERS: f64 = 1000.0;
+
+/// The same for websites. A web page shared by places a few hundred
+/// meters apart describes a group of them, such as all the kindergartens
+/// of a school district, so it doesn't tell which one a feature is.
+/// Places at the same site, such as a car dealer listed once per brand,
+/// are closer than this.
+pub const MIN_NONDESCRIPT_WEBSITE_SPREAD_METERS: f64 = 100.0;
 
 static MIN_NONDESCRIPT_SPREAD: LazyLock<ChordAngle> =
     LazyLock::new(|| crate::matchers::meters_to_chord_angle(MIN_NONDESCRIPT_SPREAD_METERS));
+
+static MIN_NONDESCRIPT_WEBSITE_SPREAD: LazyLock<ChordAngle> =
+    LazyLock::new(|| crate::matchers::meters_to_chord_angle(MIN_NONDESCRIPT_WEBSITE_SPREAD_METERS));
 
 /// A kind of value that can be nondescript.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -79,6 +91,14 @@ impl Signal {
 
     pub fn path(self, workdir: &Path) -> PathBuf {
         workdir.join(self.filename())
+    }
+
+    /// The spread that makes a value of this signal nondescript.
+    fn min_spread(self) -> ChordAngle {
+        match self {
+            Signal::Phone | Signal::Email => *MIN_NONDESCRIPT_SPREAD,
+            Signal::Website => *MIN_NONDESCRIPT_WEBSITE_SPREAD,
+        }
     }
 
     fn name(self) -> &'static str {
@@ -173,7 +193,8 @@ impl Nondescript {
 
 /// Streams over sightings sorted by (signal, value) and returns every
 /// value whose places are spread out over at least
-/// [MIN_NONDESCRIPT_SPREAD_METERS].
+/// [MIN_NONDESCRIPT_SPREAD_METERS], or for websites
+/// [MIN_NONDESCRIPT_WEBSITE_SPREAD_METERS].
 pub fn find_nondescript<E>(
     sorted: impl Iterator<Item = std::result::Result<Sighting, E>>,
 ) -> std::result::Result<Nondescript, E> {
@@ -211,7 +232,7 @@ pub fn find_nondescript<E>(
                 return false;
             };
             let diagonal = Point::from(rect.lo()).chordangle(&Point::from(rect.hi()));
-            diagonal >= *MIN_NONDESCRIPT_SPREAD
+            diagonal >= self.signal.min_spread()
         }
     }
 
@@ -418,6 +439,18 @@ mod tests {
         ]);
         assert_eq!(found.phones, [20, 30, 50, 60]);
         assert_eq!(found.emails, [90]);
+
+        // Websites become nondescript at a shorter distance.
+        let website = |value, lng, lat| sighting(Signal::Website, value, lng, lat);
+        // About 200 m east of `zurich`.
+        let down_the_street = (8.5443, 47.3769);
+        let found = nondescript(vec![
+            website(10, zurich.0, zurich.1),
+            website(10, next_door.0, next_door.1),
+            website(20, zurich.0, zurich.1),
+            website(20, down_the_street.0, down_the_street.1),
+        ]);
+        assert_eq!(found.websites, [20]);
     }
 
     #[test]
