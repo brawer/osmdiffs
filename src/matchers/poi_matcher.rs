@@ -1,3 +1,4 @@
+use super::brand_domains::BrandDomains;
 use super::contact::{AtpContacts, CONTACT_FACTOR, Nondescript, category_factor, main_category};
 use super::{
     MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
@@ -51,6 +52,25 @@ fn find_osm_brand_names<'a>(
         .flat_map(|(_, v)| split_values(v).map(normalize_name))
 }
 
+/// The Wikidata IDs that an ATP feature's brand goes by, for
+/// [BrandDomains]: those in its `brand:wikidata` tag, or if it has none,
+/// those in `operator:wikidata`, or else in `network:wikidata`, which
+/// is how [crate::matchers::brand_domains::brand_id] reads them too.
+fn find_domain_brand_ids<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> Vec<u64> {
+    for key in ["brand:wikidata", "operator:wikidata", "network:wikidata"] {
+        if let Some((_, v)) = tags.clone().find(|(k, _)| *k == key) {
+            return parse_wikidata_ids(v).collect();
+        }
+    }
+    Vec::new()
+}
+
+/// The evidence factor for an OSM feature without `brand:wikidata`
+/// whose website is on a domain of the ATP feature's brand, see
+/// [BrandDomains]. The same as [BRAND_NAME_FACTOR]: both say which
+/// brand a feature is, not which branch.
+const BRAND_DOMAIN_FACTOR: f64 = 0.96;
+
 /// The evidence factor for an equal `brand` name, when the two sides
 /// do not both have `brand:wikidata`. Below [CONTACT_FACTOR], because
 /// a brand name says less than a shared phone number.
@@ -85,7 +105,10 @@ const CONTACT_ADDRESS_CHECK_BEYOND_METERS: f64 = 150.0;
 ///   - an equal brand name, compared without regard to case and
 ///     spacing, with [BRAND_NAME_FACTOR]. Many OSM features name
 ///     their brand but lack `brand:wikidata`. On the OSM side, see
-///     [find_osm_brand_names].
+///     [find_osm_brand_names];
+///   - an OSM feature without `brand:wikidata` whose website is on a
+///     domain of the ATP feature's brand, with [BRAND_DOMAIN_FACTOR];
+///     see [BrandDomains] and [find_domain_brand_ids].
 ///
 ///   Beyond [CONTACT_ADDRESS_CHECK_BEYOND_METERS], the street address
 ///   must agree too.
@@ -93,25 +116,34 @@ const CONTACT_ADDRESS_CHECK_BEYOND_METERS: f64 = 150.0;
 /// Phones or emails that differ never lower a score: about one in six
 /// right `brand:wikidata` matches has different numbers on the two
 /// sides.
-pub struct PoiMatcher {
+pub struct PoiMatcher<'a> {
     center: Point,
     /// Usually a single ID; see [find_brand_wikidata].
     brand_wikidata: Vec<u64>,
     /// Usually a single name; see [find_brand_names].
     brand_names: Vec<String>,
     contacts: AtpContacts,
+    /// See [find_domain_brand_ids], but only the brands that have a
+    /// domain in `brand_domains`.
+    domain_brand_ids: Vec<u64>,
+    brand_domains: &'a BrandDomains,
     /// Main category as `key=value`, for contact and name matches.
     category: Option<String>,
     /// The ATP feature's `addr:*` tags, for far contact and name
-    /// matches. Empty if `contacts` and `brand_names` are empty.
+    /// matches. Empty if `contacts`, `brand_names` and
+    /// `domain_brand_ids` are empty.
     address: Vec<(String, String)>,
 }
 
-impl PoiMatcher {
+impl<'a> PoiMatcher<'a> {
     // TODO: We should also look at names, by computing the token sort ratio,
     // but we should do this in a way that works for CJK. So we need
     // a decent segmenter that works for CJK languages. Maybe Lindera?
-    pub fn for_place(place: &Place, nondescript: &Nondescript) -> Option<PoiMatcher> {
+    pub fn for_place(
+        place: &Place,
+        nondescript: &Nondescript,
+        brand_domains: &'a BrandDomains,
+    ) -> Option<PoiMatcher<'a>> {
         if !place.mask.intersects(&POI_MASK) {
             return None;
         }
@@ -121,49 +153,78 @@ impl PoiMatcher {
         let ll = LatLng::from(CellID(place.s2_cell_id));
         let position = Some((ll.lng.deg(), ll.lat.deg()));
         let contacts = AtpContacts::from_tags(tags(), position, nondescript);
-        if brand_wikidata.is_empty() && brand_names.is_empty() && contacts.is_empty() {
+        let mut domain_brand_ids = if brand_domains.is_empty() {
+            Vec::new()
+        } else {
+            find_domain_brand_ids(tags())
+        };
+        domain_brand_ids.retain(|id| brand_domains.has_brand(*id));
+        if brand_wikidata.is_empty()
+            && brand_names.is_empty()
+            && contacts.is_empty()
+            && domain_brand_ids.is_empty()
+        {
             return None;
         }
-        let (category, address) = if contacts.is_empty() && brand_names.is_empty() {
-            (None, Vec::new())
-        } else {
-            let address = tags()
-                .filter(|(k, _)| k.starts_with("addr:"))
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-            (main_category(tags()), address)
-        };
+        let (category, address) =
+            if contacts.is_empty() && brand_names.is_empty() && domain_brand_ids.is_empty() {
+                (None, Vec::new())
+            } else {
+                let address = tags()
+                    .filter(|(k, _)| k.starts_with("addr:"))
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                (main_category(tags()), address)
+            };
         Some(PoiMatcher {
             center: Cell::from(CellID(place.s2_cell_id)).center(),
             brand_wikidata,
             brand_names,
             contacts,
+            domain_brand_ids,
+            brand_domains,
             category,
             address,
         })
     }
 
     /// The evidence factor for `candidate`, before distance: 1.0 for
-    /// equal `brand:wikidata`, below 1.0 for a contact or brand name
-    /// match, 0.0 for no match.
+    /// equal `brand:wikidata`, below 1.0 for a contact, brand name or
+    /// brand domain match, 0.0 for no match.
     fn factor(&self, candidate: &OsmCandidate) -> f64 {
-        if !self.brand_wikidata.is_empty() {
-            let mut osm = find_brand_wikidata(candidate.tags()).peekable();
-            if osm.peek().is_some() {
-                let shared = osm.any(|id| self.brand_wikidata.contains(&id));
-                return if shared { 1.0 } else { 0.0 };
-            }
+        let mut osm_brand = find_brand_wikidata(candidate.tags()).peekable();
+        let osm_has_brand = osm_brand.peek().is_some();
+        if !self.brand_wikidata.is_empty() && osm_has_brand {
+            let shared = osm_brand.any(|id| self.brand_wikidata.contains(&id));
+            return if shared { 1.0 } else { 0.0 };
         }
         let contact = !self.contacts.is_empty() && self.contacts.agrees(candidate.tags());
         let name = !self.brand_names.is_empty()
             && find_osm_brand_names(candidate.tags()).any(|n| self.brand_names.contains(&n));
-        let evidence = match (contact, name) {
-            (true, _) => CONTACT_FACTOR,
-            (false, true) => BRAND_NAME_FACTOR,
-            (false, false) => return 0.0,
+        let evidence = if contact {
+            CONTACT_FACTOR
+        } else if name {
+            BRAND_NAME_FACTOR
+        } else if self.brand_domain_agrees(candidate, osm_has_brand) {
+            BRAND_DOMAIN_FACTOR
+        } else {
+            return 0.0;
         };
         let osm_category = main_category(candidate.tags());
         evidence * category_factor(self.category.as_deref(), osm_category.as_deref())
+    }
+
+    /// Whether `candidate` is of our brand by [find_domain_brand_ids],
+    /// such as an OSM post office with the same `operator:wikidata` as
+    /// ours, or has no `brand:wikidata` of its own but a website on a
+    /// domain of our brand.
+    fn brand_domain_agrees(&self, candidate: &OsmCandidate, osm_has_brand: bool) -> bool {
+        if self.domain_brand_ids.is_empty() {
+            return false;
+        }
+        let ours = |id: &u64| self.domain_brand_ids.contains(id);
+        find_domain_brand_ids(candidate.tags()).iter().any(ours)
+            || (!osm_has_brand && self.brand_domains.brands(candidate.tags()).iter().any(ours))
     }
 
     fn address_agrees(&self, candidate: &OsmCandidate) -> bool {
@@ -177,7 +238,17 @@ impl PoiMatcher {
     }
 }
 
-impl Matcher for PoiMatcher {
+impl Matcher for PoiMatcher<'_> {
+    /// False if the ATP feature has nothing but an `operator:wikidata`
+    /// or `network:wikidata` with [BrandDomains]. Such features had no
+    /// matcher before brand domains existed, and many brands of this
+    /// kind are only partly in ATP: the Swiss Post spider lists post
+    /// offices, but not the post agencies in village shops that OSM
+    /// tags with the same `operator:wikidata`.
+    fn counts_for_coverage(&self) -> bool {
+        !self.brand_wikidata.is_empty() || !self.brand_names.is_empty() || !self.contacts.is_empty()
+    }
+
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64 {
         // Cheap check first: only decode the (potentially large) geometry
         // for candidates that have some evidence.
@@ -206,6 +277,8 @@ mod tests {
     use super::*;
     use crate::utils::UtcTimestamp;
     use std::sync::LazyLock;
+
+    static NO_DOMAINS: LazyLock<BrandDomains> = LazyLock::new(BrandDomains::none);
 
     fn test_timestamp() -> UtcTimestamp {
         UtcTimestamp(time::UtcDateTime::from_unix_timestamp(1_770_000_000).unwrap())
@@ -389,10 +462,12 @@ mod tests {
             strings: &pool,
         };
 
-        let ch_clothes_matcher = PoiMatcher::for_place(&CH_CLOTHES_ATP, &Nondescript::none())
-            .expect("should create matcher");
-        let ch_kiosk_matcher = PoiMatcher::for_place(&CH_KIOSK_ATP, &Nondescript::none())
-            .expect("should create matcher");
+        let ch_clothes_matcher =
+            PoiMatcher::for_place(&CH_CLOTHES_ATP, &Nondescript::none(), &NO_DOMAINS)
+                .expect("should create matcher");
+        let ch_kiosk_matcher =
+            PoiMatcher::for_place(&CH_KIOSK_ATP, &Nondescript::none(), &NO_DOMAINS)
+                .expect("should create matcher");
         assert!(ch_clothes_matcher.score_osm_candidate(&clothes_candidate) > 0.5);
         assert!(ch_clothes_matcher.score_osm_candidate(&kiosk_candidate) == 0.0);
         assert!(ch_kiosk_matcher.score_osm_candidate(&clothes_candidate) == 0.0);
@@ -504,7 +579,7 @@ mod tests {
             ("phone", "+41 55 210 63 10"),
             ("shop", "car"),
         ]);
-        let m = PoiMatcher::for_place(&dealer, &Nondescript::none()).expect("matcher");
+        let m = PoiMatcher::for_place(&dealer, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
         let same = score(
             &m,
             &[("shop", "car"), ("contact:phone", "+41 55 210 63 10")],
@@ -550,7 +625,8 @@ mod tests {
             ("phone", "+41 55 210 63 10"),
             ("shop", "car"),
         ]);
-        let m = PoiMatcher::for_place(&branded, &Nondescript::none()).expect("matcher");
+        let m =
+            PoiMatcher::for_place(&branded, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
         let vetoed = score(
             &m,
             &[
@@ -565,7 +641,7 @@ mod tests {
 
         // No brand:wikidata and no contacts: no matcher at all.
         let bare = atp(&[("shop", "florist")]);
-        assert!(PoiMatcher::for_place(&bare, &Nondescript::none()).is_none());
+        assert!(PoiMatcher::for_place(&bare, &Nondescript::none(), &NO_DOMAINS).is_none());
     }
 
     /// Brand name evidence: an equal `brand` name matches when the
@@ -638,7 +714,7 @@ mod tests {
 
         // ATP without brand:wikidata still gets a matcher.
         let avia = atp(&[("amenity", "fuel"), ("brand", "Avia")]);
-        let m = PoiMatcher::for_place(&avia, &Nondescript::none()).expect("matcher");
+        let m = PoiMatcher::for_place(&avia, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
         let same = score(&m, &[("amenity", "fuel"), ("brand", "AVIA")]);
         assert!(same > 0.9 && same < BRAND_NAME_FACTOR + 1e-9, "{same}");
         assert_eq!(
@@ -657,7 +733,8 @@ mod tests {
             ("brand", "Avia"),
             ("brand:wikidata", "Q1"),
         ]);
-        let m = PoiMatcher::for_place(&branded, &Nondescript::none()).expect("matcher");
+        let m =
+            PoiMatcher::for_place(&branded, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
         assert_eq!(score(&m, &[("amenity", "fuel"), ("brand", "Avia")]), same);
         // Both sides have brand:wikidata, and they differ: no match.
         let vetoed = score(
@@ -669,5 +746,157 @@ mod tests {
             ],
         );
         assert_eq!(vetoed, 0.0);
+    }
+
+    /// Brand domain evidence: an OSM feature without `brand:wikidata`
+    /// whose website is on a domain of the ATP feature's brand.
+    #[test]
+    fn test_poi_matcher_brand_domain() {
+        use crate::tables::{Feature, StringPool};
+        use s2::{cellid::CellID, latlng::LatLng};
+        use tempfile::TempDir;
+        use wkb::writer::{WriteOptions, write_point};
+
+        let dir = TempDir::new().expect("tempdir");
+        let strings = [
+            "brand:wikidata",
+            "operator:wikidata",
+            "shop",
+            "supermarket",
+            "florist",
+            "website",
+            "url",
+            "https://www.denner.ch/de/filialen/zug",
+            "https://www.denner.ch/",
+            "http://filialen.denner.ch",
+            "https://www.coop.ch/",
+            "Q1",
+            "Q2",
+        ];
+        let pool = StringPool::create(
+            strings.iter().map(|s| s.to_string()),
+            dir.path(),
+            &dir.path().join("strings"),
+        )
+        .expect("StringPool::create");
+        let s2_cell_id = CH_CLOTHES_ATP.s2_cell_id;
+        let score = |matcher: &PoiMatcher, tags: &[(&str, &str)]| {
+            let mut flat_tags = Vec::with_capacity(tags.len() * 2);
+            for (k, v) in tags {
+                flat_tags.push(pool.lookup(k).expect("key in pool") as u32);
+                flat_tags.push(pool.lookup(v).expect("value in pool") as u32);
+            }
+            let ll = LatLng::from(CellID(s2_cell_id));
+            let mut geometry_wkb = Vec::new();
+            write_point(
+                &mut geometry_wkb,
+                &geo::Point::new(ll.lng.deg(), ll.lat.deg()),
+                &WriteOptions {
+                    endianness: wkb::Endianness::LittleEndian,
+                },
+            )
+            .expect("wkb encode");
+            let feature = Feature {
+                id: 1,
+                tags: flat_tags,
+                geometry_wkb,
+                ..Default::default()
+            };
+            matcher.score_osm_candidate(&OsmCandidate {
+                feature: &feature,
+                strings: &pool,
+            })
+        };
+        let atp = |tags: &[(&str, &str)]| Place {
+            s2_cell_id,
+            spider: String::from("test"),
+            mask: MatchMask::SHOP,
+            fetched: test_timestamp(),
+            shape_wkb: test_shape(s2_cell_id),
+            tags: self::tags(tags),
+        };
+        let domains = BrandDomains::from_pairs(&[("denner.ch", 1), ("coop.ch", 2)]);
+        let denner = atp(&[
+            ("brand:wikidata", "Q1"),
+            ("shop", "supermarket"),
+            ("website", "https://www.denner.ch/de/filialen/zug"),
+        ]);
+        let m = PoiMatcher::for_place(&denner, &Nondescript::none(), &domains).expect("matcher");
+        let same = score(
+            &m,
+            &[
+                ("shop", "supermarket"),
+                ("website", "https://www.denner.ch/"),
+            ],
+        );
+        assert!(same > 0.9 && same < BRAND_DOMAIN_FACTOR + 1e-9, "{same}");
+        assert_eq!(
+            score(
+                &m,
+                &[
+                    ("shop", "supermarket"),
+                    ("url", "http://filialen.denner.ch")
+                ]
+            ),
+            same
+        );
+        // Another brand's domain, another category, or no website.
+        assert_eq!(
+            score(
+                &m,
+                &[("shop", "supermarket"), ("website", "https://www.coop.ch/")]
+            ),
+            0.0
+        );
+        assert_eq!(
+            score(
+                &m,
+                &[("shop", "florist"), ("website", "https://www.denner.ch/")]
+            ),
+            0.0
+        );
+        assert_eq!(score(&m, &[("shop", "supermarket")]), 0.0);
+        // OSM has its own brand:wikidata, which wins over the domain.
+        assert_eq!(
+            score(
+                &m,
+                &[
+                    ("brand:wikidata", "Q2"),
+                    ("shop", "supermarket"),
+                    ("website", "https://www.denner.ch/"),
+                ],
+            ),
+            0.0
+        );
+
+        // Without brand:wikidata, ATP's operator:wikidata counts.
+        let operated = atp(&[("operator:wikidata", "Q1"), ("shop", "supermarket")]);
+        let m = PoiMatcher::for_place(&operated, &Nondescript::none(), &domains).expect("matcher");
+        assert_eq!(
+            score(
+                &m,
+                &[
+                    ("shop", "supermarket"),
+                    ("website", "https://www.denner.ch/")
+                ]
+            ),
+            same
+        );
+
+        // Or the same operator:wikidata on OSM, website or not.
+        assert_eq!(
+            score(&m, &[("operator:wikidata", "Q1"), ("shop", "supermarket")]),
+            same
+        );
+        assert_eq!(
+            score(&m, &[("operator:wikidata", "Q2"), ("shop", "supermarket")]),
+            0.0
+        );
+
+        // A brand without any domain gets no matcher of its own.
+        let unknown = atp(&[("operator:wikidata", "Q3"), ("shop", "supermarket")]);
+        assert!(PoiMatcher::for_place(&unknown, &Nondescript::none(), &domains).is_none());
+        // Nor without domains at all.
+        assert!(PoiMatcher::for_place(&operated, &Nondescript::none(), &NO_DOMAINS).is_none());
     }
 }

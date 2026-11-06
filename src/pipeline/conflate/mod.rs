@@ -3,7 +3,10 @@ use super::importance::{Quantiles, Signals};
 use super::last_modified;
 use crate::{
     make_progress_bar,
-    matchers::{OsmCandidate, contact::Nondescript, create_matcher, match_distance},
+    matchers::{
+        OsmCandidate, brand_domains::BrandDomains, contact::Nondescript, create_matcher,
+        match_distance,
+    },
     pipeline::EXTERNAL_SORT_CHUNK_BYTES,
     places::{Place, PlaceReader},
     tables::{Feature, LocalFeatureRef, OsmFeatures},
@@ -58,10 +61,12 @@ pub fn conflate(
 ) -> Result<PathBuf> {
     let nondescript_phones = Signal::Phone.path(workdir);
     let nondescript_emails = Signal::Email.path(workdir);
+    let brand_domains_path = super::atp::brand_domains_path(workdir);
     let input_modified = last_modified(&[
         atp,
         &nondescript_phones,
         &nondescript_emails,
+        &brand_domains_path,
         importance.osmviews,
         importance.osmviews_ranks,
         importance.qrank_quantiles,
@@ -73,6 +78,8 @@ pub fn conflate(
     }
 
     let nondescript = Nondescript::open(&nondescript_phones, &nondescript_emails)?;
+    let brand_domains = BrandDomains::open(&brand_domains_path)?;
+    log::info!(count = brand_domains.len(); "conflate: read brand domains");
     let signals = Signals::open(
         importance.osmviews,
         importance.osmviews_ranks,
@@ -93,6 +100,7 @@ pub fn conflate(
                 &atp_reader,
                 osm,
                 &nondescript,
+                &brand_domains,
                 &signals,
                 producer_progress,
                 tx,
@@ -146,6 +154,7 @@ fn produce_rows(
     atp_reader: &PlaceReader,
     osm: &OsmFeatures,
     nondescript: &Nondescript,
+    brand_domains: &BrandDomains,
     signals: &Signals,
     progress_bar: ProgressBar,
     out: SyncSender<ParquetRow>,
@@ -172,7 +181,8 @@ fn produce_rows(
     let mut batch_start: u64 = 0;
     for batch in atp_reader.read_all()? {
         let batch = batch?;
-        // Which ATP features of this batch have a matcher: only these
+        // Which ATP features of this batch have a matcher that
+        // [crate::matchers::Matcher::counts_for_coverage]: only these
         // count for `coverage`, since ATP features of a kind that we
         // don't match say nothing about unmatched OSM features.
         let has_matcher: Vec<AtomicBool> = batch.iter().map(|_| AtomicBool::new(false)).collect();
@@ -189,10 +199,10 @@ fn produce_rows(
                 )
             });
 
-            let Some(matcher) = create_matcher(atp, nondescript) else {
+            let Some(matcher) = create_matcher(atp, nondescript, brand_domains) else {
                 return Ok(());
             };
-            has_matcher[i].store(true, Ordering::Relaxed);
+            has_matcher[i].store(matcher.counts_for_coverage(), Ordering::Relaxed);
             let keep = if matcher.is_exclusive() {
                 EXCLUSIVE_CANDIDATES
             } else {

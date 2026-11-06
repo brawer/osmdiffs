@@ -196,6 +196,7 @@ graph TD
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
     IMPORT_ATP --> NONDESCRIPT_PHONES[alltheplaces.nondescript-phones]
     IMPORT_ATP --> NONDESCRIPT_EMAILS[alltheplaces.nondescript-emails]
+    IMPORT_ATP --> BRAND_DOMAINS[alltheplaces.brand-domains.tsv]
     ATP_PARQUET --> OSMVIEWS_RANKS(compute_osmviews_ranks)
     OSMVIEWS_TIFF --> OSMVIEWS_RANKS
     OSMVIEWS_RANKS --> OSMVIEWS_R[osmviews-ranks]
@@ -213,6 +214,7 @@ graph TD
     OSM_INDEX --> CONFLATE
     NONDESCRIPT_PHONES --> CONFLATE
     NONDESCRIPT_EMAILS --> CONFLATE
+    BRAND_DOMAINS --> CONFLATE
     OSMVIEWS_TIFF --> CONFLATE
     OSMVIEWS_R --> CONFLATE
     QRANK_Q --> CONFLATE
@@ -325,7 +327,14 @@ fetch away.
   [`notes/2026-10-24-shared-phone-numbers.md`](notes/2026-10-24-shared-phone-numbers.md)
   and
   [`notes/2026-10-24-shared-email-addresses.md`](notes/2026-10-24-shared-email-addresses.md)
-  for how common either kind of sharing is, and why. **~3 minutes.**
+  for how common either kind of sharing is, and why. It also writes
+  `alltheplaces.brand-domains.tsv`, the website domains that belong to
+  one brand, such as `denner.ch` for Denner
+  ([`brand_domains.rs`](../src/matchers/brand_domains.rs)), so that
+  conflation can tell the brand of an OSM feature that has a website
+  but no `brand:wikidata`; see
+  [`notes/2026-11-06-brand-domains.md`](notes/2026-11-06-brand-domains.md).
+  **~3 minutes.**
 - **`import_osm`** ([`src/pipeline/osm/`](../src/pipeline/osm/)) —
   does a first pass over the planet dump that
   decides, by tag, which nodes/ways/relations are even worth fully
@@ -656,10 +665,11 @@ until the full pipeline was proven out:
   API is the closest fit) is future work, not yet designed in detail.
 - Three matchers are implemented. `PoiMatcher` matches shops,
   restaurants, hotels, schools and fuel stations on an exact
-  `brand:wikidata` tag, or on a shared phone number, email address or
-  brand name with a compatible category (see
-  [`notes/2026-10-25-phone-and-email-matching.md`](notes/2026-10-25-phone-and-email-matching.md)
-  and [`notes/2026-11-05-brand-name-matching.md`](notes/2026-11-05-brand-name-matching.md)).
+  `brand:wikidata` tag, or on a shared phone number, email address,
+  brand name or brand website domain with a compatible category (see
+  [`notes/2026-10-25-phone-and-email-matching.md`](notes/2026-10-25-phone-and-email-matching.md),
+  [`notes/2026-11-05-brand-name-matching.md`](notes/2026-11-05-brand-name-matching.md)
+  and [`notes/2026-11-06-brand-domains.md`](notes/2026-11-06-brand-domains.md)).
   `TransitMatcher` matches public transport stops, platforms and
   tracks by `ref:IFOPT`, `uic_ref` and `local_ref`, so far tuned for
   Switzerland (see

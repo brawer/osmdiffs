@@ -18,6 +18,7 @@ use time::{
 };
 
 use super::inputs::Input;
+use crate::matchers::brand_domains::{self, BrandDomainsBuilder};
 use crate::places::{ParquetWriter, Place};
 use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
@@ -41,20 +42,33 @@ const ATP_ZIP_FILENAME: &str = "alltheplaces.zip";
 /// [`ATP_ZIP_FILENAME`].
 const ATP_PARQUET_FILENAME: &str = "alltheplaces.parquet";
 
+/// Filename, within `workdir`, of the website domains that belong to one
+/// brand, which `import_atp` writes on the side; see
+/// [crate::matchers::brand_domains].
+const BRAND_DOMAINS_FILENAME: &str = "alltheplaces.brand-domains.tsv";
+
+/// Path of the website domains that belong to one brand, as written by
+/// [import_atp].
+pub(super) fn brand_domains_path(workdir: &Path) -> PathBuf {
+    workdir.join(BRAND_DOMAINS_FILENAME)
+}
+
 /// Builds (or reuses) `alltheplaces.parquet` from the AllThePlaces
 /// `input` that `pipeline::inputs::fetch_inputs` already made available
 /// locally -- this step itself never touches the network. On the side,
 /// it also writes `alltheplaces.nondescript-phones` and
 /// `alltheplaces.nondescript-emails`, the phone numbers and email
-/// addresses ATP lists for places far apart (see `nondescript`).
+/// addresses ATP lists for places far apart (see `nondescript`), and
+/// `alltheplaces.brand-domains.tsv`, the website domains that belong to
+/// one brand (see [crate::matchers::brand_domains]).
 ///
 /// An existing `alltheplaces.parquet` is reused unless the zip is there
 /// and newer than it (i.e. was fetched again after the parquet file was
 /// built). With the zip gone, there's nothing to compare against, and
 /// `fetch_atp` deliberately didn't download it again: the parquet file
 /// is reused as is. When the parquet file is reused but a nondescript
-/// file is missing or older than the zip, those files alone are rebuilt
-/// from the parquet file, which doesn't need the zip.
+/// or brand domains file is missing or older than the zip, those files
+/// alone are rebuilt from the parquet file, which doesn't need the zip.
 pub fn import_atp(
     input: &Input<AtpMetadata>,
     progress: &MultiProgress,
@@ -78,6 +92,10 @@ pub fn import_atp(
             }
             if rebuild {
                 nondescript::build_from_parquet(&out, workdir)?;
+            }
+            let brand_domains = brand_domains_path(workdir);
+            if !brand_domains.exists() || is_stale(&brand_domains)? {
+                build_brand_domains_from_parquet(&out, &brand_domains)?;
             }
             return Ok(out);
         }
@@ -120,6 +138,33 @@ pub fn import_atp(
     Ok(out)
 }
 
+/// Builds the website domains that belong to one brand from an existing
+/// `alltheplaces.parquet`, for a workdir where that file is reused but
+/// the domains are missing or stale, such as one from before they
+/// existed. `import_atp` otherwise builds them while writing the
+/// parquet file, without this extra read.
+fn build_brand_domains_from_parquet(parquet: &Path, out: &Path) -> Result<()> {
+    let reader = crate::places::PlaceReader::open(parquet)?;
+    let mut builder = BrandDomainsBuilder::default();
+    for batch in reader.read_all()? {
+        for place in batch? {
+            builder.add(place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        }
+    }
+    write_brand_domains(builder, out)
+}
+
+fn write_brand_domains(builder: BrandDomainsBuilder, out: &Path) -> Result<()> {
+    let domains = builder.build();
+    brand_domains::write(&domains, out)?;
+    log::info!(
+        count = domains.len(),
+        path = out.display().to_string();
+        "import_atp: wrote brand domains"
+    );
+    Ok(())
+}
+
 fn process_places(
     places: Receiver<Place>,
     progress: &MultiProgress,
@@ -159,6 +204,7 @@ fn process_places(
     let nondescript_sorter =
         nondescript::sorter(workdir, crate::pipeline::EXTERNAL_SORT_CHUNK_BYTES)?;
     let mut write_result: Result<()> = Ok(());
+    let mut brand_domains = BrandDomainsBuilder::default();
     let sightings = sorted
         .map_while(|place| {
             let place = match place {
@@ -169,6 +215,7 @@ fn process_places(
                 }
             };
             let sightings = nondescript::sightings(&place);
+            brand_domains.add(place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())));
             if let Err(err) = writer.write(place) {
                 write_result = Err(err);
                 return None;
@@ -189,6 +236,7 @@ fn process_places(
 
     let found = nondescript::find_nondescript(sorted_sightings)?;
     nondescript::write(&found, workdir)?;
+    write_brand_domains(brand_domains, &brand_domains_path(workdir))?;
 
     log::info!(
         path = out.display().to_string(),
@@ -638,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn test_import_atp_rebuilds_missing_nondescript_files() -> Result<()> {
+    fn test_import_atp_rebuilds_missing_side_files() -> Result<()> {
         let testdata = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data");
         let workdir = tempfile::tempdir()?;
         let zip = workdir.path().join(ATP_ZIP_FILENAME);
@@ -650,21 +698,26 @@ mod tests {
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
         let phones = nondescript::Signal::Phone.path(workdir.path());
         let emails = nondescript::Signal::Email.path(workdir.path());
+        let domains = brand_domains_path(workdir.path());
 
         let parquet = import_atp(&input, &progress, workdir.path())?;
         assert!(parquet.exists());
         assert!(phones.exists());
         assert!(emails.exists());
+        let built = std::fs::read_to_string(&domains)?;
+        assert_eq!(built, "misenso.ch\tQ116151325\t3\n");
 
         // A workdir from before the nondescript emails existed, whose zip
         // was deleted after the parquet file was built: they get rebuilt
         // from the parquet file, without the zip.
         std::fs::remove_file(&emails)?;
+        std::fs::remove_file(&domains)?;
         std::fs::remove_file(&zip)?;
         let parquet_modified = super::super::modified(&parquet)?;
         assert_eq!(import_atp(&input, &progress, workdir.path())?, parquet);
         assert!(phones.exists());
         assert!(emails.exists());
+        assert_eq!(std::fs::read_to_string(&domains)?, built);
         assert_eq!(super::super::modified(&parquet)?, parquet_modified);
         Ok(())
     }

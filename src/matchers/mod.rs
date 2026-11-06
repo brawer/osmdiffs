@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 use wkb::reader::read_wkb;
 
 mod address;
+pub mod brand_domains;
 pub mod contact;
 mod infrastructure_matcher;
 mod poi_matcher;
@@ -394,6 +395,15 @@ impl<'a> OsmCandidate<'a> {
 pub trait Matcher {
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64;
 
+    /// True if the AllThePlaces feature counts for the coverage that
+    /// deletion candidates go by (see `pipeline::conflate::deletion`):
+    /// an unmatched OSM feature of a brand that ATP covers in its
+    /// country may be gone. False for a matcher whose evidence is too
+    /// weak to say that a feature it doesn't match is gone.
+    fn counts_for_coverage(&self) -> bool {
+        true
+    }
+
     /// True if no two AllThePlaces features of the same spider should
     /// match the same OpenStreetMap feature, such as two bus platforms
     /// of a stop. False where several may share one, such as car
@@ -428,12 +438,14 @@ pub trait Matcher {
 /// of OpenStreetMap features, and only match when the candidate
 /// is of the same brand; a matcher for trees might consider
 /// the plant species. `nondescript` holds the phone numbers and email
-/// addresses that say nothing about which place a feature is.
+/// addresses that say nothing about which place a feature is, and
+/// `brand_domains` the website domains that belong to one brand.
 pub fn create_matcher<'a>(
     place: &'a Place,
     nondescript: &contact::Nondescript,
+    brand_domains: &'a brand_domains::BrandDomains,
 ) -> Option<Box<dyn Matcher + 'a>> {
-    if let Some(matcher) = poi_matcher::PoiMatcher::for_place(place, nondescript) {
+    if let Some(matcher) = poi_matcher::PoiMatcher::for_place(place, nondescript, brand_domains) {
         Some(Box::new(matcher))
     } else if let Some(matcher) = transit_matcher::TransitMatcher::for_place(place) {
         Some(Box::new(matcher))
