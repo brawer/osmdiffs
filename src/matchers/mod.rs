@@ -187,6 +187,7 @@ impl MatchMask {
             ("amenity", "taxi") => Self::TRANSIT.0,
             ("amenity", "telephone") => Self::STREET_FURNITURE.0,
             ("amenity", "theatre") => Self::SHOP.0,
+            ("amenity", "toilets") => Self::STREET_FURNITURE.0,
             ("amenity", "trolley_bay") => Self::STREET_FURNITURE.0,
             ("amenity", "restaurant") => Self::RESTAURANT.0,
             ("amenity", "school") => Self::SCHOOL.0,
