@@ -202,7 +202,9 @@ fn produce_rows(
             let covering = {
                 let s2_cell = s2::cell::Cell::from(s2::cellid::CellID(atp.s2_cell_id));
                 let center = s2_cell.center();
-                let radius = match_distance(&atp.mask);
+                let radius = matcher
+                    .max_distance()
+                    .unwrap_or_else(|| match_distance(&atp.mask));
                 let cap = s2::cap::Cap::from_center_chordangle(&center, &radius);
                 coverer.covering(&cap)
             };
