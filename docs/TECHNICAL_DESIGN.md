@@ -664,7 +664,7 @@ until the full pipeline was proven out:
   tracks by `ref:IFOPT`, `uic_ref` and `local_ref`, so far tuned for
   Switzerland (see
   [`notes/2026-10-30-transit-matching.md`](notes/2026-10-30-transit-matching.md)).
-  `InfrastructureMatcher` matches post boxes and defibrillators by
+  `InfrastructureMatcher` matches post boxes, defibrillators and benches by
   distance, one to one, with a search radius and ref rules per spider
   (see
   [`notes/2026-11-05-infrastructure-matching.md`](notes/2026-11-05-infrastructure-matching.md)).
