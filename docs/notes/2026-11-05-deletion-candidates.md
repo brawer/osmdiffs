@@ -162,6 +162,42 @@ with the same name within 50 m, mostly where OSM has the brand only
 as `operator` and the categories differ, such as a florist with
 `operator=Migros` next to a Migros supermarket.
 
+## Results on the eval regions
+
+Main on the [eval regions](2026-11-06-eval-regions.md), with the
+setup described there. The Swiss transit rules don't apply outside
+Switzerland and Liechtenstein.
+
+| region | `wikidata` | `name` | `swiss_transit_id` | `swiss_transit_stop` | most common |
+|---|---:|---:|---:|---:|---|
+| Switzerland | 1,304 | 416 | 1,027 | 148 | Swiss Post boxes (260), SOCAR (98), Jumbo (75), Avia (66) |
+| Japan | 14,018 | 1,441 | 0 | 0 | Japan Post boxes (2,593), ENEOS (829), まいばすけっと (717), 7-Eleven (697+374), Japan Post offices (579), Lawson (555) |
+| US: Massachusetts | 1,850 | 36 | 0 | 0 | CVS (360), USPS boxes (55), Tesla Superchargers (48), Chase (46), Bank of America (46) |
+| Germany: Berlin | 498 | 153 | 0 | 0 | DB stop areas (96), Deutsche Post boxes (64), TotalEnergies chargers (34), DHL (32) |
+| Brazil: Sudeste | 4,020 | 686 | 0 | 0 | Ipiranga (1,383), Shell (750), Bradesco (681), BR (489), Santander (322) |
+| Thailand | 2,882 | 368 | 0 | 0 | 7-Eleven (2,177), Thailand Post (167), PTT (122) |
+| Kenya | 113 | 14 | 0 | 0 | Total and TotalEnergies (35), Shell (32), Rubis (31) |
+| United Arab Emirates | 278 | 7 | 0 | 0 | McDonald's (89 in Arabic, 17 in Latin), Starbucks (22) |
+| India: Karnataka | 393 | 27 | 0 | 0 | HDFC Bank (67), Axis Bank (30), Bank of Baroda (23) |
+| India: Tamil Nadu | 174 | 15 | 0 | 0 | Hindustan Petroleum (27), HDFC Bank (24) |
+
+The "most common" column counts OSM-only rows by their `brand`,
+`operator` or `network` value, whatever the rule.
+
+- **Berlin's DB stop areas are false positives.** The Swiss register
+  (`opentransportdata_swiss`) lists a few stops in Germany, 8 of them
+  stop areas with `operator=DB Netz AG`. That makes DB look covered
+  in Germany, and the `name` rule flags 96 Berlin S-Bahn stop areas
+  with `operator=DB Netz AG;DB Station&Service AG`. The name rule
+  needs a minimum that a border feed can't reach, or transit kinds
+  should be left out of it, as ski lifts are.
+- Japan has the most rows by far. 2,593 are OSM post boxes of Japan
+  Post that no ATP box matched within the 20 m radius, and most of
+  the rest are convenience stores and fuel stations.
+- In Brazil, fuel stations and banks make up most rows.
+- None of these were checked by hand. How many are closures, and how
+  many are matches that the matcher misses, is open for each region.
+
 ## Known gaps
 
 - Within a country, a brand counts as covered everywhere, even if a

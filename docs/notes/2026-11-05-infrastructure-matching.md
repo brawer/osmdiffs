@@ -159,6 +159,48 @@ same (1,303 `wikidata`, 416 `name`), and so does everything else. The
 Swiss ATP extract of 2026-10-10 has no Winterthur benches, because the
 spider failed.
 
+## Results on the eval regions
+
+Main on the [eval regions](2026-11-06-eval-regions.md), with the
+setup described there, for all kinds that `InfrastructureMatcher`
+handles. Regions and spiders with fewer than 10 ATP features are left
+out.
+
+| region | spider | kind | ATP | matched | median / 90th percentile distance |
+|---|---|---|---:|---:|---:|
+| Switzerland | `swiss_post_ch` | post box | 13,621 | 7,621 (56%) | 8.4 m / 35.3 m |
+| Switzerland | `stadt_zuerich_ch` | bench | 7,267 | 4,026 (55%) | 0.8 m / 3.8 m |
+| Switzerland | `stadt_zuerich_ch` | bicycle parking | 2,865 | 1,571 (55%) | 1.8 m / 6.5 m |
+| Switzerland | `stadt_zuerich_ch` | fountain | 1,287 | 1,018 (79%) | 0.7 m / 3.0 m |
+| Switzerland | `stadt_zuerich_ch` | toilets | 91 | 86 (95%) | 2.9 m / 11.3 m |
+| Switzerland | `little_free_library` | bookcase | 16 | 4 | |
+| Japan | `japan_post_jp` | post box | 95,455 | 10,088 (11%) | 4.0 m / 11.2 m |
+| Japan | `aed_jp` | AED | 67,907 | 336 (0.5%) | 7.5 m / 16.2 m |
+| Japan | parking operators | bicycle parking | 702 | 146 (21%) | 6.7 m / 13.7 m |
+| Japan | `little_free_library` | bookcase | 48 | 0 | |
+| US: Massachusetts | `usps_collection_boxes` | post box | 7,094 | 767 (11%) | 4.6 m / 26.2 m (with FedEx) |
+| US: Massachusetts | `fedex` | post box | 764 | 35 (5%) | |
+| US: Massachusetts | `little_free_library` | bookcase | 2,670 | 81 (3%) | 15.4 m / 32.0 m |
+| Germany: Berlin | `deutsche_post_de` | post box | 2,377 | 2,177 (92%) | 15.1 m / 42.7 m |
+| Germany: Berlin | `steiger_stiftung_aed` and others | AED | 19 | 3 | |
+| Brazil: Sudeste | `little_free_library` | bookcase | 39 | 0 | |
+
+- Berlin's post boxes match far better than Switzerland's or
+  Japan's, at larger distances, as the German eval above showed for
+  Deutsche Post.
+- Japan has about five times as many boxes in ATP as in OSM, so most
+  stay unmatched, and those that match are close. 2,593 Japan
+  Post boxes in OSM have no ATP box within 20 m and become deletion
+  candidates
+  ([`2026-11-05-deletion-candidates.md`](2026-11-05-deletion-candidates.md)).
+- Thailand, Kenya, the UAE and India have no street infrastructure in
+  ATP beyond a handful of Little Free Libraries.
+- Cambridge's hydrants, bicycle parking and other city data, which
+  the later notes measured, have no license in ATP's metadata. The
+  pipeline skips such spiders, so the Massachusetts run has none of
+  them, and their per-spider settings have no effect in production
+  until ATP records a license.
+
 ## Known limits
 
 - The radius and ref rules per spider come from these three evals.
