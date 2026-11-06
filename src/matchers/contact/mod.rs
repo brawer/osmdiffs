@@ -13,11 +13,12 @@
 
 use crate::matchers::split_values;
 use crate::tables::U64Set;
+use crate::utils::countries;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 mod emails;
 mod phones;
@@ -83,14 +84,25 @@ pub struct AtpContacts {
     emails: Vec<u64>,
     /// From `addr:country`, for parsing OSM numbers in national format.
     country: Option<phonenumber::country::Id>,
+    /// Where the feature lies, as (longitude, latitude) in degrees.
+    position: Option<(f64, f64)>,
+    /// The country at `position`, looked up on first use; see
+    /// [AtpContacts::located_country].
+    located: OnceLock<Option<phonenumber::country::Id>>,
 }
 
 impl AtpContacts {
+    /// The contacts in `tags` of a feature at `position`, given as
+    /// (longitude, latitude) in degrees.
     pub fn from_tags<'a>(
         tags: impl Iterator<Item = (&'a str, &'a str)>,
+        position: Option<(f64, f64)>,
         nondescript: &Nondescript,
     ) -> AtpContacts {
-        let mut c = AtpContacts::default();
+        let mut c = AtpContacts {
+            position,
+            ..AtpContacts::default()
+        };
         for (k, v) in tags {
             if is_phone_key(k) {
                 c.phones
@@ -117,10 +129,7 @@ impl AtpContacts {
     pub fn agrees<'a>(&self, osm_tags: impl Iterator<Item = (&'a str, &'a str)>) -> bool {
         for (k, v) in osm_tags {
             let hit = if is_phone_key(k) {
-                !self.phones.is_empty()
-                    && v.split(';')
-                        .filter_map(|part| parse_osm_phone(part, self.country))
-                        .any(|n| self.phones.binary_search(&n).is_ok())
+                !self.phones.is_empty() && v.split(';').any(|part| self.has_osm_phone(part))
             } else if is_email_key(k) {
                 !self.emails.is_empty()
                     && parse_emails(v).any(|h| self.emails.binary_search(&h).is_ok())
@@ -133,20 +142,60 @@ impl AtpContacts {
         }
         false
     }
+
+    fn has_phone(&self, number: u64) -> bool {
+        self.phones.binary_search(&number).is_ok()
+    }
+
+    /// Whether one OSM phone value is one of our numbers. Most OSM
+    /// values are in international format, which [parse_phone_number]
+    /// reads quickly. The rest, such as `044 417 77 77`, go through the
+    /// `phonenumber` crate, first in the country of our `addr:country`
+    /// and then, if that gives none of our numbers, in the country
+    /// where the feature lies, if that is another one.
+    ///
+    /// The second try helps where `addr:country` is wrong, as for
+    /// spiders that put one country on all their shops, or where the
+    /// phone system differs from `addr:country`, as for France and its
+    /// overseas departments. On the 2026-10-10 AllThePlaces run, the
+    /// two countries differ for 0.23% of the features with a phone
+    /// number. Trying `addr:country` first keeps the places where
+    /// phone systems do not follow borders, such as Crimea or the Basel
+    /// airport, and trying both cannot match a number that is not ours.
+    fn has_osm_phone(&self, part: &str) -> bool {
+        let part = part.trim();
+        if part.starts_with('+') {
+            return parse_phone_number(part).is_some_and(|n| self.has_phone(n));
+        }
+        if parse_national_phone(part, self.country).is_some_and(|n| self.has_phone(n)) {
+            return true;
+        }
+        match self.located_country() {
+            Some(located) if Some(located) != self.country => {
+                parse_national_phone(part, Some(located)).is_some_and(|n| self.has_phone(n))
+            }
+            _ => false,
+        }
+    }
+
+    /// The country at our position, for [AtpContacts::has_osm_phone].
+    /// Looked up only for OSM numbers in national format, which are
+    /// rare, so most features never pay for the lookup.
+    fn located_country(&self) -> Option<phonenumber::country::Id> {
+        *self.located.get_or_init(|| {
+            let (lng, lat) = self.position?;
+            let country = countries::country(lng, lat)?;
+            phonenumber::country::Id::from_str(country.code()).ok()
+        })
+    }
 }
 
-/// Parses one OSM phone value. Most are in international format, which
-/// [parse_phone_number] reads quickly. The rest, such as `044 417 77
-/// 77`, go through the `phonenumber` crate in the AllThePlaces
-/// feature's country. That is slow (about 60 µs a call) but rare: on
-/// the planet, it adds about one second in all. In some countries,
-/// such as India, Thailand or Japan, a fifth or more of OSM's numbers
-/// are in national format.
-fn parse_osm_phone(part: &str, country: Option<phonenumber::country::Id>) -> Option<u64> {
-    let part = part.trim();
-    if part.starts_with('+') {
-        return parse_phone_number(part);
-    }
+/// Parses one phone number in national format, such as `044 417 77
+/// 77`, in `country`. The `phonenumber` crate is slow (about 60 µs a
+/// call), but national format is rare: on the planet, it adds about one
+/// second in all. In some countries, such as India, Thailand or Japan,
+/// a fifth or more of OSM's numbers are in national format.
+fn parse_national_phone(part: &str, country: Option<phonenumber::country::Id>) -> Option<u64> {
     let number = phonenumber::parse(country, part).ok()?;
     if !phonenumber::is_valid(&number) {
         return None;
@@ -293,15 +342,37 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_osm_phone() {
+    fn test_parse_national_phone() {
         let ch = Some(phonenumber::country::Id::CH);
-        assert_eq!(parse_osm_phone("044 417 77 77", ch), Some(41444177777));
-        assert_eq!(
-            parse_osm_phone(" +41 44 417 77 77", None),
-            Some(41444177777)
-        );
-        assert_eq!(parse_osm_phone("12", ch), None);
-        assert_eq!(parse_osm_phone("044 417 77 77", None), None);
+        assert_eq!(parse_national_phone("044 417 77 77", ch), Some(41444177777));
+        assert_eq!(parse_national_phone("12", ch), None);
+        assert_eq!(parse_national_phone("044 417 77 77", None), None);
+    }
+
+    #[test]
+    fn test_agrees_located_country() {
+        // Vaduz, Liechtenstein, but `addr:country` says Switzerland.
+        let vaduz = Some((9.5209, 47.1410));
+        let atp = [("addr:country", "CH"), ("phone", "+423 236 60 00")];
+        let c = AtpContacts::from_tags(atp.into_iter(), vaduz, &Nondescript::none());
+        assert!(c.agrees([("phone", "236 60 00")].into_iter()));
+        assert!(!c.agrees([("phone", "236 60 01")].into_iter()));
+
+        // Without a position, we can only try `addr:country`.
+        let c = AtpContacts::from_tags(atp.into_iter(), None, &Nondescript::none());
+        assert!(!c.agrees([("phone", "236 60 00")].into_iter()));
+
+        // No `addr:country`: the position alone.
+        let atp = [("phone", "+423 236 60 00")];
+        let c = AtpContacts::from_tags(atp.into_iter(), vaduz, &Nondescript::none());
+        assert!(c.agrees([("phone", "236 60 00")].into_iter()));
+
+        // `addr:country` still comes first: Büsingen lies in Germany
+        // but also has Swiss numbers.
+        let busingen = Some((8.6900, 47.6960));
+        let atp = [("addr:country", "CH"), ("phone", "+41 52 625 00 00")];
+        let c = AtpContacts::from_tags(atp.into_iter(), busingen, &Nondescript::none());
+        assert!(c.agrees([("phone", "052 625 00 00")].into_iter()));
     }
 
     #[test]
@@ -311,7 +382,7 @@ mod tests {
             ("phone", "+41 44 417 77 77"),
             ("email", "Info@Example.ch"),
         ];
-        let c = AtpContacts::from_tags(atp.into_iter(), &Nondescript::none());
+        let c = AtpContacts::from_tags(atp.into_iter(), None, &Nondescript::none());
         assert!(c.agrees([("phone", "+41 44 417 77 77")].into_iter()));
         assert!(c.agrees([("contact:phone", "044 417 77 77")].into_iter()));
         assert!(c.agrees([("fax", "+41 1 234 56 78; +41 44 417 77 77")].into_iter()));
@@ -335,11 +406,11 @@ mod tests {
         )?;
         let nondescript = Nondescript::open(&phones, &emails)?;
         let atp = [("phone", "+41 44 417 77 77"), ("email", "info@example.ch")];
-        let c = AtpContacts::from_tags(atp.into_iter(), &nondescript);
+        let c = AtpContacts::from_tags(atp.into_iter(), None, &nondescript);
         assert!(c.is_empty());
 
         let atp = [("phone", "+41 44 417 77 77; +41 55 210 63 10")];
-        let c = AtpContacts::from_tags(atp.into_iter(), &nondescript);
+        let c = AtpContacts::from_tags(atp.into_iter(), None, &nondescript);
         assert_eq!(c.phones, [41552106310]);
         assert!(!c.agrees([("phone", "+41 44 417 77 77")].into_iter()));
         Ok(())

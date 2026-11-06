@@ -1,4 +1,5 @@
-//! Which country a point lies in, for [super::deletion].
+//! Which country a point lies in, for deletion candidates and for
+//! parsing phone numbers in national format.
 //!
 //! Uses the [country-boundaries](https://crates.io/crates/country-boundaries)
 //! crate, whose boundaries are derived from OpenStreetMap
@@ -31,7 +32,7 @@ impl Country {
     pub const SWITZERLAND: Country = Country(*b"CH");
     pub const LIECHTENSTEIN: Country = Country(*b"LI");
 
-    #[cfg(test)]
+    /// The two-letter code, such as `CH`.
     pub fn code(&self) -> &str {
         std::str::from_utf8(&self.0).expect("ASCII")
     }
@@ -60,7 +61,7 @@ mod tests {
 
     #[test]
     fn test_version_matches_cargo_lock() {
-        let lock = include_str!("../../../Cargo.lock");
+        let lock = include_str!("../../Cargo.lock");
         let entry = format!("name = \"country-boundaries\"\nversion = \"{VERSION}\"");
         assert!(lock.contains(&entry), "update VERSION to match Cargo.lock");
     }

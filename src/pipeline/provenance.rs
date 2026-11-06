@@ -424,11 +424,12 @@ fn packaged_component(resource: &PackagedResource, metadata: &PackagedMetadata) 
 const COUNTRY_BOUNDARIES_REF: &str = "country-boundaries";
 
 /// The country boundaries that `pipeline::conflate` looks up countries
-/// in, to decide which unmatched OSM features may be gone. Built into
+/// in, to decide which unmatched OSM features may be gone, and that the
+/// contact matcher uses to parse phone numbers in national format. Built into
 /// the binary by the `country-boundaries` crate, so its version is the
 /// crate's; the data itself is derived from OpenStreetMap.
 fn country_boundaries_component() -> Value {
-    use pipeline::conflate::countries;
+    use crate::utils::countries;
     let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, countries::DATA);
     let sha256: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
     json!({
