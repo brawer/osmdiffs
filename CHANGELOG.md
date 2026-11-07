@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.8.12](https://github.com/brawer/osmdiffs/compare/v0.8.11...v0.8.12) (2026-11-07)
+
+
+### 🆕 Enhancements
+
+* **matchers:** Match features on their websites ([#896](https://github.com/brawer/osmdiffs/issues/896)) ([d57cb99](https://github.com/brawer/osmdiffs/commit/d57cb991aad0c49fe58363936cb227ccfeb72633))
+* **matchers:** Tell brands by their website domains ([#893](https://github.com/brawer/osmdiffs/issues/893)) ([03329e3](https://github.com/brawer/osmdiffs/commit/03329e377b15b890c12a84a0efc08400e1fa72ea))
+* try the located country for national-format OSM phones ([#891](https://github.com/brawer/osmdiffs/issues/891)) ([48370c0](https://github.com/brawer/osmdiffs/commit/48370c07f1754dc07459e664778e91e10fe4d0d1))
+
+
+### 🐞 Bug Fixes
+
+* **conflate:** Limit Swiss transit deletion candidates to its home area ([#897](https://github.com/brawer/osmdiffs/issues/897)) ([55a4595](https://github.com/brawer/osmdiffs/commit/55a4595b3985652c5198e8b803b211946427ac17))
+
+
+### 📚 Documentation
+
+* **notes:** Add eval-region baselines to the matching notes ([#895](https://github.com/brawer/osmdiffs/issues/895)) ([548f801](https://github.com/brawer/osmdiffs/commit/548f801a150e5d4b779554ce8428bb429bc0fe4d))
+* **notes:** Pick regions for evaluating matching changes ([#894](https://github.com/brawer/osmdiffs/issues/894)) ([15858af](https://github.com/brawer/osmdiffs/commit/15858af9bbab7c4a2bef329fcba85405e5ae0cf7))
+
 ## [0.8.11](https://github.com/brawer/osmdiffs/compare/v0.8.10...v0.8.11) (2026-11-06)
 
 
