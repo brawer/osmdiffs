@@ -63,10 +63,11 @@ A few things worth calling out that aren’t obvious from the above:
   brand, network or operator whose features of the same kind
   AllThePlaces lists in that country; or, without such Wikidata IDs,
   its `brand`, `network` or `operator` has a name for which
-  AllThePlaces lists such features; or it is a Swiss public transport
-  stop with an ID
-  that the Swiss register doesn’t know; or it is a Swiss stop without
-  IDs, far from any stop in the register. See
+  AllThePlaces lists such features; or it is a public transport stop
+  in Switzerland or Liechtenstein, or in the enclaves of Büsingen and
+  Campione that Swiss public transport serves, with an ID that the
+  Swiss register doesn’t know; or it is such a stop without IDs, far
+  from any stop in the register. See
   [the evaluation](../notes/2026-11-05-deletion-candidates.md).
 - **`atp_geometry`/`osm_geometry` sit outside the `atp`/`osm` structs**,
   at the top level of the file, rather than next to the rest of each

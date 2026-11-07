@@ -148,10 +148,14 @@ numbers mean something:
 Counts include Liechtenstein, and this ATP run predates the spider
 fixes that add railway tracks, so there are no `stop_position` rows.
 The Berlin rows are German stops that the Swiss register lists, with
-its own `ch:` IDs; 19 of them matched. The same
-register stops make DB stop areas look covered for the deletion
-candidates' name rule
-([`2026-11-05-deletion-candidates.md`](2026-11-05-deletion-candidates.md)).
+its own `ch:` IDs; 19 of them matched. About a quarter of the
+register's stops lie outside Switzerland and Liechtenstein, scattered
+and far from complete. They used to make deletion candidates of
+thousands of OSM stops near the border, and of every S-Bahn station
+in Berlin. Now the register's deletion rules only apply in its home
+area, Switzerland, Liechtenstein and the enclaves of Büsingen and
+Campione
+([`2026-11-07-swiss-transit-abroad.md`](2026-11-07-swiss-transit-abroad.md)).
 
 ## Known limits
 

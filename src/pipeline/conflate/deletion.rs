@@ -25,27 +25,41 @@
 //!   [MAX_NAME_VALUES] names are ignored: a bicycle shop tagged
 //!   `brand=Trek;Cube;Scott;Specialized` lists what it sells, and is
 //!   no Trek store.
-//! - [Reason::SwissTransitId]: it is a public transport stop with a
-//!   Swiss ID, which ATP gets from the authoritative Swiss register,
-//!   but ATP knows none of its Swiss IDs. Swiss IDs are IFOPT IDs
-//!   (`ref:IFOPT`, `ref:sloid` or `railway:ref:sloid`) starting with
-//!   `ch:`, and `uic_ref` codes starting with `85`. A stop whose ID is
-//!   known to ATP still exists, even if it wasn't matched: the register
-//!   has no bus stop positions, for example, and OSM often maps a stop
-//!   with more platforms than the register.
-//! - [Reason::SwissTransitStop]: it is a public transport stop in
-//!   Switzerland or Liechtenstein without any IFOPT ID or `uic_ref`,
-//!   and ATP has no Swiss stop anywhere near it. The Swiss register
-//!   covers Liechtenstein too, with the same kinds of IDs. Aerialway
-//!   stations are left out, since the register lacks most ski lifts.
+//! - [Reason::SwissTransitId]: it is a public transport stop in the
+//!   [home area](SWISS_REGISTER) of the authoritative Swiss register
+//!   with a Swiss ID, but ATP knows none of its Swiss IDs. Swiss IDs
+//!   are IFOPT IDs (`ref:IFOPT`, `ref:sloid` or `railway:ref:sloid`)
+//!   starting with `ch:`, and `uic_ref` codes starting with `85`. A
+//!   stop whose ID is known to ATP still exists, even if it wasn't
+//!   matched: the register has no bus stop positions, for example,
+//!   and OSM often maps a stop with more platforms than the register.
+//! - [Reason::SwissTransitStop]: it is a public transport stop in the
+//!   register's home area without any IFOPT ID or `uic_ref`, and ATP
+//!   has no Swiss stop anywhere near it. Aerialway stations are left
+//!   out, since the register lacks most ski lifts.
+//!
+//! The Swiss register lists every stop in its home area: Switzerland,
+//! Liechtenstein, and two enclaves served by Swiss public transport,
+//! Büsingen am Hochrhein in Germany and Campione d'Italia in Italy.
+//! It also lists about 28,000 stops in Germany, Austria, France and
+//! Italy, but far from all of them, so outside its home area neither
+//! Swiss signal applies. Outside Switzerland and Liechtenstein, its
+//! features don't count for the Wikidata and name signals either, not
+//! even in the enclaves, since those signals go by country: eight
+//! German stops with `operator=DB Netz AG` would otherwise make every
+//! Berlin S-Bahn station a candidate. They still match OSM features,
+//! though, and their IDs and positions still keep OSM stops near the
+//! border from becoming Swiss candidates. See
+//! `docs/notes/2026-11-07-swiss-transit-abroad.md`.
 //!
 //! For stops that one of the Swiss signals is about, including ski
-//! lift stations in Switzerland and Liechtenstein, the Wikidata and
-//! name signals don't apply: the Swiss register lists
-//! `network:wikidata` and `operator` for its stops, and that would
-//! flag every unmatched stop of a network or operator. The Swiss signals only apply when ATP actually has the
-//! Swiss register, so that a week in which its spider failed doesn't
-//! turn every Swiss stop into a deletion candidate.
+//! lift stations in the home area, the Wikidata and name signals
+//! don't apply: the Swiss register lists `network:wikidata` and
+//! `operator` for its stops, and that would flag every unmatched stop
+//! of a network or operator. The Swiss signals only apply when ATP
+//! actually has the Swiss register, so that a week in which its
+//! spider failed doesn't turn every Swiss stop into a deletion
+//! candidate.
 //!
 //! Tag values can hold several `;`-separated values; any one of them
 //! counts.
@@ -59,6 +73,7 @@ use crate::places::Place;
 use crate::utils::countries::{Country, country};
 use s2::cellid::CellID;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 /// Tag keys whose names we look up in [AtpCoverage].
 const NAME_KEYS: [&str; 3] = ["brand", "network", "operator"];
@@ -85,6 +100,99 @@ const MIN_SWISS_TRANSIT_FEATURES: u64 = 10_000;
 /// the same cell as a Swiss ATP stop nor in a neighbouring one is at
 /// least that far from any.
 const SWISS_CELL_LEVEL: u64 = 15;
+
+/// A national public transport register in ATP, and its home area:
+/// where it lists every stop. Only the Swiss register for now; once
+/// ATP has others, such as Germany's DELFI, they can go here.
+struct TransitRegister {
+    /// The countries where the register lists every stop.
+    countries: &'static [Country],
+    /// Areas outside `countries` where it lists every stop too.
+    enclaves: &'static [Enclave],
+}
+
+/// A small area that belongs to a [TransitRegister]'s home area
+/// although its country doesn't.
+struct Enclave {
+    /// The country the enclave lies in, by [country].
+    country: Country,
+    /// The enclave's boundary as (longitude, latitude) pairs: its OSM
+    /// boundary relation, widened by about 50 meters so that stops on
+    /// the border count, and simplified to about 25 meters.
+    ring: &'static [(f64, f64)],
+}
+
+/// The Swiss public transport register, as ATP's
+/// `opentransportdata_swiss` spider emits it.
+#[rustfmt::skip]
+const SWISS_REGISTER: TransitRegister = TransitRegister {
+    countries: &[Country::SWITZERLAND, Country::LIECHTENSTEIN],
+    enclaves: &[
+        // Büsingen am Hochrhein, relation 2785126, on 2026-10-20.
+        Enclave {
+            country: Country::GERMANY,
+            ring: &[
+                (8.65822, 47.69171), (8.65797, 47.69046), (8.65917, 47.69013),
+                (8.65920, 47.68918), (8.66217, 47.68786), (8.66345, 47.68774),
+                (8.66295, 47.68546), (8.66962, 47.68439), (8.67198, 47.68470),
+                (8.67885, 47.68714), (8.68537, 47.69106), (8.68856, 47.69428),
+                (8.69018, 47.69493), (8.69164, 47.69482), (8.69942, 47.69251),
+                (8.70454, 47.68992), (8.70753, 47.68912), (8.71492, 47.68919),
+                (8.71854, 47.69070), (8.71772, 47.69229), (8.71826, 47.69273),
+                (8.71823, 47.69513), (8.71216, 47.69662), (8.71244, 47.70190),
+                (8.70954, 47.70436), (8.70707, 47.71122), (8.70524, 47.71363),
+                (8.70340, 47.71498), (8.70132, 47.71564), (8.69827, 47.71542),
+                (8.69697, 47.71411), (8.68933, 47.71210), (8.68902, 47.71165),
+                (8.68966, 47.70979), (8.68618, 47.70903), (8.68422, 47.70915),
+                (8.68155, 47.71019), (8.68070, 47.71076), (8.68202, 47.71161),
+                (8.68188, 47.71268), (8.67804, 47.71360), (8.67392, 47.71309),
+                (8.67131, 47.71147), (8.66598, 47.71347), (8.66425, 47.71372),
+                (8.66543, 47.70766), (8.67301, 47.70459), (8.67571, 47.69810),
+                (8.67364, 47.69818), (8.67303, 47.69537), (8.67216, 47.69537),
+                (8.66764, 47.69356), (8.66764, 47.69251), (8.65822, 47.69171),
+            ],
+        },
+        // Campione d'Italia, relation 46664, on 2026-10-20.
+        Enclave {
+            country: Country::ITALY,
+            ring: &[
+                (8.95792, 45.96493), (8.95832, 45.96439), (8.96797, 45.96262),
+                (8.96787, 45.96183), (8.96830, 45.96149), (8.97103, 45.96118),
+                (8.97277, 45.96156), (8.97616, 45.96137), (8.97756, 45.96365),
+                (8.97797, 45.96783), (8.97884, 45.96825), (8.98001, 45.97101),
+                (8.97800, 45.97197), (8.97698, 45.97593), (8.97708, 45.97954),
+                (8.97821, 45.98256), (8.97765, 45.98340), (8.96718, 45.98460),
+                (8.96656, 45.98442), (8.96425, 45.97993), (8.96352, 45.97629),
+                (8.96087, 45.97252), (8.95792, 45.96493),
+            ],
+        },
+    ],
+};
+
+/// The enclaves of [SWISS_REGISTER] as polygons.
+static SWISS_ENCLAVES: LazyLock<Vec<(Country, geo::Polygon)>> = LazyLock::new(|| {
+    SWISS_REGISTER
+        .enclaves
+        .iter()
+        .map(|e| {
+            let ring: Vec<geo::Coord> = e.ring.iter().map(|&(x, y)| geo::Coord { x, y }).collect();
+            (e.country, geo::Polygon::new(ring.into(), Vec::new()))
+        })
+        .collect()
+});
+
+/// Whether (`lng`, `lat`), which lies in `country` by [country], is
+/// in the home area of [SWISS_REGISTER].
+fn in_swiss_home(country: Option<Country>, lng: f64, lat: f64) -> bool {
+    use geo::Contains;
+    let Some(country) = country else {
+        return false;
+    };
+    SWISS_REGISTER.countries.contains(&country)
+        || SWISS_ENCLAVES
+            .iter()
+            .any(|(c, polygon)| *c == country && polygon.contains(&geo::Point::new(lng, lat)))
+}
 
 /// Why an unmatched OSM feature is a candidate for deletion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -155,11 +263,25 @@ impl AtpCoverage {
     /// it.
     pub(super) fn add(&mut self, place: &Place, country: Option<Country>) {
         let mut swiss = false;
+        // Outside its home countries, the Swiss register is far from
+        // complete, so its features there say nothing about which
+        // brands, networks and operators ATP covers. That holds in
+        // its enclaves too, since coverage is by country: the
+        // register's stops in Büsingen would make their network look
+        // covered in all of Germany.
+        let abroad = place.tags.iter().any(|(key, value)| {
+            IFOPT_KEYS.contains(&key.as_str()) && swiss_ifopts(value).next().is_some()
+        }) && !country.is_some_and(|c| SWISS_REGISTER.countries.contains(&c));
         let infrastructure = infrastructure_of(
             place.mask,
             place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())),
         );
         for (key, value) in &place.tags {
+            if abroad
+                && (WIKIDATA_KEYS.contains(&key.as_str()) || NAME_KEYS.contains(&key.as_str()))
+            {
+                continue;
+            }
             if WIKIDATA_KEYS.contains(&key.as_str()) {
                 for id in parse_wikidata_ids(value) {
                     if let Some(kind) = infrastructure {
@@ -323,15 +445,20 @@ pub(super) fn deletion_reason<'a>(
                 }
             }
         }
-        if has_swiss_id {
-            return (!known).then_some(Reason::SwissTransitId);
+        // A stop whose ID ATP knows still exists, wherever it is.
+        if known {
+            return None;
         }
-        if !has_any_id {
+        if has_swiss_id || !has_any_id {
             let (lng, lat) = locate()?;
-            if matches!(
-                country(lng, lat),
-                Some(Country::SWITZERLAND | Country::LIECHTENSTEIN)
-            ) {
+            // Outside the home area, OSM still has old Swiss codes on
+            // stops that the register has since given their own
+            // country's codes, such as `uic_ref=8581987` in Nauders,
+            // Austria. Neither Swiss signal is about such a stop.
+            if in_swiss_home(country(lng, lat), lng, lat) {
+                if has_swiss_id {
+                    return Some(Reason::SwissTransitId);
+                }
                 // Most ski lift stations aren't in the register, and
                 // those that are carry its IDs. Their operators often
                 // are, though, so the name signal doesn't apply either.
@@ -404,6 +531,10 @@ mod tests {
     const ZURICH_NORTH: (f64, f64) = (8.5402, 47.3872);
     const SINGEN: (f64, f64) = (8.8400, 47.7590);
     const VADUZ: (f64, f64) = (9.5209, 47.1410);
+    const BUSINGEN: (f64, f64) = (8.6900, 47.6960);
+    const CAMPIONE: (f64, f64) = (8.9710, 45.9690);
+    const NAUDERS: (f64, f64) = (10.5017, 46.8906);
+    const BERLIN_HBF: (f64, f64) = (13.3695, 52.5251);
 
     fn place(tags: &[(&str, &str)], (x, y): (f64, f64)) -> Place {
         let mut mask = MatchMask::default();
@@ -767,5 +898,113 @@ mod tests {
 
         // ATP lacks the Swiss register this week.
         assert_eq!(reason(&coverage(false), &tags, ZURICH_NORTH), None);
+    }
+
+    #[test]
+    fn test_in_swiss_home() {
+        let home = |(lng, lat)| in_swiss_home(country(lng, lat), lng, lat);
+        assert!(home(ZURICH_HB));
+        assert!(home(VADUZ));
+        assert!(home(BUSINGEN));
+        assert!(home(CAMPIONE));
+        assert!(!home(SINGEN));
+        assert!(!home(NAUDERS));
+        assert!(!home(BERLIN_HBF));
+        // Near Büsingen, but in Germany proper.
+        assert!(!home((8.7550, 47.6970))); // Gailingen am Hochrhein
+        assert!(!in_swiss_home(None, BUSINGEN.0, BUSINGEN.1));
+    }
+
+    #[test]
+    fn test_coverage_ignores_swiss_register_abroad() {
+        let mut atp = AtpCoverage::default();
+        // The Swiss register lists eight stops in Germany with
+        // `operator=DB Netz AG`, but far from all of Germany's.
+        let db = place(
+            &[
+                ("public_transport", "stop_area"),
+                ("ref:IFOPT", "ch:1:sloid:1100008"),
+                ("uic_ref", "1100008"),
+                ("operator", "DB Netz AG"),
+                ("operator:wikidata", "Q896765"),
+            ],
+            BERLIN_HBF,
+        );
+        for _ in 0..MIN_NAME_FEATURES {
+            add(&mut atp, &db);
+        }
+        atp.swiss_transit_features = MIN_SWISS_TRANSIT_FEATURES;
+        assert_eq!(atp.num_wikidata_countries(), 0);
+        assert_eq!(atp.num_name_countries(), 0);
+        // Its IDs and positions still count.
+        assert!(atp.swiss_ifopt.contains("ch:1:sloid:1100008"));
+        assert!(atp.has_swiss_stop_near(BERLIN_HBF.0, BERLIN_HBF.1));
+        let s_bahn = [
+            ("public_transport", "stop_area"),
+            ("operator", "DB Netz AG;DB Station&Service AG"),
+        ];
+        assert_eq!(reason(&atp, &s_bahn, BERLIN_HBF), None);
+        let s_bahn = [
+            ("public_transport", "station"),
+            ("operator:wikidata", "Q896765"),
+        ];
+        assert_eq!(reason(&atp, &s_bahn, BERLIN_HBF), None);
+
+        // Other spiders' features abroad count as before, and so do
+        // the register's features in Switzerland. In the enclaves,
+        // they would make a network look covered in all of Germany
+        // or Italy, so they don't count.
+        add(
+            &mut atp,
+            &place(
+                &[("public_transport", "station"), ("operator", "Bahn")],
+                SINGEN,
+            ),
+        );
+        for at in [ZURICH_HB, BUSINGEN, CAMPIONE] {
+            add(
+                &mut atp,
+                &place(
+                    &[
+                        ("public_transport", "platform"),
+                        ("ref:IFOPT", "ch:1:sloid:3000:1:1"),
+                        ("operator:wikidata", "Q83835"),
+                    ],
+                    at,
+                ),
+            );
+        }
+        assert_eq!(atp.num_name_countries(), 1);
+        assert_eq!(atp.num_wikidata_countries(), 1);
+    }
+
+    #[test]
+    fn test_swiss_signals_in_enclaves_only() {
+        let atp = coverage(true);
+        let bus_stop = [("highway", "bus_stop")];
+        let old_code = [("public_transport", "platform"), ("uic_ref", "8581987")];
+        for at in [BUSINGEN, CAMPIONE] {
+            assert_eq!(reason(&atp, &bus_stop, at), Some(Reason::SwissTransitStop));
+            assert_eq!(reason(&atp, &old_code, at), Some(Reason::SwissTransitId));
+        }
+        // Old Swiss codes abroad, such as in Nauders, Austria, where
+        // the register now has its own Austrian codes.
+        for at in [NAUDERS, SINGEN] {
+            assert_eq!(reason(&atp, &bus_stop, at), None);
+            assert_eq!(reason(&atp, &old_code, at), None);
+        }
+        // Abroad, the general signals apply to such stops again.
+        let tags = [
+            ("public_transport", "platform"),
+            ("uic_ref", "8581987"),
+            ("operator:wikidata", "Q7"),
+            ("amenity", "fuel"),
+        ];
+        assert_eq!(reason(&atp, &tags, SINGEN), Some(Reason::Wikidata));
+        // Without a location, nothing says where the stop is.
+        assert_eq!(
+            deletion_reason(old_code.iter().copied(), &atp, || None),
+            None
+        );
     }
 }

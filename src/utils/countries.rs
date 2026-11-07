@@ -31,6 +31,8 @@ pub struct Country([u8; 2]);
 impl Country {
     pub const SWITZERLAND: Country = Country(*b"CH");
     pub const LIECHTENSTEIN: Country = Country(*b"LI");
+    pub const GERMANY: Country = Country(*b"DE");
+    pub const ITALY: Country = Country(*b"IT");
 
     /// The two-letter code, such as `CH`.
     pub fn code(&self) -> &str {

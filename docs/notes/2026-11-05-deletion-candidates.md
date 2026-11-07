@@ -188,9 +188,9 @@ The "most common" column counts OSM-only rows by their `brand`,
   (`opentransportdata_swiss`) lists a few stops in Germany, 8 of them
   stop areas with `operator=DB Netz AG`. That makes DB look covered
   in Germany, and the `name` rule flags 96 Berlin S-Bahn stop areas
-  with `operator=DB Netz AG;DB Station&Service AG`. The name rule
-  needs a minimum that a border feed can't reach, or transit kinds
-  should be left out of it, as ski lifts are.
+  with `operator=DB Netz AG;DB Station&Service AG`. Fixed: the Swiss
+  register's features outside its home area no longer count
+  ([`2026-11-07-swiss-transit-abroad.md`](2026-11-07-swiss-transit-abroad.md)).
 - Japan has the most rows by far. 2,593 are OSM post boxes of Japan
   Post that no ATP box matched within the 20 m radius, and most of
   the rest are convenience stores and fuel stations.
