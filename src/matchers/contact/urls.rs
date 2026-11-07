@@ -2,8 +2,9 @@
 //!
 //! [normalize_url] turns the many ways of writing the same web page
 //! into one string, so that AllThePlaces and OpenStreetMap values can be
-//! compared. [registrable_domain] finds the part of a URL that one
-//! organization controls, such as `migros.ch` in
+//! compared, and [parse_urls] hashes them for contact matching.
+//! [registrable_domain] finds the part of a URL that one organization
+//! controls, such as `migros.ch` in
 //! `https://filialen.migros.ch/de/zuerich`.
 
 use percent_encoding::percent_decode_str;
@@ -224,6 +225,22 @@ pub(crate) fn registrable_domain(normalized: &str) -> Option<String> {
     Some(domain.to_string())
 }
 
+/// Parses a website tag value into hashes of its [normalize_url]d
+/// addresses, one per `;`-separated part. Parts that aren't a web
+/// address are skipped.
+pub(crate) fn parse_urls(value: &str) -> impl Iterator<Item = u64> + '_ {
+    value
+        .split(';')
+        .filter_map(normalize_url)
+        .map(|url| url_hash(&url))
+}
+
+/// A stable 64-bit hash of a [normalize_url]d address, the same hash as
+/// for email addresses (see [super::emails::email_hash]).
+pub(crate) fn url_hash(normalized: &str) -> u64 {
+    super::emails::email_hash(normalized)
+}
+
 /// The registrable domains of a website tag value, which may list
 /// several `;`-separated addresses.
 pub(crate) fn parse_website_domains(value: &str) -> impl Iterator<Item = String> + '_ {
@@ -354,6 +371,20 @@ mod tests {
         );
         assert_eq!(d("https://maps.google.com/?cid=123"), None);
         assert_eq!(d("https://goo.gl/maps/abc"), None);
+    }
+
+    #[test]
+    fn test_parse_urls() {
+        let parse = |s| parse_urls(s).collect::<Vec<u64>>();
+        let store = url_hash("example.ch/store/12");
+        let home = url_hash("example.ch");
+        assert_eq!(parse("https://www.Example.ch/store/12/"), [store]);
+        assert_eq!(
+            parse("http://example.ch/store/12?utm_source=osm; https://example.ch/"),
+            [store, home]
+        );
+        assert_eq!(parse("mailto:info@example.ch;example.ch"), [home]);
+        assert!(parse("").is_empty());
     }
 
     #[test]

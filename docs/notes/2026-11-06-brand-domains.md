@@ -7,7 +7,8 @@ could only match them by phone, email or brand name. AllThePlaces (ATP)
 knows which domains belong to which brand: every Denner store that it
 lists has a page on `denner.ch` and carries `brand:wikidata=Q379911`.
 This note describes how we use that as a fallback for a missing
-`brand:wikidata`, and how well it works in Switzerland and Japan.
+`brand:wikidata`, and how well it works in the
+[eval regions](2026-11-06-eval-regions.md).
 
 ## URL normalization
 
@@ -105,57 +106,94 @@ post agencies in village shops that OSM tags with the same
 
 ## Results
 
-Same setup as the earlier notes: a regional OSM extract, and the
-2026-10-10 ATP run filtered to the country by `addr:country`. The
-brand-domain map was built from that filtered ATP, as the pipeline does
-on such a workdir. For Switzerland I also tried the map built from the
-whole ATP run. It gave 375 new matches instead of 377, so the regional
-runs are a fair stand-in for the planet.
+Each region was run separately, with its OSM extract and the 2026-10-10
+ATP run filtered to the country by `addr:country` (and for subregions,
+to a bounding box around the extract). The brand-domain map was built
+from that filtered ATP, as the pipeline does on such a workdir. For
+Switzerland I also tried the map built from the whole ATP run. It gave
+375 new matches instead of 377, so the regional runs are a fair
+stand-in for the planet. The Swiss OSM extract is Geofabrik's of
+2026-10-20; the others are from openstreetmap.fr, 2026-11-05. These
+numbers are the baseline for later changes to brand domains.
 
-| | Switzerland | Japan |
-|---|---:|---:|
-| OSM extract | Geofabrik, 2026-10-20 | openstreetmap.fr, 2026-11-05 |
-| brand domains | 133 | 146 |
-| matched pairs before | 64,062 | 107,123 |
-| matched pairs after | 64,439 | 107,531 |
-| new matches | 377 | 408 |
-| moved to a closer OSM feature | 9 | 10 |
-| matches lost | 0 | 0 |
-| OSM-only rows before → after | 2,916 → 2,917 | 15,461 → 15,459 |
+| region | brand domains | matched pairs before | new | moved | lost | OSM-only rows before → after |
+|---|---:|---:|---:|---:|---:|---:|
+| Switzerland | 133 | 64,062 | 377 | 9 | 0 | 2,916 → 2,917 |
+| Japan | 146 | 107,123 | 408 | 10 | 0 | 15,461 → 15,459 |
+| Massachusetts | 436 | 7,901 | 338 | 0 | 0 | 1,980 → 1,745 |
+| Berlin | 180 | 6,412 | 12 | 0 | 0 | 517 → 517 |
+| Brazil Sudeste | 48 | 7,068 | 1 | 0 | 0 | 4,705 → 4,705 |
+| Thailand | 61 | 9,182 | 5 | 0 | 0 | 3,250 → 3,250 |
+| Kenya | 13 | 461 | 0 | 0 | 0 | 127 → 127 |
+| United Arab Emirates | 90 | 750 | 5 | 2 | 0 | 285 → 285 |
+| Karnataka | 47 | 1,333 | 2 | 0 | 0 | 414 → 414 |
+| Tamil Nadu | 49 | 953 | 3 | 0 | 0 | 189 → 189 |
 
-How the new and moved matches were found:
+No region lost a match. How the new and moved matches were found, and
+how far apart the two features are:
 
-| | Switzerland | Japan |
-|---|---:|---:|
-| website domain | 125 | 416 |
-| same OSM `operator:wikidata` | 261 | 2 |
+| region | website domain | same OSM ID | under 25 m | 25–50 m | 50–150 m | 150 m or more |
+|---|---:|---:|---:|---:|---:|---:|
+| Switzerland | 125 | 261 | 325 | 47 | 12 | 2 |
+| Japan | 416 | 2 | 348 | 43 | 27 | 0 |
+| Massachusetts | 98 | 240 | 319 | 9 | 9 | 1 |
+| Berlin | 12 | 0 | 5 | 2 | 5 | 0 |
+| Brazil Sudeste | 1 | 0 | 0 | 1 | 0 | 0 |
+| Thailand | 5 | 0 | 3 | 2 | 0 | 0 |
+| United Arab Emirates | 7 | 0 | 5 | 1 | 1 | 0 |
+| Karnataka | 2 | 0 | 2 | 0 | 0 | 0 |
+| Tamil Nadu | 3 | 0 | 2 | 1 | 0 | 0 |
 
-All 261 Swiss matches on `operator:wikidata` are Swiss Post.
-
-| distance | Switzerland | Japan |
-|---|---:|---:|
-| under 25 m | 325 | 348 |
-| 25 to 50 m | 47 | 43 |
-| 50 to 150 m | 12 | 27 |
-| 150 m or more | 2 | 0 |
+"Same OSM ID" means the OSM feature has the ATP feature's
+`operator:wikidata` (or `network:wikidata`), as Swiss Post and the
+United States Postal Service do. All 261 Swiss matches of this kind are
+Swiss Post, and 224 of the 240 in Massachusetts are USPS, the rest
+Boston Public Library and clinics.
 
 The brands with the most domain matches were, in Switzerland, Die Post
-(55), Denner (19), update Fitness (12), Neuroth (6) and Medbase (5), and
-in Japan, 日本郵便 (Japan Post, 240), ホテルルートイン (Route Inn, 25),
+(55), Denner (19), update Fitness (12), Neuroth (6) and Medbase (5); in
+Japan, 日本郵便 (Japan Post, 240), ホテルルートイン (Route Inn, 25),
 スターバックス (Starbucks, 16), ほっともっと (Hotto Motto, 11) and
-サイゼリヤ (Saizeriya, 11). Most OSM features had the brand's home page,
-such as `https://www.post.japanpost.jp/`, or a store page on the
-brand's domain.
+サイゼリヤ (Saizeriya, 11); and in Massachusetts, USPS (75), Boston
+Public Library (9), Simon Property Group (2) and AutoZone (2). Most
+OSM features had the brand's home page, such as
+`https://www.post.japanpost.jp/`, or a store page on the brand's
+domain, such as `https://www.bpl.org/locations/…`.
+
+Massachusetts has 235 fewer OSM-only rows. They were USPS post offices
+(220) and a few Boston Public Library branches and urgent care clinics.
+Before, they counted as deletion candidates: ATP covers
+`operator:wikidata=Q668687` through `usps_collection_boxes`, but the
+`usps` spider's post offices, which only carry that
+`operator:wikidata`, had no matcher. Now they match their OSM post
+office.
+
+Elsewhere, few matches are new, for two reasons. Brazil, Kenya and
+India have little ATP coverage to start with. And in Berlin, Thailand,
+the UAE and India, most branded OSM features either have
+`brand:wikidata` already or no website. The new matches there were
+banks (BBBank, apoBank, ttb, Axis, HDFC), fast food (KFC, Domino's,
+Five Guys, Nando's), drugstores (dm, Rossmann), gyms (Anytime Fitness,
+F45, Virgin Active), Tyreplus, Starbucks in the UAE and hotels of
+Rotana and Jumeirah. In Berlin, two Hyundai features matched OSM's
+"Kadea Berlin" 113 m away: the dealer's domain `ka-de-a.de` belongs to
+Hyundai in ATP.
 
 The moved matches were ATP features whose earlier match was a feature
 of the same brand 124 to 400 m away. They now match one 2 to 61 m away,
 such as eight Swiss Denner stores that OSM tags as "Denner Express".
 
-I looked at 30 random new matches in each country. In Japan all 30 had
-the same name on both sides, give or take a branch suffix. In
-Switzerland, 29 were clearly the same place. The one I'm unsure about
-is ATP's "Post Filiale 8411 Winterthur 11 Deutweg", which matched OSM's
-"Post Geiselweid" 17 m away.
+I looked at 30 random new matches in Switzerland, Japan and
+Massachusetts, and at all new matches in the other regions. In Japan
+all 30 had the same name on both sides, give or take a branch suffix.
+In Switzerland, 29 were clearly the same place. The one I'm unsure
+about is ATP's "Post Filiale 8411 Winterthur 11 Deutweg", which matched
+OSM's "Post Geiselweid" 17 m away. In Massachusetts, all 30 were the
+same place, 23 of them post offices that ATP lists without a name. The
+only match beyond 150 m there was ATP's "Burlington Mall®", which
+matched OSM's "Burlington Mall" 321 m away and passed the address
+check: a mall's point and its outline are often that far apart. In the
+other regions, all new matches were the same place.
 
 ## International URLs
 

@@ -1,15 +1,16 @@
-//! Phone numbers and email addresses as matching evidence.
+//! Phone numbers, email addresses and websites as matching evidence.
 //!
-//! A phone number or email address that an AllThePlaces feature and an
-//! OpenStreetMap candidate both carry is good evidence that they
+//! A phone number, email address or website that an AllThePlaces
+//! feature and an OpenStreetMap candidate both carry is good evidence that they
 //! describe the same *site*, but not necessarily the same *feature*: a
 //! flower shop inside a supermarket often lists the supermarket's
 //! number, and a hotel bar the hotel's. So a contact match also needs
 //! compatible main categories, see [category_factor]. Values that
 //! AllThePlaces lists for places far apart (hotlines, central
-//! mailboxes) are nondescript and never count; see [Nondescript] and
-//! `pipeline::atp::nondescript`. For the background, see
-//! `docs/notes/2026-10-25-phone-and-email-matching.md`.
+//! mailboxes, a brand's home page) are nondescript and never count; see
+//! [Nondescript] and `pipeline::atp::nondescript`. For the background,
+//! see `docs/notes/2026-10-25-phone-and-email-matching.md` and
+//! `docs/notes/2026-11-06-website-matching.md`.
 
 use crate::matchers::split_values;
 use crate::tables::U64Set;
@@ -28,7 +29,9 @@ mod urls;
 pub(crate) use emails::email_hash;
 pub(crate) use emails::{is_email_key, parse_emails};
 pub(crate) use phones::{is_phone_key, parse_phone_number, parse_phone_numbers};
-pub(crate) use urls::{is_website_key, parse_website_domains};
+#[cfg(test)]
+pub(crate) use urls::url_hash;
+pub(crate) use urls::{is_website_key, parse_urls, parse_website_domains};
 
 /// Score factor of a contact match whose main categories are equal.
 /// Below 1.0, so a `brand:wikidata` match at the same distance wins.
@@ -38,23 +41,25 @@ pub const CONTACT_FACTOR: f64 = 0.98;
 /// pair, see [category_factor].
 pub const CATEGORY_PAIR_FACTOR: f64 = 0.95;
 
-/// Phone numbers and email addresses that AllThePlaces lists for
-/// places far apart, as written by `import_atp`. A shared value in one
-/// of these sets is no evidence for a match.
+/// Phone numbers, email addresses and websites that AllThePlaces lists
+/// for places far apart, as written by `import_atp`. A shared value in
+/// one of these sets is no evidence for a match.
 pub struct Nondescript {
     phones: Option<U64Set>,
     emails: Option<U64Set>,
+    websites: Option<U64Set>,
 }
 
 impl Nondescript {
-    /// Opens the two sets written by `import_atp`.
-    pub fn open(phones: &Path, emails: &Path) -> Result<Nondescript> {
+    /// Opens the three sets written by `import_atp`.
+    pub fn open(phones: &Path, emails: &Path, websites: &Path) -> Result<Nondescript> {
         let open = |path: &Path| {
             U64Set::open(path).with_context(|| format!("could not open {}", path.display()))
         };
         Ok(Nondescript {
             phones: Some(open(phones)?),
             emails: Some(open(emails)?),
+            websites: Some(open(websites)?),
         })
     }
 
@@ -64,6 +69,7 @@ impl Nondescript {
         Nondescript {
             phones: None,
             emails: None,
+            websites: None,
         }
     }
 
@@ -74,9 +80,13 @@ impl Nondescript {
     fn is_email(&self, hash: u64) -> bool {
         self.emails.as_ref().is_some_and(|s| s.contains(hash))
     }
+
+    fn is_website(&self, hash: u64) -> bool {
+        self.websites.as_ref().is_some_and(|s| s.contains(hash))
+    }
 }
 
-/// The descriptive phone numbers and email addresses of an
+/// The descriptive phone numbers, email addresses and websites of an
 /// AllThePlaces feature.
 #[derive(Debug, Default)]
 pub struct AtpContacts {
@@ -84,6 +94,8 @@ pub struct AtpContacts {
     phones: Vec<u64>,
     /// Sorted, as encoded by [parse_emails].
     emails: Vec<u64>,
+    /// Sorted, as encoded by [parse_urls].
+    websites: Vec<u64>,
     /// From `addr:country`, for parsing OSM numbers in national format.
     country: Option<phonenumber::country::Id>,
     /// Where the feature lies, as (longitude, latitude) in degrees.
@@ -112,6 +124,9 @@ impl AtpContacts {
             } else if is_email_key(k) {
                 c.emails
                     .extend(parse_emails(v).filter(|h| !nondescript.is_email(*h)));
+            } else if is_website_key(k) {
+                c.websites
+                    .extend(parse_urls(v).filter(|h| !nondescript.is_website(*h)));
             } else if k == "addr:country" {
                 c.country = phonenumber::country::Id::from_str(v.trim()).ok();
             }
@@ -120,14 +135,23 @@ impl AtpContacts {
         c.phones.dedup();
         c.emails.sort_unstable();
         c.emails.dedup();
+        c.websites.sort_unstable();
+        c.websites.dedup();
         c
     }
 
     pub fn is_empty(&self) -> bool {
-        self.phones.is_empty() && self.emails.is_empty()
+        self.phones.is_empty() && self.emails.is_empty() && self.websites.is_empty()
     }
 
-    /// Whether `osm_tags` carry one of our phone numbers or emails.
+    /// Whether there is a phone number or email address, not just a
+    /// website.
+    pub fn has_phone_or_email(&self) -> bool {
+        !self.phones.is_empty() || !self.emails.is_empty()
+    }
+
+    /// Whether `osm_tags` carry one of our phone numbers, emails or
+    /// websites.
     pub fn agrees<'a>(&self, osm_tags: impl Iterator<Item = (&'a str, &'a str)>) -> bool {
         for (k, v) in osm_tags {
             let hit = if is_phone_key(k) {
@@ -135,6 +159,9 @@ impl AtpContacts {
             } else if is_email_key(k) {
                 !self.emails.is_empty()
                     && parse_emails(v).any(|h| self.emails.binary_search(&h).is_ok())
+            } else if is_website_key(k) {
+                !self.websites.is_empty()
+                    && parse_urls(v).any(|h| self.websites.binary_search(&h).is_ok())
             } else {
                 false
             };
@@ -383,8 +410,13 @@ mod tests {
             ("addr:country", "CH"),
             ("phone", "+41 44 417 77 77"),
             ("email", "Info@Example.ch"),
+            ("website", "https://www.example.ch/de/filialen/zuerich/"),
         ];
         let c = AtpContacts::from_tags(atp.into_iter(), None, &Nondescript::none());
+        assert!(c.has_phone_or_email());
+        let website_only = [("website", "https://www.example.ch/de/filialen/zuerich/")];
+        let w = AtpContacts::from_tags(website_only.into_iter(), None, &Nondescript::none());
+        assert!(!w.is_empty() && !w.has_phone_or_email());
         assert!(c.agrees([("phone", "+41 44 417 77 77")].into_iter()));
         assert!(c.agrees([("contact:phone", "044 417 77 77")].into_iter()));
         assert!(c.agrees([("fax", "+41 1 234 56 78; +41 44 417 77 77")].into_iter()));
@@ -392,6 +424,15 @@ mod tests {
         assert!(!c.agrees([("phone", "+41 44 417 77 78")].into_iter()));
         assert!(!c.agrees([("name", "+41 44 417 77 77")].into_iter()));
         assert!(!c.agrees([("email", "sales@example.ch")].into_iter()));
+        assert!(c.agrees([("website", "http://example.ch/de/filialen/zuerich")].into_iter()));
+        assert!(
+            c.agrees([("contact:website", "https://EXAMPLE.ch/de/Filialen/Zuerich")].into_iter())
+        );
+        assert!(c.agrees([("url", "example.ch/de/filialen/z%75erich")].into_iter()));
+        assert!(!c.agrees([("website", "https://www.example.ch/")].into_iter()));
+        assert!(
+            !c.agrees([("website:menu", "https://www.example.ch/de/filialen/zuerich")].into_iter())
+        );
     }
 
     #[test]
@@ -399,15 +440,26 @@ mod tests {
         let dir = TempDir::new()?;
         let phones = dir.path().join("phones");
         let emails = dir.path().join("emails");
+        let websites = dir.path().join("websites");
         U64Set::create([41444177777].into_iter(), dir.path(), &phones, 1 << 20)?;
+        U64Set::create(
+            [url_hash("example.ch")].into_iter(),
+            dir.path(),
+            &websites,
+            1 << 20,
+        )?;
         U64Set::create(
             [email_hash("info@example.ch")].into_iter(),
             dir.path(),
             &emails,
             1 << 20,
         )?;
-        let nondescript = Nondescript::open(&phones, &emails)?;
-        let atp = [("phone", "+41 44 417 77 77"), ("email", "info@example.ch")];
+        let nondescript = Nondescript::open(&phones, &emails, &websites)?;
+        let atp = [
+            ("phone", "+41 44 417 77 77"),
+            ("email", "info@example.ch"),
+            ("website", "https://www.example.ch/"),
+        ];
         let c = AtpContacts::from_tags(atp.into_iter(), None, &nondescript);
         assert!(c.is_empty());
 
@@ -415,6 +467,11 @@ mod tests {
         let c = AtpContacts::from_tags(atp.into_iter(), None, &nondescript);
         assert_eq!(c.phones, [41552106310]);
         assert!(!c.agrees([("phone", "+41 44 417 77 77")].into_iter()));
+
+        let atp = [("website", "https://example.ch/; https://example.ch/zug")];
+        let c = AtpContacts::from_tags(atp.into_iter(), None, &nondescript);
+        assert_eq!(c.websites, [url_hash("example.ch/zug")]);
+        assert!(!c.agrees([("website", "https://example.ch")].into_iter()));
         Ok(())
     }
 }
