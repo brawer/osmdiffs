@@ -137,7 +137,10 @@ mechanism for whatever scheduler ends up being used.
 
 ## Scheduling
 
-Nothing here runs on a schedule yet. The design intent
+Nothing in this repository runs on a schedule. A weekly `CronJob`
+exists in [`brawer/production`](https://github.com/brawer/production)
+(`kube-shim-jobs/`, see "A second real run" below); as of 2026-11 it's
+applied but still suspended. The design intent
 ([`TECHNICAL_DESIGN.md`](TECHNICAL_DESIGN.md#objective)) is a weekly
 cadence, matching how often AllThePlaces itself publishes a fresh dump
 — whatever wires this up (a Kubernetes `CronJob`, a plain cron job
@@ -255,6 +258,123 @@ picks the actual production infrastructure should treat "billed
 continuously" vs. "billed per run" as a real design axis, not just compare
 hourly rates.
 
+## A second real run: UpCloud via kube-shim (2026-11)
+
+On 2026-11-07, [`brawer/production`](https://github.com/brawer/production)
+(`kube-shim/` + `kube-shim-jobs/`) ran `osmdiffs:v0.8.12` end to end
+against the real planet. It ran as a Kubernetes `Job`, built from a
+weekly `CronJob`'s template, on
+[kube-shim](https://github.com/brawer/kube-shim). kube-shim is a small
+Kubernetes API that runs each job on its own short-lived UpCloud VM and
+deletes it afterwards, so billing is per run, not for an always-on node.
+It's one data point again, not a sweep. This was also the first run
+against the real public bucket and CDN: `data/datapackage.json` on
+`osmdiffs.brawer.ch` updated as designed.
+
+Setup, all in UpCloud `de-fra1`:
+
+- **Compute:** `CLOUDNATIVE-6xCPU-16GB` (6 vCPU, 16GB), container
+  limits `--cpus=6`/`--memory=8g`, matching this document's
+  recommended minimum. The extra RAM on the VM wasn't given to the
+  container. UpCloud's own docs don't say whether Cloud Native vCPUs
+  are dedicated or shared; third-party listings
+  ([VPSBenchmarks](https://www.vpsbenchmarks.com/instance_types/upcloud),
+  [Spare Cores](https://sparecores.com/server/upcloud/CLOUDNATIVE-6xCPU-24GB))
+  describe them as shared AMD EPYC cores.
+- **Scratch:** a fresh 250GB **MaxIOPS** block-storage volume (UpCloud's
+  faster SSD tier), formatted per run and deleted afterwards.
+
+**Total runtime: 4h43m** (container start 13:23:05 to exit 18:06:04
+UTC). That's faster than Infomaniak's 5h55m, but not directly comparable
+to the Hetzner sweep's ~2h43m, which was measured before
+[#830](https://github.com/brawer/osmdiffs/issues/830) and covers only
+`import_osm` + `conflate`. Per-step wall-clock time from `pipeline.log`:
+
+| Step | UpCloud (6 CPU, 8g) |
+|---|---|
+| `fetch_inputs` (of which `fetch_inputs.osm`: 15m57s) | 15m57s |
+| `import_atp` | 3m56s |
+| `import_osm` (`.prune` 32m17s, `.assemble` 22m18s, `.index` 18m15s) | 1h12m59s |
+| `collect_wikidata_ids` | 5m18s |
+| `conflate` | 24m26s |
+| `extract_conflated_layers` | 2m46s |
+| `render_conflated_overview` | 20m44s |
+| `render_conflated_detail` | 59m51s |
+| `join_conflated_tiles` | 1h09m50s |
+| uploads, `suggest_edits`, `render_tiles` | ~6m |
+
+Compared with the earlier runs:
+
+- `fetch_inputs.osm` + `import_osm` together took 1h29m. The Hetzner
+  sweep's 8g `import_osm`, which still included the ~28-minute
+  download, took 2h24m.
+- `conflate` took 24m here, against ~10m on Hetzner.
+- `render_conflated_detail` took ~1h, against ~83 minutes on Infomaniak.
+- `join_conflated_tiles` is now one of the two longest steps, at 1h10m.
+
+**Memory behaved exactly as the page-cache design intends.** The 85%
+`WARN` fired at `collect_wikidata_ids`, `compute_qrank_quantiles` and
+`conflate` (up to 99% of the 8g limit). Yet the largest anonymous
+footprint (`rss_anon_bytes`) over the whole run was **0.85 GiB**, while
+file-backed pages (`rss_file_bytes`) reached **7.64 GiB**. At the start
+of `conflate`, RSS was 7.66 GiB, of which 7.64 GiB was file-backed and
+22 MiB anonymous. As on Infomaniak, the warning reflects reclaimable
+cache, not heap growth. The container sits at its limit whatever the
+limit is, so a high `cgroup_peak_bytes` alone says nothing about whether
+more RAM would help. This document's `--mem-limit` sweep (4g: +1h40m in
+`import_osm`) is still the evidence for the 6–8GB floor.
+
+**A first CPU data point: 12 CPUs was slower, not faster.** On UpCloud
+the scratch volume costs about two thirds as much per hour as the 6-CPU
+server (see Cost below), so a faster run on more CPUs could have been
+cheaper overall. A second full run on 2026-11-07/08 tried `--cpus=12`
+with `--memory=16g` on `CLOUDNATIVE-12xCPU-24GB` (same image, same
+scratch tier, `available_parallelism` 12). It took **5h37m**, against
+4h43m at 6 CPUs. Per step (minutes):
+
+| Step | 6 CPU, 8g | 12 CPU, 16g | Change |
+|---|---|---|---|
+| `fetch_inputs.osm` | 16.0 | 16.0 | ±0% |
+| `import_osm` | 73.0 | 84.9 | +16% |
+| ↳ `.prune` / `.assemble` / `.index` | 32.3 / 22.3 / 18.3 | 34.7 / 31.4 / 18.7 | +7% / +41% / +2% |
+| `collect_wikidata_ids` | 5.3 | 8.5 | +61% |
+| `conflate` | 24.4 | 26.0 | +6% |
+| `render_conflated_overview` | 20.7 | 29.0 | +40% |
+| `render_conflated_detail` | 59.9 | 68.5 | +14% |
+| `join_conflated_tiles` | 69.8 | 88.2 | +26% |
+
+Almost every step got slower, including ones that hardly use more than
+one core. Only the network-bound download was unchanged. So this isn't
+poor parallel scaling alone: each vCPU did less work. With one run per
+setting, that can't be pinned down further. Plausible causes are shared
+vCPUs, a different host CPU generation behind the larger plan, or a
+busier host overnight. A repeat on a different day would tell them
+apart. Until then, **6 CPUs stays the recommendation** on this platform.
+
+Doubling the memory alongside didn't make up for it. File-backed pages simply grew to
+fill the larger limit (`rss_file_bytes` up to 15.41 GiB, against 7.64 GiB
+at 8g), while anonymous memory stayed the same (0.88 GiB against 0.85).
+That's consistent with the `--mem-limit` sweep above, which saw nothing
+gained beyond 8g. kube-shim's `/metrics`
+showed no swapping (`node_vmstat_pswpin`/`pswpout` stayed at 0). Major
+page faults rose from about 1,400 in the first 20 minutes to about 279,000
+some 4¼ hours in. (These are samples from a poller that had gaps, not a
+complete series.)
+
+**Orchestrator-specific gotchas on this platform** (not `osmdiffs`'s
+own):
+
+- UpCloud's server firewall is **stateless**. A default-drop inbound
+  policy also drops DNS replies unless they're explicitly allowed (UDP
+  and TCP from source port 53 on UpCloud's resolvers). The symptom
+  inside the container is `failed to lookup address information: Try
+  again` at `fetch_inputs`, the first network access, about 20 seconds
+  into the run.
+- On success, `osmdiffs` writes nothing to stdout or stderr: everything
+  goes to `pipeline.log`, uploaded to `INTERNAL_S3_*`. An empty `kubectl
+  logs` for a successful run is expected. On failure, the error appears
+  on stderr.
+
 ## Serving the outputs (CDN)
 
 Nothing serves the pipeline’s outputs to the public yet. The intent is
@@ -336,8 +456,8 @@ debugging aid, not a data product.
 
 **First production run:** do it by hand and check
 `https://<host>/data/datapackage.json` on the CDN looks right before
-wiring up a cron — nothing here has run against a real public bucket +
-CDN yet.
+wiring up a cron. The first run against the real public bucket + CDN
+(2026-11-07, see "A second real run" above) published as designed.
 
 ### Still open
 
@@ -416,3 +536,28 @@ at Infomaniak, but needs at least one node running permanently regardless
 of whether a job is active — an unavoidable baseline cost this per-run
 figure doesn’t capture, and not quantified here since it depends on how
 the cluster ends up shared/scheduled, not on this pipeline.
+
+**UpCloud via kube-shim, one real run (2026-11-07)**: the run described
+in "A second real run" above, `de-fra1`, at rates from UpCloud's own
+price API (EUR):
+
+- Compute: `CLOUDNATIVE-6xCPU-16GB`, €0.1101/hour, plus its separately
+  billed 10GB boot disk (standard tier) and IPv4 address: **€0.1161/hour**.
+  The worker VM existed for 4h48m, from creation to deletion: **≈ €0.56**.
+- Storage: the 250GB MaxIOPS scratch volume, €0.00031/GB/hour, so
+  **€0.0775/hour**, for its 4h48m lifetime: **≈ €0.37**. On this
+  platform the scratch volume costs about two thirds as much per hour as
+  the server, so run time matters as much as the hourly rate.
+- **≈ €0.93 per run**, about €4/month at a weekly cadence. kube-shim's own
+  FOCUS cost report gives the same figure (€0.928: VM, boot disk, IPv4
+  and scratch, each for 4.79 h).
+- The 12-CPU run (see above), on `CLOUDNATIVE-12xCPU-24GB` at
+  €0.1339/hour plus the same extras and scratch, for 5.67 h: **≈ €1.23**.
+  It was slower and more expensive.
+
+Not included: the kube-shim control-plane host itself, which runs
+permanently but is shared by every job scheduled on it, not specific to
+this pipeline. Today it's on UpCloud's legacy `1xCPU-1GB` plan (≈
+€8/month). The current `STARTER-1xCPU-1GB` plan (≈ €3/month) would do
+just as well
+([brawer/kube-shim#143](https://github.com/brawer/kube-shim/issues/143)).
