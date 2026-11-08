@@ -406,9 +406,10 @@ pub trait Matcher {
 
     /// True if no two AllThePlaces features of the same spider should
     /// match the same OpenStreetMap feature, such as two bus platforms
-    /// of a stop. False where several may share one, such as car
-    /// dealers of several brands in one OSM building. See
-    /// `pipeline::conflate` for how conflicts are resolved.
+    /// of a stop, or two branches of a chain. Features of different
+    /// spiders may still share one, such as car dealers of several
+    /// brands in one OSM building. See `pipeline::conflate` for how
+    /// conflicts are resolved.
     fn is_exclusive(&self) -> bool {
         false
     }
@@ -419,6 +420,16 @@ pub trait Matcher {
     /// quays. Only called for candidates with a positive score.
     fn may_share(&self, _candidate: &OsmCandidate) -> bool {
         false
+    }
+
+    /// For an exclusive matcher, how close another AllThePlaces
+    /// feature of the same spider must be for this one to share the
+    /// OSM feature that the other one took. Some spiders list several
+    /// things at one place, such as the sales and service departments
+    /// of a car dealer, which OSM often maps as one feature. `None` if
+    /// no feature may share for being close.
+    fn colocated_radius(&self) -> Option<ChordAngle> {
+        None
     }
 
     /// How far away candidates may be, if the matcher knows better than

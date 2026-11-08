@@ -16,8 +16,9 @@ use ext_sort::{ExternalSorter, ExternalSorterBuilder, buffer::mem::MemoryLimited
 use geo::Centroid;
 use indicatif::{MultiProgress, ProgressBar};
 use rayon::prelude::*;
+use s2::s1::ChordAngle;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, hash_map::Entry},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{
@@ -146,11 +147,16 @@ struct ExclusiveCandidates {
     /// Score, OSM feature, and whether the matcher allows other ATP
     /// features to match it too ([crate::matchers::Matcher::may_share]).
     candidates: Vec<(f64, LocalFeatureRef, bool)>,
+    /// The ATP feature's position, for [Self::colocated_radius].
+    s2_cell_id: u64,
+    /// See [crate::matchers::Matcher::colocated_radius].
+    colocated_radius: Option<ChordAngle>,
 }
 
 /// Matches every ATP feature, in two passes. The first pass matches
-/// features whose matcher isn't exclusive and sends their rows right
-/// away; for exclusive ones, it keeps the best few candidates. Then
+/// features whose matcher isn't exclusive, or that have no candidate,
+/// and sends their rows right away; for the others, it keeps the best
+/// few candidates. Then
 /// [assign_exclusive] gives each OSM feature to at most one ATP feature
 /// per spider. The second pass sends the rows of the exclusive ones.
 /// Finally, [send_deletion_candidates] sends rows for the OSM features
@@ -237,7 +243,10 @@ fn produce_rows(
                 }
             }
 
-            if matcher.is_exclusive() {
+            // An exclusive matcher without candidates has nothing to
+            // compete for, so its row can go out right away; that keeps
+            // the many unmatched ATP features out of `exclusive`.
+            if matcher.is_exclusive() && !best.is_empty() {
                 let mut candidates = Vec::with_capacity(best.len());
                 for (score, r) in best {
                     let feature = osm.index.get_feature(r)?;
@@ -256,6 +265,8 @@ fn produce_rows(
                         ordinal: batch_start + i as u64,
                         spider: hasher.finish(),
                         candidates,
+                        s2_cell_id: atp.s2_cell_id,
+                        colocated_radius: matcher.colocated_radius(),
                     });
                 return Ok(());
             }
@@ -420,36 +431,63 @@ fn keep_best(best: &mut Vec<(f64, LocalFeatureRef)>, keep: usize, score: f64, r:
 /// Greedy: the best-scoring pairs go first, and an ATP feature whose
 /// candidates are all taken stays unmatched. A candidate that the
 /// matcher allows to share is never taken away, but it does block it
-/// for others that would not share it. Returns the OSM match (or
-/// none) of every ATP feature, by its ordinal.
+/// for others that would not share it. An ATP feature also gets a
+/// taken candidate if it lies within its
+/// [crate::matchers::Matcher::colocated_radius] of the ATP feature
+/// that took it first. Returns the OSM match (or none) of every ATP
+/// feature, by its ordinal.
 fn assign_exclusive(exclusive: Vec<ExclusiveCandidates>) -> HashMap<u64, Option<LocalFeatureRef>> {
     let mut assigned: HashMap<u64, Option<LocalFeatureRef>> =
         exclusive.iter().map(|e| (e.ordinal, None)).collect();
-    let mut pairs: Vec<(f64, u64, u64, LocalFeatureRef, bool)> = exclusive
+    let mut pairs: Vec<(f64, usize, LocalFeatureRef, bool)> = exclusive
         .iter()
-        .flat_map(|e| {
+        .enumerate()
+        .flat_map(|(i, e)| {
             e.candidates
                 .iter()
-                .map(|&(score, r, share)| (score, e.ordinal, e.spider, r, share))
+                .map(move |&(score, r, share)| (score, i, r, share))
         })
         .collect();
     // Best score first; ties by ordinal and feature, so that runs are
     // reproducible.
-    pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.3.cmp(&b.3)));
-    let mut taken: HashSet<(u64, LocalFeatureRef)> = HashSet::new();
-    for (_, ordinal, spider, r, share) in pairs {
+    pairs.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then(exclusive[a.1].ordinal.cmp(&exclusive[b.1].ordinal))
+            .then(a.2.cmp(&b.2))
+    });
+    // For each taken (spider, OSM feature), the position of the ATP
+    // feature that took it first.
+    let mut taken: HashMap<(u64, LocalFeatureRef), u64> = HashMap::new();
+    for (_, i, r, share) in pairs {
+        let e = &exclusive[i];
         let slot = assigned
-            .get_mut(&ordinal)
+            .get_mut(&e.ordinal)
             .expect("every ordinal is in assigned");
         if slot.is_some() {
             continue;
         }
-        let free = taken.insert((spider, r));
-        if free || share {
+        let ok = match taken.entry((e.spider, r)) {
+            Entry::Vacant(v) => {
+                v.insert(e.s2_cell_id);
+                true
+            }
+            Entry::Occupied(o) => share || is_colocated(e, *o.get()),
+        };
+        if ok {
             *slot = Some(r);
         }
     }
     assigned
+}
+
+/// Whether `e` lies within its colocated radius of the ATP feature at
+/// `s2_cell_id`.
+fn is_colocated(e: &ExclusiveCandidates, s2_cell_id: u64) -> bool {
+    let Some(radius) = e.colocated_radius else {
+        return false;
+    };
+    let center = |id| s2::cell::Cell::from(s2::cellid::CellID(id)).center();
+    ChordAngle::from(center(e.s2_cell_id).distance(&center(s2_cell_id))) <= radius
 }
 
 fn send_row(
@@ -613,7 +651,15 @@ mod tests {
             ordinal,
             spider,
             candidates: c.iter().map(|&(s, i)| (s, r(i), false)).collect(),
+            s2_cell_id: cell_at(0.0),
+            colocated_radius: None,
         }
+    }
+
+    /// The S2 cell of a point `meters` north of Zürich HB.
+    fn cell_at(meters: f64) -> u64 {
+        let ll = s2::latlng::LatLng::from_degrees(47.3782 + meters / 111_195.0, 8.5402);
+        s2::cellid::CellID::from(ll).0
     }
 
     #[test]
@@ -644,6 +690,8 @@ mod tests {
             ordinal,
             spider: 7,
             candidates: vec![(score, r(1), true)],
+            s2_cell_id: cell_at(0.0),
+            colocated_radius: None,
         };
         let assigned = assign_exclusive(vec![
             // Three quays whose IDs are all on OSM feature 1.
@@ -657,6 +705,37 @@ mod tests {
         assert_eq!(assigned[&1], Some(r(1)));
         assert_eq!(assigned[&2], Some(r(1)));
         assert_eq!(assigned[&3], Some(r(2)));
+    }
+
+    #[test]
+    fn test_assign_exclusive_colocated() {
+        let radius = Some(crate::matchers::meters_to_chord_angle(25.0));
+        let at = |ordinal, spider, meters, c: &[(f64, u32)]| ExclusiveCandidates {
+            s2_cell_id: cell_at(meters),
+            colocated_radius: radius,
+            ..candidates(ordinal, spider, c)
+        };
+        let assigned = assign_exclusive(vec![
+            // A car dealer's sales, and its service 10 m away: both
+            // get the dealer's one OSM feature.
+            at(0, 7, 0.0, &[(0.9, 1)]),
+            at(1, 7, 10.0, &[(0.8, 1)]),
+            // Another branch 300 m away falls back to its own feature,
+            // a third one with nothing else stays unmatched.
+            at(2, 7, 300.0, &[(0.5, 1), (0.4, 2)]),
+            at(3, 7, 350.0, &[(0.3, 1)]),
+            // Close to the second one, but not to the first one, which
+            // took the feature: unmatched.
+            at(4, 7, 30.0, &[(0.7, 1)]),
+            // Without a colocated radius, even the same point can't share.
+            candidates(5, 7, &[(0.6, 1)]),
+        ]);
+        assert_eq!(assigned[&0], Some(r(1)));
+        assert_eq!(assigned[&1], Some(r(1)));
+        assert_eq!(assigned[&2], Some(r(2)));
+        assert_eq!(assigned[&3], None);
+        assert_eq!(assigned[&4], None);
+        assert_eq!(assigned[&5], None);
     }
 
     #[test]
@@ -674,6 +753,8 @@ mod tests {
                         ordinal: e.ordinal,
                         spider: e.spider,
                         candidates: e.candidates.clone(),
+                        s2_cell_id: e.s2_cell_id,
+                        colocated_radius: e.colocated_radius,
                     }
                 })
                 .collect();
