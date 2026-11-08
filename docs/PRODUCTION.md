@@ -324,10 +324,42 @@ limit is, so a high `cgroup_peak_bytes` alone says nothing about whether
 more RAM would help. This document's `--mem-limit` sweep (4g: +1h40m in
 `import_osm`) is still the evidence for the 6–8GB floor.
 
-**CPU count is still unswept.** On UpCloud the scratch volume costs more
-per hour than the 6-CPU server (see Cost below), so a faster run on more
-CPUs can be cheaper overall. A 12-CPU run is planned next, to give this
-section a second CPU data point.
+**A first CPU data point: 12 CPUs was slower, not faster.** On UpCloud
+the scratch volume costs about two thirds as much per hour as the 6-CPU
+server (see Cost below), so a faster run on more CPUs could have been
+cheaper overall. A second full run on 2026-11-07/08 tried `--cpus=12`
+with `--memory=16g` on `CLOUDNATIVE-12xCPU-24GB` (same image, same
+scratch tier, `available_parallelism` 12). It took **5h37m**, against
+4h43m at 6 CPUs. Per step (minutes):
+
+| Step | 6 CPU, 8g | 12 CPU, 16g | Change |
+|---|---|---|---|
+| `fetch_inputs.osm` | 16.0 | 16.0 | ±0% |
+| `import_osm` | 73.0 | 84.9 | +16% |
+| ↳ `.prune` / `.assemble` / `.index` | 32.3 / 22.3 / 18.3 | 34.7 / 31.4 / 18.7 | +7% / +41% / +2% |
+| `collect_wikidata_ids` | 5.3 | 8.5 | +61% |
+| `conflate` | 24.4 | 26.0 | +6% |
+| `render_conflated_overview` | 20.7 | 29.0 | +40% |
+| `render_conflated_detail` | 59.9 | 68.5 | +14% |
+| `join_conflated_tiles` | 69.8 | 88.2 | +26% |
+
+Almost every step got slower, including ones that hardly use more than
+one core. Only the network-bound download was unchanged. So this isn't
+poor parallel scaling alone: each vCPU did less work. With one run per
+setting, that can't be pinned down further. Plausible causes are shared
+vCPUs, a different host CPU generation behind the larger plan, or a
+busier host overnight. A repeat on a different day would tell them
+apart. Until then, **6 CPUs stays the recommendation** on this platform.
+
+Doubling the memory alongside didn't make up for it. File-backed pages simply grew to
+fill the larger limit (`rss_file_bytes` up to 15.41 GiB, against 7.64 GiB
+at 8g), while anonymous memory stayed the same (0.88 GiB against 0.85).
+That's consistent with the `--mem-limit` sweep above, which saw nothing
+gained beyond 8g. kube-shim's `/metrics`
+showed no swapping (`node_vmstat_pswpin`/`pswpout` stayed at 0). Major
+page faults rose from about 1,400 in the first 20 minutes to about 279,000
+some 4¼ hours in. (These are samples from a poller that had gaps, not a
+complete series.)
 
 **Orchestrator-specific gotchas on this platform** (not `osmdiffs`'s
 own):
@@ -515,10 +547,13 @@ price API (EUR):
 - Storage: the 250GB MaxIOPS scratch volume, €0.00031/GB/hour, so
   **€0.0775/hour**, for its 4h48m lifetime: **≈ €0.37**. On this
   platform the scratch volume costs about two thirds as much per hour as
-  the server, so run time matters as much as the hourly rate. A faster
-  run on more CPUs may come out cheaper (see "CPU count is still
-  unswept" above).
-- **≈ €0.93 per run**, about €4/month at a weekly cadence.
+  the server, so run time matters as much as the hourly rate.
+- **≈ €0.93 per run**, about €4/month at a weekly cadence. kube-shim's own
+  FOCUS cost report gives the same figure (€0.928: VM, boot disk, IPv4
+  and scratch, each for 4.79 h).
+- The 12-CPU run (see above), on `CLOUDNATIVE-12xCPU-24GB` at
+  €0.1339/hour plus the same extras and scratch, for 5.67 h: **≈ €1.23**.
+  It was slower and more expensive.
 
 Not included: the kube-shim control-plane host itself, which runs
 permanently but is shared by every job scheduled on it, not specific to
