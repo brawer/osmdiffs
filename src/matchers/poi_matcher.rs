@@ -2,11 +2,11 @@ use super::brand_domains::BrandDomains;
 use super::contact::{AtpContacts, CONTACT_FACTOR, Nondescript, category_factor, main_category};
 use super::{
     MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
-    normalize_name, parse_wikidata_ids, split_values,
+    meters_to_chord_angle, normalize_name, parse_wikidata_ids, split_values,
 };
 use crate::places::Place;
 use geo::Centroid;
-use s2::{cell::Cell, cellid::CellID, latlng::LatLng, point::Point};
+use s2::{cell::Cell, cellid::CellID, latlng::LatLng, point::Point, s1::ChordAngle};
 
 /// Finds the first `brand:wikidata` tag in `tags` and parses its
 /// value, which may list several `;`-separated IDs -- e.g. a car
@@ -92,6 +92,12 @@ const POI_MASK: MatchMask = MatchMask(
 /// category pair were right without this check.
 const CONTACT_ADDRESS_CHECK_BEYOND_METERS: f64 = 150.0;
 
+/// How close two AllThePlaces features of one spider must be to share
+/// an OSM feature, see [Matcher::colocated_radius]. Departments of one
+/// store, such as a car dealer's sales and service, usually come at the
+/// same point; different branches of a chain are rarely this close.
+const COLOCATED_METERS: f64 = 25.0;
+
 /// Matches points of interest, such as shops, restaurants, hotels and
 /// schools, by evidence:
 ///
@@ -112,6 +118,12 @@ const CONTACT_ADDRESS_CHECK_BEYOND_METERS: f64 = 150.0;
 ///
 ///   Beyond [CONTACT_ADDRESS_CHECK_BEYOND_METERS], the street address
 ///   must agree too.
+///
+/// Matches are one to one within a spider ([Matcher::is_exclusive]),
+/// so that two branches of a chain don't both take the same OSM shop
+/// when OSM lacks one of them. Features within [COLOCATED_METERS] of
+/// each other may share one ([Matcher::colocated_radius]), and so may
+/// features with a shared contact ([Matcher::may_share]).
 ///
 /// Contacts that differ never lower a score: about one in six
 /// right `brand:wikidata` matches has different numbers on the two
@@ -252,6 +264,27 @@ impl Matcher for PoiMatcher<'_> {
         !self.brand_wikidata.is_empty()
             || !self.brand_names.is_empty()
             || self.contacts.has_phone_or_email()
+    }
+
+    /// On the 2026-11-02 planet run, 36k ATP features took an OSM shop
+    /// that a closer branch of the same spider also took, a median
+    /// 246 m away; their phones agreed with the OSM shop's in 16% of
+    /// cases, against 83-87% for other matches beyond 150 m.
+    fn is_exclusive(&self) -> bool {
+        true
+    }
+
+    /// A shared descriptive phone number, email address or website
+    /// says that `candidate` is our place, even if a closer feature of
+    /// our spider took it. Spiders sometimes list one store several
+    /// times, such as Staples with a feature for each of its print
+    /// services, a few dozen meters from the store.
+    fn may_share(&self, candidate: &OsmCandidate) -> bool {
+        !self.contacts.is_empty() && self.contacts.agrees(candidate.tags())
+    }
+
+    fn colocated_radius(&self) -> Option<ChordAngle> {
+        Some(meters_to_chord_angle(COLOCATED_METERS))
     }
 
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64 {
@@ -507,6 +540,16 @@ mod tests {
         assert_eq!(ch_kiosk_matcher.score_osm_candidate(&other_candidate), 0.0);
     }
 
+    #[test]
+    fn test_poi_matcher_is_exclusive() {
+        let m = PoiMatcher::for_place(&CH_CLOTHES_ATP, &Nondescript::none(), &NO_DOMAINS)
+            .expect("matcher");
+        assert!(m.is_exclusive());
+        let radius = m.colocated_radius().expect("colocated radius");
+        assert!(radius > meters_to_chord_angle(COLOCATED_METERS - 1.0));
+        assert!(radius < meters_to_chord_angle(COLOCATED_METERS + 1.0));
+    }
+
     /// Phone evidence for an ATP feature without `brand:wikidata`: a
     /// shared number matches when the categories agree, never against a
     /// `brand:wikidata` conflict, and never with a different category.
@@ -592,6 +635,21 @@ mod tests {
         assert!(same > 0.9 && same < 1.0, "{same}");
         let national = score(&m, &[("shop", "car"), ("contact:phone", "055 210 63 10")]);
         assert_eq!(national, same);
+        let may_share = |matcher: &PoiMatcher, tags: &[(&str, &str)]| {
+            let feature = make_feature(tags);
+            matcher.may_share(&OsmCandidate {
+                feature: &feature,
+                strings: &pool,
+            })
+        };
+        assert!(may_share(
+            &m,
+            &[("shop", "car"), ("contact:phone", "+41 55 210 63 10")]
+        ));
+        assert!(!may_share(
+            &m,
+            &[("shop", "car"), ("contact:phone", "+41 55 210 63 11")]
+        ));
         let pair = score(
             &m,
             &[

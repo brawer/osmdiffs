@@ -81,7 +81,8 @@ spider, `pipeline::conflate` gives each OSM feature to the best-scoring
 ATP feature, and the others fall back to their next candidates or stay
 unmatched. `PoiMatcher` is not exclusive, because several POIs can
 rightly share one OSM feature, such as car dealers of several brands
-in one building. Conflicts count only within a spider, so that two
+in one building. (It has been since 2026-11-08, see
+[`2026-11-08-exclusive-poi-matching.md`](2026-11-08-exclusive-poi-matching.md).) Conflicts count only within a spider, so that two
 feeds for the same station can both match it. An OSM feature with the
 exact IDs of several ATP features, such as one platform tagged with
 three quay IDs, may go to all of them (`Matcher::may_share`).
