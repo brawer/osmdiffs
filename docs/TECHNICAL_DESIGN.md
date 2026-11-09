@@ -414,9 +414,11 @@ fetch away.
   `suggest_edits` below) exactly once, writing all four layers both of
   `conflated.pmtiles`' passes need:
   - the coarse **overview** `matched`/`unmatched` layers — one
-    deliberately minimal feature per row: `spider`, `matched`,
+    deliberately minimal feature per row: `spider`, `relation`,
     `importance` (rounded to two decimals), and `osm:type`/`osm:id`
-    when matched, but **no tags and no `fid`**. At
+    when the row has an OSM feature, but **no tags and no `fid`**.
+    Only `same` rows go to `matched`; a `located_in` row goes to
+    `unmatched`, since its OSM feature is only its host. At
     z0 a single tile holds the whole planet, and every per-feature byte
     counts: tags push the tile so far past tippecanoe’s size limit that
     `--drop-densest-as-needed` guts it to a few hundred features
@@ -429,8 +431,9 @@ fetch away.
     bytes cost nothing. A matched row yields up to three (the ATP
     point, the OSM shape, and a connector line between their centroids,
     each carrying only its own side’s tags so a tile inspector shows
-    which is which); an unmatched row yields one (its ATP point with
-    the full `atp:*` set). Every detail feature carries `fid`, the
+    which is which); a `located_in` row yields the same three, with the host as
+    `part: "host"`; any other unmatched row yields one (its ATP point
+    with the full `atp:*` set). Every detail feature carries `fid`, the
     row’s ordinal in `conflated.parquet` — it groups a matched row’s
     up-to-three features and cross-references the parquet. To go from a
     clicked overview feature to the full record: `matched` features

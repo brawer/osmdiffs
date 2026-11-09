@@ -17,8 +17,9 @@
 //! one scan:
 //!
 //! - the coarse **overview** layers (`matched` / `unmatched`, one
-//!   deliberately minimal feature per row -- `spider`, `matched`, and
-//!   `osm:type`/`osm:id` when matched, but *no tags and no `fid`*): at
+//!   deliberately minimal feature per row -- `spider`, `relation`, and
+//!   `osm:type`/`osm:id` when the row has an OSM feature, but *no tags
+//!   and no `fid`*): at
 //!   z0 a single tile holds the entire planet, and every per-feature
 //!   byte counts. Tags push the tile so far past tippecanoe's size
 //!   limit that `--drop-densest-as-needed` guts it to a few hundred
@@ -34,6 +35,13 @@
 //!   get one -- both carrying their full tag set (the tag inspection
 //!   the overview can't afford) and `fid`, the row's ordinal in
 //!   `conflated.parquet`.
+//!
+//! Every feature carries `relation`, the row's `match.relation`. Only
+//! `same` rows go to the `matched` layers. A `located_in` row, such as
+//! a pharmacy inside a supermarket, goes to the `unmatched` layers,
+//! since the store itself is missing in OSM; its OSM feature is the
+//! host, drawn at z13+ as `part: "host"` with a link to the ATP point,
+//! so a mapper sees where to add it.
 //!
 //! To go from a clicked overview feature to its full record: matched
 //! features carry `osm:type`/`osm:id`, so fetch the detail tile for
@@ -82,6 +90,9 @@ const MATCHED_LAYER_NAME: &str = "matched";
 /// `ConflatedLayers::detail_unmatched` (z13+) both name it, so
 /// `tile-join` stitches them into one continuous `unmatched` layer.
 const UNMATCHED_LAYER_NAME: &str = "unmatched";
+
+/// `match.relation` of rows whose ATP and OSM features are the same.
+const RELATION_SAME: &str = "same";
 
 /// Zoom level at which `conflated.pmtiles`' detail pass (fed by
 /// [`ConflatedLayers::detail_matched`] / [`ConflatedLayers::detail_unmatched`])
@@ -140,7 +151,8 @@ pub struct ConflatedLayers {
     /// comment.
     pub detail_matched: TileLayer,
     /// Fed to the detail pass together with [`Self::detail_matched`]:
-    /// unmatched rows, one full-tag ATP point each. Named
+    /// unmatched rows, one full-tag ATP point each, plus the host and
+    /// a link for `located_in` rows. Named
     /// `UNMATCHED_LAYER_NAME`, matching [`Self::overview_unmatched`],
     /// for the same `tile-join` reason.
     pub detail_unmatched: TileLayer,
@@ -154,6 +166,9 @@ pub struct ConflatedLayers {
 /// as in `edits.rs`.
 struct ConflatedTileRow {
     spider: String,
+    /// `match.relation`, such as `same` or `located_in`; see
+    /// `docs/outputs/CONFLATED_PARQUET.md`.
+    relation: String,
     /// See `pipeline::importance`.
     importance: f32,
     atp_tags: Vec<(String, String)>,
@@ -169,14 +184,24 @@ struct OsmSide {
 }
 
 impl ConflatedTileRow {
+    /// Whether this row belongs to the `matched` layers: the ATP and
+    /// OSM features are the same thing. A `located_in` row has an OSM
+    /// feature too, but that is its host.
+    fn is_matched(&self) -> bool {
+        self.osm.is_some() && self.relation == RELATION_SAME
+    }
+
     /// The coarse overview layer's representation: one deliberately
     /// minimal feature per row. Geometry is the actual OSM shape when
     /// matched (what a reviewer is meant to review -- point/line/
     /// polygon, all valid within one GeoJSON/MVT layer), the raw
-    /// ATP-provided shape otherwise.
+    /// ATP-provided shape otherwise, also for a `located_in` row,
+    /// whose OSM feature is only its host.
     ///
-    /// Properties are just `spider`, `matched`, and -- matched rows
-    /// only -- `osm:type`/`osm:id`. **No tags, and no `fid`**: see this
+    /// Properties are just `spider`, `relation`, and -- rows with an
+    /// OSM feature only -- `osm:type`/`osm:id`. `relation` costs no
+    /// more than the `matched` flag it replaced, which only repeated
+    /// the layer name. **No tags, and no `fid`**: see this
     /// module's doc comment for why every low-zoom byte counts, and how
     /// a viewer gets from one of these features to the full record in
     /// the z13+ detail layer ([`Self::to_detail_geojson_lines`] /
@@ -188,14 +213,14 @@ impl ConflatedTileRow {
     /// places at low zooms (see `tiles::importance_filter`).
     fn to_overview_geojson_line(&self) -> Result<String> {
         let geometry_wkb: &[u8] = match &self.osm {
-            Some(osm) => &osm.osm_geometry_wkb,
-            None => &self.atp_geometry_wkb,
+            Some(osm) if self.is_matched() => &osm.osm_geometry_wkb,
+            _ => &self.atp_geometry_wkb,
         };
         let geometry = decode_and_round(geometry_wkb)?;
 
         let mut properties: Map<String, Value> = Map::new();
         properties.insert("spider".to_string(), Value::String(self.spider.clone()));
-        properties.insert("matched".to_string(), Value::Bool(self.osm.is_some()));
+        properties.insert("relation".to_string(), Value::String(self.relation.clone()));
         if let Some(osm) = &self.osm {
             properties.insert("osm:type".to_string(), Value::String(osm.osm_type.clone()));
             properties.insert("osm:id".to_string(), Value::from(osm.osm_id));
@@ -224,23 +249,24 @@ impl ConflatedTileRow {
     /// back together, and a cross-reference into `conflated.parquet`)
     /// and a `part` property (`"atp"` | `"osm"` | `"link"`) identifying
     /// its role; the connector line -- the only feature that isn't
-    /// clearly one side or the other -- keeps both tag sets.
+    /// clearly one side or the other -- keeps both tag sets. For a
+    /// `located_in` row, the OSM feature is the host, so its `part` is
+    /// `"host"`. Every feature also carries `relation`.
     fn to_detail_geojson_lines(&self, osm: &OsmSide, fid: u64) -> Result<Vec<String>> {
         let atp_geometry = decode_and_round(&self.atp_geometry_wkb)?;
         let osm_geometry = decode_and_round(&osm.osm_geometry_wkb)?;
 
-        let mut atp_properties: Map<String, Value> = Map::new();
-        atp_properties.insert("fid".to_string(), Value::from(fid));
-        atp_properties.insert("spider".to_string(), Value::String(self.spider.clone()));
-        atp_properties.insert("part".to_string(), Value::String("atp".to_string()));
+        let osm_part = if self.relation == RELATION_SAME {
+            "osm"
+        } else {
+            "host"
+        };
+        let mut atp_properties = self.detail_properties(fid, "atp");
         for (k, v) in &self.atp_tags {
             atp_properties.insert(format!("atp:{k}"), Value::String(v.clone()));
         }
 
-        let mut osm_properties: Map<String, Value> = Map::new();
-        osm_properties.insert("fid".to_string(), Value::from(fid));
-        osm_properties.insert("spider".to_string(), Value::String(self.spider.clone()));
-        osm_properties.insert("part".to_string(), Value::String("osm".to_string()));
+        let mut osm_properties = self.detail_properties(fid, osm_part);
         osm_properties.insert("osm:type".to_string(), Value::String(osm.osm_type.clone()));
         osm_properties.insert("osm:id".to_string(), Value::from(osm.osm_id));
         for (k, v) in &osm.osm_tags {
@@ -263,10 +289,7 @@ impl ConflatedTileRow {
                 atp_centroid.into(),
                 osm_centroid.into(),
             ]));
-            let mut link_properties: Map<String, Value> = Map::new();
-            link_properties.insert("fid".to_string(), Value::from(fid));
-            link_properties.insert("spider".to_string(), Value::String(self.spider.clone()));
-            link_properties.insert("part".to_string(), Value::String("link".to_string()));
+            let mut link_properties = self.detail_properties(fid, "link");
             for (k, v) in &self.atp_tags {
                 link_properties.insert(format!("atp:{k}"), Value::String(v.clone()));
             }
@@ -292,14 +315,21 @@ impl ConflatedTileRow {
     fn to_unmatched_detail_geojson_line(&self, fid: u64) -> Result<String> {
         let geometry = decode_and_round(&self.atp_geometry_wkb)?;
 
-        let mut properties: Map<String, Value> = Map::new();
-        properties.insert("fid".to_string(), Value::from(fid));
-        properties.insert("spider".to_string(), Value::String(self.spider.clone()));
-        properties.insert("part".to_string(), Value::String("atp".to_string()));
+        let mut properties = self.detail_properties(fid, "atp");
         for (k, v) in &self.atp_tags {
             properties.insert(format!("atp:{k}"), Value::String(v.clone()));
         }
         geometry_to_geojson_line(&geometry, properties)
+    }
+
+    /// The properties that every detail feature of this row carries.
+    fn detail_properties(&self, fid: u64, part: &str) -> Map<String, Value> {
+        let mut properties: Map<String, Value> = Map::new();
+        properties.insert("fid".to_string(), Value::from(fid));
+        properties.insert("spider".to_string(), Value::String(self.spider.clone()));
+        properties.insert("relation".to_string(), Value::String(self.relation.clone()));
+        properties.insert("part".to_string(), Value::String(part.to_string()));
+        properties
     }
 }
 
@@ -492,7 +522,7 @@ fn extract_rows(
                     Some(osm) => tile_row.to_detail_geojson_lines(osm, fid)?,
                     None => vec![tile_row.to_unmatched_detail_geojson_line(fid)?],
                 };
-                Ok(Some((tile_row.osm.is_some(), overview_line, detail_lines)))
+                Ok(Some((tile_row.is_matched(), overview_line, detail_lines)))
             })
             .collect::<Result<Vec<_>>>()?;
         batch_offset += batch.num_rows() as u64;
@@ -564,8 +594,11 @@ fn extract_conflated_tile_row(batch: &RecordBatch, row: usize) -> Result<Option<
         })
     };
 
+    let relation = get_string(get_struct(batch, "match")?, "relation", row)?;
+
     Ok(Some(ConflatedTileRow {
         spider: get_string(fetched, "spider", row)?,
+        relation,
         importance: get_f32(batch, "importance", row)?,
         atp_tags: get_tags(atp, "tags", row)?,
         atp_geometry_wkb: get_binary(batch, "atp_geometry", row)?,
@@ -635,6 +668,7 @@ mod tests {
     fn overview_unmatched_row_is_the_atp_point_with_no_tags() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            relation: "missing_in_osm".to_string(),
             importance: 0.5,
             atp_tags: vec![("shop".to_string(), "bakery".to_string())],
             atp_geometry_wkb: encode_point(8.5, 47.2),
@@ -649,7 +683,7 @@ mod tests {
             Value::from(vec![8.5, 47.2])
         );
         assert_eq!(value["properties"]["spider"], "acme");
-        assert_eq!(value["properties"]["matched"], false);
+        assert_eq!(value["properties"]["relation"], "missing_in_osm");
         // The overview carries no tags, and no fid -- every low-zoom
         // byte counts (see the module doc).
         assert!(value["properties"].get("fid").is_none());
@@ -661,6 +695,7 @@ mod tests {
     fn overview_matched_row_is_the_osm_shape_with_only_the_osm_id() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            relation: "same".to_string(),
             importance: 0.5,
             atp_tags: vec![("shop".to_string(), "bakery".to_string())],
             atp_geometry_wkb: encode_point(8.5, 47.2),
@@ -680,7 +715,7 @@ mod tests {
             value["geometry"]["coordinates"],
             Value::from(vec![8.50001, 47.20001])
         );
-        assert_eq!(props["matched"], true);
+        assert_eq!(props["relation"], "same");
         assert!(props.get("fid").is_none());
         // osm:type / osm:id are kept -- they double as the join key to
         // the detail layer and a click-through to the OSM object; every
@@ -695,6 +730,7 @@ mod tests {
     fn overview_carries_rounded_importance() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            relation: "missing_in_osm".to_string(),
             importance: 0.98765,
             atp_tags: vec![],
             atp_geometry_wkb: encode_point(8.5, 47.2),
@@ -715,6 +751,7 @@ mod tests {
     fn overview_geometry_coordinates_are_rounded_to_seven_decimal_places() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            relation: "missing_in_osm".to_string(),
             importance: 0.5,
             atp_tags: vec![],
             atp_geometry_wkb: encode_point(8.123_456_789, 47.987_654_321),
@@ -742,6 +779,7 @@ mod tests {
     fn matched_detail_features_carry_their_own_tags_and_a_shared_fid() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            relation: "same".to_string(),
             importance: 0.5,
             atp_tags: vec![("name".to_string(), "Acme ATP".to_string())],
             atp_geometry_wkb: encode_point(8.5, 47.2),
@@ -758,6 +796,11 @@ mod tests {
         assert!(
             features.iter().all(|f| f["properties"]["fid"] == 55),
             "every detail feature must carry fid=55: {features:?}"
+        );
+        assert!(
+            features
+                .iter()
+                .all(|f| f["properties"]["relation"] == "same")
         );
 
         let atp = features
@@ -793,6 +836,7 @@ mod tests {
     fn matched_detail_omits_the_connector_when_offset_is_below_threshold() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            relation: "same".to_string(),
             importance: 0.5,
             atp_tags: vec![],
             atp_geometry_wkb: encode_point(8.5, 47.2),
@@ -821,6 +865,7 @@ mod tests {
     fn unmatched_detail_is_a_single_full_tag_atp_point() {
         let row = ConflatedTileRow {
             spider: "acme".to_string(),
+            relation: "missing_in_osm".to_string(),
             importance: 0.5,
             atp_tags: vec![
                 ("name".to_string(), "Acme Foods".to_string()),
@@ -846,5 +891,53 @@ mod tests {
         assert_eq!(props["atp:name"], "Acme Foods");
         assert_eq!(props["atp:addr:city"], "Zürich");
         assert_eq!(props["atp:opening_hours"], "24/7");
+    }
+
+    fn located_in_row() -> ConflatedTileRow {
+        ConflatedTileRow {
+            spider: "publix".to_string(),
+            relation: "located_in".to_string(),
+            importance: 0.5,
+            atp_tags: vec![("amenity".to_string(), "pharmacy".to_string())],
+            atp_geometry_wkb: encode_point(8.5, 47.2),
+            osm: Some(osm_side_far_from(8.5, 47.2)),
+        }
+    }
+
+    #[test]
+    fn located_in_row_is_unmatched_and_shown_at_the_atp_point() {
+        let row = located_in_row();
+        assert!(!row.is_matched());
+        let value = parse(&row.to_overview_geojson_line().expect("overview line"));
+        let props = &value["properties"];
+        // The ATP point, not the host's shape: the store is what is
+        // missing in OSM.
+        assert_eq!(
+            value["geometry"]["coordinates"],
+            Value::from(vec![8.5, 47.2])
+        );
+        assert_eq!(props["relation"], "located_in");
+        assert_eq!(props["osm:type"], "way");
+        assert_eq!(props["osm:id"], 99);
+    }
+
+    #[test]
+    fn located_in_detail_has_atp_point_host_and_link() {
+        let row = located_in_row();
+        let osm = row.osm.as_ref().expect("host");
+        let lines = row.to_detail_geojson_lines(osm, 3).expect("detail lines");
+        let features: Vec<Value> = lines.iter().map(|l| parse(l)).collect();
+        let parts: Vec<&str> = features
+            .iter()
+            .map(|f| f["properties"]["part"].as_str().expect("part"))
+            .collect();
+        assert_eq!(parts, vec!["atp", "host", "link"]);
+        assert!(
+            features
+                .iter()
+                .all(|f| f["properties"]["relation"] == "located_in")
+        );
+        assert_eq!(features[1]["properties"]["osm:shop"], "supermarket");
+        assert_eq!(features[0]["properties"]["atp:amenity"], "pharmacy");
     }
 }

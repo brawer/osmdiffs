@@ -23,8 +23,15 @@ notice. If you need something stable to build on, use
 
 Two layers, split by whether `conflate()` found an OpenStreetMap match:
 
-- **`matched`** — every `conflated.parquet` row with an `osm` side.
-- **`unmatched`** — every row with no OpenStreetMap match.
+- **`matched`** — every `conflated.parquet` row whose
+  [`match.relation`](CONFLATED_PARQUET.md#match) is `same`.
+- **`unmatched`** — every other row with an AllThePlaces side. That
+  includes `located_in` rows, such as a pharmacy inside a
+  supermarket: the store is missing in OpenStreetMap, and its `osm`
+  side is only the host it is in.
+
+Every feature carries `relation`, the row's `match.relation`, so a
+style can tell `missing_in_osm` from `located_in`.
 
 Each is built as two PMTiles archives — a coarse **overview** (z0–12)
 and a fine **detail** (z13–16) — merged with `tile-join`, so what a
@@ -48,8 +55,9 @@ against a full planet: full tags → ~370 features visible at z0; `+fid`
 
 Geometry is `osm_geometry` (the matched OpenStreetMap shape — point,
 line, or polygon) for `matched` rows, `atp_geometry` for `unmatched`.
-Properties: `spider`, `matched`, `importance`, and — `matched` rows
-only — `osm:type` / `osm:id`.
+Properties: `spider`, `relation`, `importance`, and — rows with an
+OpenStreetMap feature only — `osm:type` / `osm:id`, which for a
+`located_in` row is the host.
 
 Coarse zooms show the most important rows, by their
 [`importance`](CONFLATED_PARQUET.md#importance): the top 1% at z0
@@ -75,7 +83,11 @@ payload costs nothing.
     meaningful line; see `MIN_CONNECTOR_LENGTH_METERS` in
     [`src/pipeline/conflated_tiles.rs`](../../src/pipeline/conflated_tiles.rs)
     for the exact, documented threshold).
-- An **`unmatched`** row yields one feature: its AllThePlaces point
+- A **`located_in`** row, in the `unmatched` layer, yields the same
+  three, except that the OpenStreetMap shape is the host
+  (`part: "host"`). The link then shows a mapper which store to add
+  the feature in.
+- Any other **`unmatched`** row yields one feature: its AllThePlaces point
   (`part: "atp"`), with the full `atp:*` tag set. `conflated.parquet`
   carries no stable id for the ATP side, so a viewer that clicked the
   (id-less) overview feature finds this one by taking the nearest
