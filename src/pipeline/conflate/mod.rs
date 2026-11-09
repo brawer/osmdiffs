@@ -18,7 +18,7 @@ use indicatif::{MultiProgress, ProgressBar};
 use rayon::prelude::*;
 use s2::s1::ChordAngle;
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{
@@ -38,9 +38,11 @@ use std::{
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 mod deletion;
+mod local_coverage;
 mod s2_util;
 mod writer;
-use deletion::{AtpCoverage, Reason, deletion_reason, place_country};
+use deletion::{AtpCoverage, Candidate, Reason, deletion_reason, local_keys, place_country};
+use local_coverage::{LocalCoverage, LocalKey, MIN_LOCAL_SHARE};
 use s2_util::MergedCellRanges;
 use writer::{ParquetRow, ParquetWriter};
 
@@ -293,8 +295,21 @@ fn produce_rows(
         batch_start += batch.len() as u64;
     }
 
+    let spacing_bytes = coverage.finish();
+    log::info!(
+        spacing_bytes = spacing_bytes,
+        coverage_bytes = coverage.bytes(),
+        radii = coverage.num_radii();
+        "conflate.coverage: done"
+    );
+
     let exclusive = exclusive.into_inner().expect("exclusive lock");
     let num_exclusive = exclusive.len();
+    let exclusive_bytes = exclusive.capacity() * size_of::<ExclusiveCandidates>()
+        + exclusive
+            .iter()
+            .map(|e| e.candidates.capacity() * size_of::<(f64, LocalFeatureRef, bool)>())
+            .sum::<usize>();
     let assigned = assign_exclusive(exclusive);
     let mut ordinal: u64 = 0;
     for batch in atp_reader.read_all()? {
@@ -317,6 +332,7 @@ fn produce_rows(
         atp_features_processed = atp_features_processed.load(Ordering::Relaxed),
         osm_candidates_decoded = osm_candidates_decoded.load(Ordering::Relaxed),
         exclusive_atp_features = num_exclusive,
+        exclusive_bytes = exclusive_bytes,
         exclusive_matched = assigned.values().filter(|m| m.is_some()).count();
         "conflate.match: done"
     );
@@ -350,6 +366,12 @@ impl MatchedSet {
 /// Sends an OSM-only row for every OSM feature that no ATP feature
 /// matched, but that [deletion_reason] considers a candidate for
 /// deletion. See the [deletion] module for the signals.
+///
+/// Candidates by [Reason::Wikidata] and [Reason::Name] must also pass
+/// [local_coverage]: enough OSM features of their brand nearby must
+/// have been matched. That takes three steps: find the candidates,
+/// count the matched OSM features of their brands, and then send the
+/// candidates that pass.
 fn send_deletion_candidates(
     osm: &OsmFeatures,
     coverage: &AtpCoverage,
@@ -359,43 +381,138 @@ fn send_deletion_candidates(
 ) -> Result<()> {
     let start = Instant::now();
     let counts: Mutex<HashMap<Reason, u64>> = Mutex::new(HashMap::new());
-    osm.index
+    let count_reason = |reason| {
+        *counts
+            .lock()
+            .expect("counts lock")
+            .entry(reason)
+            .or_default() += 1;
+    };
+    let send = |feature: Feature, lng: f64, lat: f64| -> Result<()> {
+        let candidate = OsmCandidate {
+            feature: &feature,
+            strings: &osm.strings,
+        };
+        let score = signals.score_osm(lng, lat, candidate.tags());
+        let conflated = ConflatedFeature {
+            atp: None,
+            osm: Some(feature),
+            score,
+        };
+        out.send(ParquetRow::from_conflated(conflated, &osm.strings)?)?;
+        Ok(())
+    };
+    let centroid = |candidate: &OsmCandidate| {
+        let centroid = candidate.geometry().ok()?.centroid()?;
+        Some((centroid.x(), centroid.y()))
+    };
+
+    // Find the candidates. The Swiss ones go out right away.
+    let found: Vec<(LocalFeatureRef, Candidate, f64, f64)> = osm
+        .index
         .all_refs()
         .filter(|&r| !matched.contains(r))
-        .try_for_each(|r| {
+        .map(|r| -> Result<Option<_>> {
             let feature = osm.index.get_feature(r)?;
             let candidate = OsmCandidate {
                 feature: &feature,
                 strings: &osm.strings,
             };
-            let location = || {
-                let centroid = candidate.geometry().ok()?.centroid()?;
-                Some((centroid.x(), centroid.y()))
-            };
-            let Some(reason) = deletion_reason(candidate.tags(), coverage, location) else {
-                return Ok(());
+            let location = || centroid(&candidate);
+            let Some(found) = deletion_reason(candidate.tags(), coverage, location) else {
+                return Ok(None);
             };
             // A feature without a location can't be put on a map, nor
             // sorted into the output file.
             let Some((lng, lat)) = location() else {
+                return Ok(None);
+            };
+            if found.keys.is_empty() {
+                count_reason(found.reason);
+                send(feature, lng, lat)?;
+                return Ok(None);
+            }
+            Ok(Some((r, found, lng, lat)))
+        })
+        .filter_map(Result::transpose)
+        .collect::<Result<_>>()?;
+
+    let mut local = LocalCoverage::default();
+    for (_, candidate, lng, lat) in &found {
+        for &key in &candidate.keys {
+            local.add_candidate(key, *lng, *lat);
+        }
+    }
+
+    // Count the matched OSM features of the candidates' brands.
+    let wanted: HashSet<LocalKey> = found
+        .iter()
+        .flat_map(|(_, c, _, _)| c.keys.iter().copied())
+        .collect();
+    let matched_keys: Vec<(LocalKey, f64, f64)> = osm
+        .index
+        .all_refs()
+        .filter(|&r| matched.contains(r))
+        .map(|r| -> Result<Vec<_>> {
+            let feature = osm.index.get_feature(r)?;
+            let candidate = OsmCandidate {
+                feature: &feature,
+                strings: &osm.strings,
+            };
+            let mut keys = local_keys(candidate.tags());
+            keys.retain(|k| wanted.contains(k));
+            if keys.is_empty() {
+                return Ok(Vec::new());
+            }
+            let Some((lng, lat)) = centroid(&candidate) else {
+                return Ok(Vec::new());
+            };
+            Ok(keys.into_iter().map(|k| (k, lng, lat)).collect())
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    for (key, lng, lat) in &matched_keys {
+        local.add_matched(*key, *lng, *lat);
+    }
+
+    // Send the candidates whose brand ATP covers around them.
+    let dropped: Mutex<HashMap<Reason, u64>> = Mutex::new(HashMap::new());
+    let thin = AtomicU64::new(0);
+    found
+        .par_iter()
+        .try_for_each(|(r, candidate, lng, lat)| -> Result<()> {
+            let best = candidate
+                .keys
+                .iter()
+                .map(|&key| {
+                    let radius = coverage.radius(key, candidate.country);
+                    local.around(key, *lng, *lat, radius)
+                })
+                .max_by(|a, b| a.share().total_cmp(&b.share()))
+                .unwrap_or_default();
+            if best.share() < MIN_LOCAL_SHARE {
+                *dropped
+                    .lock()
+                    .expect("dropped lock")
+                    .entry(candidate.reason)
+                    .or_default() += 1;
                 return Ok(());
-            };
-            *counts
-                .lock()
-                .expect("counts lock")
-                .entry(reason)
-                .or_default() += 1;
-            let score = signals.score_osm(lng, lat, candidate.tags());
-            let conflated = ConflatedFeature {
-                atp: None,
-                osm: Some(feature),
-                score,
-            };
-            out.send(ParquetRow::from_conflated(conflated, &osm.strings)?)?;
-            Ok(())
+            }
+            // Besides the candidate itself, fewer than three OSM
+            // features of its brand nearby: thin evidence.
+            if best.matched + best.candidates < 4 {
+                thin.fetch_add(1, Ordering::Relaxed);
+            }
+            count_reason(candidate.reason);
+            send(osm.index.get_feature(*r)?, *lng, *lat)
         })?;
+
     let counts = counts.into_inner().expect("counts lock");
     let count = |reason| counts.get(&reason).copied().unwrap_or(0);
+    let dropped = dropped.into_inner().expect("dropped lock");
+    let num_dropped = |reason| dropped.get(&reason).copied().unwrap_or(0);
     log::info!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
         atp_wikidata_countries = coverage.num_wikidata_countries(),
@@ -404,7 +521,13 @@ fn send_deletion_candidates(
         wikidata = count(Reason::Wikidata),
         name = count(Reason::Name),
         swiss_transit_id = count(Reason::SwissTransitId),
-        swiss_transit_stop = count(Reason::SwissTransitStop);
+        swiss_transit_stop = count(Reason::SwissTransitStop),
+        wikidata_not_local = num_dropped(Reason::Wikidata),
+        name_not_local = num_dropped(Reason::Name),
+        thin_local_evidence = thin.load(Ordering::Relaxed),
+        local_coverage_entries = local.len(),
+        local_coverage_bytes = local.bytes(),
+        local_matched_keys = matched_keys.len();
         "conflate.deletion_candidates: done"
     );
     Ok(())

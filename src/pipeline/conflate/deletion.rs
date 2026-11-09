@@ -63,7 +63,13 @@
 //!
 //! Tag values can hold several `;`-separated values; any one of them
 //! counts.
+//!
+//! A candidate by [Reason::Wikidata] or [Reason::Name] must also have
+//! enough matched OSM features of its brand, network or operator
+//! nearby, since a spider often lists only part of a brand's
+//! locations in a country; see [super::local_coverage].
 
+use super::local_coverage::{LocalKey, Radii, SpacingBuilder, table_bytes};
 use crate::matchers::{
     IFOPT_KEYS, MatchMask, infrastructure_kind, is_transit_stop, normalize_name,
     parse_wikidata_ids, split_values, swiss_uic,
@@ -73,6 +79,7 @@ use crate::places::Place;
 use crate::utils::countries::{Country, country};
 use s2::cellid::CellID;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::LazyLock;
 
 /// Tag keys whose names we look up in [AtpCoverage].
@@ -241,6 +248,14 @@ pub(super) struct AtpCoverage {
 
     /// How many ATP features have a Swiss IFOPT ID.
     swiss_transit_features: u64,
+
+    /// The positions of ATP features by spider and brand, until
+    /// [AtpCoverage::finish] turns them into `radii`.
+    spacing: SpacingBuilder,
+
+    /// The radius of [super::local_coverage] for each brand and
+    /// country.
+    radii: Radii,
 }
 
 /// The country of `place`, if it matters for [AtpCoverage::add]: that
@@ -276,6 +291,11 @@ impl AtpCoverage {
             place.mask,
             place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())),
         );
+        let spider = {
+            let mut hasher = std::hash::DefaultHasher::new();
+            place.spider.hash(&mut hasher);
+            hasher.finish()
+        };
         for (key, value) in &place.tags {
             if abroad
                 && (WIKIDATA_KEYS.contains(&key.as_str()) || NAME_KEYS.contains(&key.as_str()))
@@ -284,6 +304,12 @@ impl AtpCoverage {
             }
             if WIKIDATA_KEYS.contains(&key.as_str()) {
                 for id in parse_wikidata_ids(value) {
+                    self.spacing.add(
+                        spider,
+                        LocalKey::wikidata(id, infrastructure),
+                        country,
+                        place.s2_cell_id,
+                    );
                     if let Some(kind) = infrastructure {
                         self.infrastructure_wikidata.insert((id, country, kind));
                     } else {
@@ -293,6 +319,12 @@ impl AtpCoverage {
                 }
             } else if NAME_KEYS.contains(&key.as_str()) {
                 for name in split_values(value).map(normalize_name) {
+                    self.spacing.add(
+                        spider,
+                        LocalKey::name(&name, infrastructure),
+                        country,
+                        place.s2_cell_id,
+                    );
                     if let Some(kind) = infrastructure {
                         *self
                             .infrastructure_names
@@ -319,6 +351,58 @@ impl AtpCoverage {
             let cell = CellID(place.s2_cell_id).parent(SWISS_CELL_LEVEL);
             self.swiss_cells.insert(cell.0);
         }
+    }
+
+    /// Computes the radius of [super::local_coverage] for each brand
+    /// and country, once all ATP features have been added. Returns the
+    /// approximate bytes that the positions took until then.
+    pub(super) fn finish(&mut self) -> usize {
+        let spacing = std::mem::take(&mut self.spacing);
+        let bytes = spacing.bytes();
+        self.radii = spacing.build();
+        bytes
+    }
+
+    /// The radius, in meters, of [super::local_coverage] for `key` in
+    /// `country`.
+    pub(super) fn radius(&self, key: LocalKey, country: Option<Country>) -> f64 {
+        self.radii.get(key, country)
+    }
+
+    /// How many pairs of brand and country have a radius.
+    pub(super) fn num_radii(&self) -> usize {
+        self.radii.len()
+    }
+
+    /// Approximate bytes on the heap, not counting the positions that
+    /// [AtpCoverage::finish] has dropped.
+    pub(super) fn bytes(&self) -> usize {
+        let strings = |names: &mut dyn Iterator<Item = &String>| -> usize {
+            names.map(|s| s.capacity()).sum()
+        };
+        table_bytes(
+            self.wikidata.capacity(),
+            size_of::<((u64, Option<Country>), MatchMask)>(),
+        ) + table_bytes(
+            self.names.capacity(),
+            size_of::<((String, Option<Country>), (MatchMask, u32))>(),
+        ) + strings(&mut self.names.keys().map(|(s, _)| s))
+            + table_bytes(
+                self.infrastructure_wikidata.capacity(),
+                size_of::<(u64, Option<Country>, &'static str)>(),
+            )
+            + table_bytes(
+                self.infrastructure_names.capacity(),
+                size_of::<((String, Option<Country>, &'static str), u32)>(),
+            )
+            + strings(&mut self.infrastructure_names.keys().map(|(s, _, _)| s))
+            + table_bytes(self.swiss_ifopt.capacity(), size_of::<String>())
+            + strings(&mut self.swiss_ifopt.iter())
+            + table_bytes(self.swiss_uic.capacity(), size_of::<String>())
+            + strings(&mut self.swiss_uic.iter())
+            + table_bytes(self.swiss_cells.capacity(), size_of::<u64>())
+            + self.spacing.bytes()
+            + self.radii.bytes()
     }
 
     /// Whether ATP has the Swiss public transport register.
@@ -420,7 +504,7 @@ pub(super) fn deletion_reason<'a>(
     tags: impl Iterator<Item = (&'a str, &'a str)> + Clone,
     atp: &AtpCoverage,
     location: impl FnOnce() -> Option<(f64, f64)>,
-) -> Option<Reason> {
+) -> Option<Candidate> {
     let mut location = Some(location);
     let mut located = None;
     let mut locate = || *located.get_or_insert_with(|| location.take().and_then(|f| f()));
@@ -457,7 +541,7 @@ pub(super) fn deletion_reason<'a>(
             // Austria. Neither Swiss signal is about such a stop.
             if in_swiss_home(country(lng, lat), lng, lat) {
                 if has_swiss_id {
-                    return Some(Reason::SwissTransitId);
+                    return Some(Candidate::swiss(Reason::SwissTransitId));
                 }
                 // Most ski lift stations aren't in the register, and
                 // those that are carry its IDs. Their operators often
@@ -465,18 +549,94 @@ pub(super) fn deletion_reason<'a>(
                 if tags.clone().any(|(key, _)| key == "aerialway") {
                     return None;
                 }
-                return (!atp.has_swiss_stop_near(lng, lat)).then_some(Reason::SwissTransitStop);
+                return (!atp.has_swiss_stop_near(lng, lat))
+                    .then(|| Candidate::swiss(Reason::SwissTransitStop));
             }
         }
     }
 
+    let brand = brand_tags(tags)?;
+    let local_kind = brand.local_kind();
+    let country = locate().and_then(|(lng, lat)| country(lng, lat));
+    let keys: Vec<LocalKey> = brand
+        .ids
+        .iter()
+        .filter(|&&id| atp.covers_wikidata(id, country, brand.kind))
+        .map(|&id| LocalKey::wikidata(id, local_kind))
+        .collect();
+    if !keys.is_empty() {
+        return Some(Candidate {
+            reason: Reason::Wikidata,
+            keys,
+            country,
+        });
+    }
+    let keys: Vec<LocalKey> = brand
+        .names
+        .into_iter()
+        .filter(|name| atp.covers_name(name.clone(), country, brand.kind))
+        .map(|name| LocalKey::name(&name, local_kind))
+        .collect();
+    (!keys.is_empty()).then_some(Candidate {
+        reason: Reason::Name,
+        keys,
+        country,
+    })
+}
+
+/// A deletion candidate, as [deletion_reason] finds it.
+#[derive(Debug, PartialEq)]
+pub(super) struct Candidate {
+    pub(super) reason: Reason,
+    /// For [Reason::Wikidata] and [Reason::Name], the brands, networks
+    /// or operators by which ATP covers the feature in its country;
+    /// [super::local_coverage] then decides whether ATP covers them
+    /// around the feature too. Empty for the Swiss signals.
+    pub(super) keys: Vec<LocalKey>,
+    /// The country of the feature, for [AtpCoverage::radius].
+    pub(super) country: Option<Country>,
+}
+
+impl Candidate {
+    fn swiss(reason: Reason) -> Self {
+        Candidate {
+            reason,
+            keys: Vec::new(),
+            country: None,
+        }
+    }
+}
+
+/// The brands, networks and operators of an OSM feature, and its kind.
+struct BrandTags {
+    /// Wikidata IDs of `brand:wikidata`, `network:wikidata` and
+    /// `operator:wikidata`.
+    ids: Vec<u64>,
+    /// The [normalize_name]d `brand`, `network` and `operator` values,
+    /// only for features without Wikidata IDs: a Wikidata ID says
+    /// better which brand is meant than its name.
+    names: Vec<String>,
+    kind: Kind,
+}
+
+impl BrandTags {
+    /// The kind for [LocalKey].
+    fn local_kind(&self) -> Option<&'static str> {
+        match self.kind {
+            Kind::Mask(_) => None,
+            Kind::Infrastructure(kind) => Some(kind),
+        }
+    }
+}
+
+/// The [BrandTags] of the OSM feature with `tags`, or `None` if it has
+/// no brand, network or operator that could make it a candidate.
+fn brand_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> Option<BrandTags> {
     let ids: Vec<u64> = tags
         .clone()
         .filter(|(key, _)| WIKIDATA_KEYS.contains(key))
         .flat_map(|(_, value)| parse_wikidata_ids(value))
         .collect();
-    // Names only count for features without Wikidata IDs: a Wikidata
-    // ID says better which brand is meant than its name.
     let names: Vec<String> = if ids.is_empty() {
         tags.clone()
             .filter(|(key, value)| {
@@ -508,17 +668,32 @@ pub(super) fn deletion_reason<'a>(
     } else {
         Kind::Mask(mask)
     };
-    let country = locate().and_then(|(lng, lat)| country(lng, lat));
-    if ids
-        .into_iter()
-        .any(|id| atp.covers_wikidata(id, country, kind))
-    {
-        return Some(Reason::Wikidata);
+    Some(BrandTags { ids, names, kind })
+}
+
+/// The [LocalKey]s of a matched OSM feature with `tags`, for counting
+/// it in [super::local_coverage::LocalCoverage]. These are the keys
+/// that [deletion_reason] would consider for an unmatched one.
+pub(super) fn local_keys<'a>(
+    tags: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+) -> Vec<LocalKey> {
+    let Some(brand) = brand_tags(tags) else {
+        return Vec::new();
+    };
+    let kind = brand.local_kind();
+    if brand.ids.is_empty() {
+        brand
+            .names
+            .iter()
+            .map(|n| LocalKey::name(n, kind))
+            .collect()
+    } else {
+        brand
+            .ids
+            .iter()
+            .map(|&id| LocalKey::wikidata(id, kind))
+            .collect()
     }
-    names
-        .into_iter()
-        .any(|name| atp.covers_name(name, country, kind))
-        .then_some(Reason::Name)
 }
 
 #[cfg(test)]
@@ -605,7 +780,7 @@ mod tests {
     }
 
     fn reason(atp: &AtpCoverage, tags: &[(&str, &str)], at: (f64, f64)) -> Option<Reason> {
-        deletion_reason(tags.iter().copied(), atp, || Some(at))
+        deletion_reason(tags.iter().copied(), atp, || Some(at)).map(|c| c.reason)
     }
 
     #[test]
@@ -1006,5 +1181,42 @@ mod tests {
             deletion_reason(old_code.iter().copied(), &atp, || None),
             None
         );
+    }
+
+    #[test]
+    fn test_candidate_keys() {
+        let atp = coverage(false);
+        let tags = [("shop", "supermarket"), ("brand:wikidata", "Q9;Q1")];
+        let c = deletion_reason(tags.iter().copied(), &atp, || Some(SINGEN)).expect("candidate");
+        assert_eq!(c.reason, Reason::Wikidata);
+        // Only Q1 is covered by ATP, so only Q1 counts locally.
+        assert_eq!(c.keys, vec![LocalKey::wikidata(1, None)]);
+        assert_eq!(c.country, Some(Country::GERMANY));
+        assert_eq!(
+            local_keys(tags.iter().copied()),
+            vec![LocalKey::wikidata(9, None), LocalKey::wikidata(1, None)]
+        );
+        assert_eq!(
+            local_keys([("shop", "bakery"), ("brand", "Beck  Bäck")].into_iter()),
+            vec![LocalKey::name("beck bäck", None)]
+        );
+        assert_eq!(
+            local_keys([("amenity", "post_box"), ("operator:wikidata", "Q5")].into_iter()),
+            vec![LocalKey::wikidata(5, Some("post_box"))]
+        );
+        assert!(local_keys([("shop", "bakery")].into_iter()).is_empty());
+    }
+
+    #[test]
+    fn test_coverage_radii() {
+        let mut atp = coverage(false);
+        assert!(atp.bytes() > 0);
+        atp.finish();
+        // ATP has a single feature of Q1 in Germany: the widest radius.
+        assert_eq!(
+            atp.radius(LocalKey::wikidata(1, None), Some(Country::GERMANY)),
+            super::super::local_coverage::MAX_RADIUS_METERS
+        );
+        assert!(atp.num_radii() >= 2);
     }
 }
