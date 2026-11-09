@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.8.13](https://github.com/brawer/osmdiffs/compare/v0.8.12...v0.8.13) (2026-11-09)
+
+
+### 🆕 Enhancements
+
+* **atp:** Convert Chinese GCJ-02 and BD-09 positions to WGS-84 ([#911](https://github.com/brawer/osmdiffs/issues/911)) ([41a80b3](https://github.com/brawer/osmdiffs/commit/41a80b30fd07d4833aef2c3a8e2e5b62e625f431))
+* **conflate:** Add match column with relation, score and evidence ([#903](https://github.com/brawer/osmdiffs/issues/903)) ([8a822da](https://github.com/brawer/osmdiffs/commit/8a822da75a119381f0d4da8e088ea3f10e618173))
+* **conflate:** Keep departments and located_in features off their host ([#904](https://github.com/brawer/osmdiffs/issues/904)) ([4d15288](https://github.com/brawer/osmdiffs/commit/4d15288f276bc51b719d360febc3c1b11d33fc62))
+* **conflate:** Require local ATP coverage for deletion candidates ([#902](https://github.com/brawer/osmdiffs/issues/902)) ([3bc973e](https://github.com/brawer/osmdiffs/commit/3bc973e59830f9dae1ea66828082c3b8e8e3643a))
+* **matchers:** Make POI matches one to one within a spider ([#901](https://github.com/brawer/osmdiffs/issues/901)) ([0adf9ef](https://github.com/brawer/osmdiffs/commit/0adf9ef8ea560f868b341b5fa3deeb8954936032))
+* **tiles:** Show located_in rows as unmatched, linked to their host ([#905](https://github.com/brawer/osmdiffs/issues/905)) ([860051a](https://github.com/brawer/osmdiffs/commit/860051a48b7c1aba8b8a8375a240799f81c1c607))
+
+
+### 📚 Documentation
+
+* **production:** Record the first UpCloud run via kube-shim ([#899](https://github.com/brawer/osmdiffs/issues/899)) ([e64a8b9](https://github.com/brawer/osmdiffs/commit/e64a8b950d67f84ba437f292566d62aadad9b8b7))
+
+
+### 🚧 Maintenance
+
+* **deps:** Update indirect dependencies ([#914](https://github.com/brawer/osmdiffs/issues/914)) ([916a17d](https://github.com/brawer/osmdiffs/commit/916a17d03a69f89973a432e63f13801b3d04087d))
+* **osm:** Regenerate iD tagging schema data from id-tagging-schema v7.3.0 ([#913](https://github.com/brawer/osmdiffs/issues/913)) ([ec71a8b](https://github.com/brawer/osmdiffs/commit/ec71a8bccda5291e0b58dc1e27ac97e54aa5c885))
+
 ## [0.8.12](https://github.com/brawer/osmdiffs/compare/v0.8.11...v0.8.12) (2026-11-07)
 
 
