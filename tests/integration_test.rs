@@ -611,10 +611,10 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
         );
     }
     for feature in &overview_matched {
-        assert_eq!(feature["properties"]["matched"], true);
+        assert_eq!(feature["properties"]["relation"], "same");
     }
     for feature in &overview_unmatched {
-        assert_eq!(feature["properties"]["matched"], false);
+        assert_eq!(feature["properties"]["relation"], "missing_in_osm");
         assert!(
             feature["properties"].get("osm:type").is_none(),
             "unmatched overview feature should carry no osm:* properties: {feature}"
