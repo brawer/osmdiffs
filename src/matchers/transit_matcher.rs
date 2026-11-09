@@ -529,6 +529,16 @@ impl TransitMatcher {
 }
 
 impl Matcher for TransitMatcher {
+    /// `same_id` when the stop's IDs agree, `same_stop` when they name
+    /// the same stop but another platform, and `name` without IDs.
+    fn rule(&self, candidate: &OsmCandidate) -> &'static str {
+        match compare_ids(&self.ids, &Ids::from_tags(candidate.tags())) {
+            IdEvidence::Same => "same_id",
+            IdEvidence::SameStop => "same_stop",
+            IdEvidence::Different | IdEvidence::Unknown => "name",
+        }
+    }
+
     /// Two platforms or tracks in a feed are two real things, so they
     /// shouldn't both take the same OSM feature.
     fn is_exclusive(&self) -> bool {

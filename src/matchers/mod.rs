@@ -395,6 +395,12 @@ impl<'a> OsmCandidate<'a> {
 pub trait Matcher {
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64;
 
+    /// Which rule makes `candidate` match, such as `brand_wikidata` or
+    /// `same_id`, for the `match.evidence.rule` column of
+    /// `conflated.parquet`. Only called for candidates with a positive
+    /// score.
+    fn rule(&self, candidate: &OsmCandidate) -> &'static str;
+
     /// True if the AllThePlaces feature counts for the coverage that
     /// deletion candidates go by (see `pipeline::conflate::deletion`):
     /// an unmatched OSM feature of a brand that ATP covers in its

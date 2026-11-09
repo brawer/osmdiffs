@@ -204,26 +204,34 @@ impl<'a> PoiMatcher<'a> {
     /// equal `brand:wikidata`, below 1.0 for a contact, brand name or
     /// brand domain match, 0.0 for no match.
     fn factor(&self, candidate: &OsmCandidate) -> f64 {
+        self.factor_and_rule(candidate).0
+    }
+
+    /// [Self::factor], and the rule that gave it, for [Matcher::rule].
+    fn factor_and_rule(&self, candidate: &OsmCandidate) -> (f64, &'static str) {
         let mut osm_brand = find_brand_wikidata(candidate.tags()).peekable();
         let osm_has_brand = osm_brand.peek().is_some();
         if !self.brand_wikidata.is_empty() && osm_has_brand {
             let shared = osm_brand.any(|id| self.brand_wikidata.contains(&id));
-            return if shared { 1.0 } else { 0.0 };
+            return (if shared { 1.0 } else { 0.0 }, "brand_wikidata");
         }
         let contact = !self.contacts.is_empty() && self.contacts.agrees(candidate.tags());
         let name = !self.brand_names.is_empty()
             && find_osm_brand_names(candidate.tags()).any(|n| self.brand_names.contains(&n));
-        let evidence = if contact {
-            CONTACT_FACTOR
+        let (evidence, rule) = if contact {
+            (CONTACT_FACTOR, "contact")
         } else if name {
-            BRAND_NAME_FACTOR
+            (BRAND_NAME_FACTOR, "brand_name")
         } else if self.brand_domain_agrees(candidate, osm_has_brand) {
-            BRAND_DOMAIN_FACTOR
+            (BRAND_DOMAIN_FACTOR, "brand_domain")
         } else {
-            return 0.0;
+            return (0.0, "none");
         };
         let osm_category = main_category(candidate.tags());
-        evidence * category_factor(self.category.as_deref(), osm_category.as_deref())
+        (
+            evidence * category_factor(self.category.as_deref(), osm_category.as_deref()),
+            rule,
+        )
     }
 
     /// Whether `candidate` is of our brand by [find_domain_brand_ids],
@@ -251,6 +259,12 @@ impl<'a> PoiMatcher<'a> {
 }
 
 impl Matcher for PoiMatcher<'_> {
+    /// `brand_wikidata`, `contact` (phone or email), `brand_name` or
+    /// `brand_domain`, in the order [PoiMatcher::factor] tries them.
+    fn rule(&self, candidate: &OsmCandidate) -> &'static str {
+        self.factor_and_rule(candidate).1
+    }
+
     /// False if the ATP feature has nothing but an `operator:wikidata`
     /// or `network:wikidata` with [BrandDomains]. Such features had no
     /// matcher before brand domains existed, and many brands of this
