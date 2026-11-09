@@ -194,6 +194,7 @@ graph TD
     FETCH_INPUTS --> OSMVIEWS_TIFF[osmviews.tiff]
 
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
+    OSM_INDEX --> IMPORT_ATP
     IMPORT_ATP --> NONDESCRIPT_PHONES[alltheplaces.nondescript-phones]
     IMPORT_ATP --> NONDESCRIPT_EMAILS[alltheplaces.nondescript-emails]
     IMPORT_ATP --> NONDESCRIPT_WEBSITES[alltheplaces.nondescript-websites]
@@ -313,8 +314,12 @@ fetch away.
   parses every spider’s GeoJSON output out of the AllThePlaces zip, in parallel, filtering
   out any dataset not usable for OSM by its declared license or an
   explicit `use:openstreetmap` marker (`is_usable_for_osm()` in
-  [`src/pipeline/atp/mod.rs`](../src/pipeline/atp/mod.rs)), and writing
-  the rest out as `alltheplaces.parquet`, sorted for spatial locality
+  [`src/pipeline/atp/mod.rs`](../src/pipeline/atp/mod.rs)), converting
+  positions in mainland China to WGS-84 for spiders that give them in
+  GCJ-02 or BD-09 (found by comparing with the OSM index, so this step
+  runs after `import_osm`; see
+  [`docs/notes/2026-11-09-china-datum.md`](notes/2026-11-09-china-datum.md)),
+  and writing the rest out as `alltheplaces.parquet`, sorted for spatial locality
   (see [`src/places/`](../src/places/)). While writing, it also
   external-sorts every (phone or fax number, location), (email
   address, location) and (website, location) pair by value and, in one

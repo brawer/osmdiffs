@@ -20,8 +20,10 @@ use time::{
 use super::inputs::Input;
 use crate::matchers::brand_domains::{self, BrandDomainsBuilder};
 use crate::places::{ParquetWriter, Place};
+use crate::tables::OsmFeatures;
 use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
+mod datum;
 mod fetch;
 pub(super) mod nondescript;
 
@@ -62,20 +64,30 @@ pub(super) fn brand_domains_path(workdir: &Path) -> PathBuf {
 /// `alltheplaces.brand-domains.tsv`, the website domains that belong to
 /// one brand (see [crate::matchers::brand_domains]).
 ///
+/// Positions in mainland China are converted to WGS-84 for spiders
+/// that give them in GCJ-02 or BD-09, which `osm` tells apart; see
+/// [datum]. With no `osm`, as in some tests, they are left as given.
+///
 /// An existing `alltheplaces.parquet` is reused unless the zip is there
 /// and newer than it (i.e. was fetched again after the parquet file was
-/// built). With the zip gone, there's nothing to compare against, and
+/// built), or `osm` is newer than it, since the conversion depends on
+/// OSM. With the zip gone, there's nothing to compare against, and
 /// `fetch_atp` deliberately didn't download it again: the parquet file
 /// is reused as is. When the parquet file is reused but a nondescript
 /// or brand domains file is missing or older than the zip, those files
 /// alone are rebuilt from the parquet file, which doesn't need the zip.
 pub fn import_atp(
     input: &Input<AtpMetadata>,
+    osm: Option<&OsmFeatures>,
     progress: &MultiProgress,
     workdir: &Path,
 ) -> Result<PathBuf> {
     let out = workdir.join(ATP_PARQUET_FILENAME);
-    if out.exists() {
+    let osm_is_newer = match osm {
+        Some(osm) => out.exists() && super::modified(&out)? < osm.modified()?,
+        None => false,
+    };
+    if out.exists() && !osm_is_newer {
         let zip_modified = std::fs::metadata(&input.path)
             .and_then(|m| m.modified())
             .ok();
@@ -129,7 +141,7 @@ pub fn import_atp(
     let (tx, rx) = sync_channel(50_000);
     let (ra, rb) = std::thread::scope(|s| {
         let r1 = s.spawn(|| process_places(rx, progress, workdir, &out));
-        let r2 = s.spawn(|| process_zip(input_zip, progress, tx));
+        let r2 = s.spawn(|| process_zip(input_zip, osm, progress, tx));
         (r1.join().unwrap(), r2.join().unwrap())
     });
     ra?;
@@ -247,7 +259,12 @@ fn process_places(
     Ok(())
 }
 
-fn process_zip(path: &Path, progress: &MultiProgress, channel: SyncSender<Place>) -> Result<()> {
+fn process_zip(
+    path: &Path,
+    osm: Option<&OsmFeatures>,
+    progress: &MultiProgress,
+    channel: SyncSender<Place>,
+) -> Result<()> {
     let file = File::open(path).with_context(|| format!("could not open file `{:?}`", path))?;
     let mapping = unsafe { Mmap::map(&file).context("Couldn't mmap zip file")? };
     let archive = ZipArchive::with_prepended_data(&mapping)
@@ -262,7 +279,7 @@ fn process_zip(path: &Path, progress: &MultiProgress, channel: SyncSender<Place>
         if entry.size > 0 {
             let reader = archive.read(entry)?;
             let path = entry.path.as_str();
-            process_geojson(reader, path, Some(channel.clone()))?;
+            process_geojson(reader, path, osm, Some(channel.clone()))?;
         }
         bar.inc(1);
         Ok(())
@@ -274,6 +291,7 @@ fn process_zip(path: &Path, progress: &MultiProgress, channel: SyncSender<Place>
 fn process_geojson<T: Read>(
     reader: T,
     path: &str,
+    osm: Option<&OsmFeatures>,
     channel: Option<SyncSender<Place>>,
 ) -> Result<()> {
     let buffer = BufReader::new(reader);
@@ -303,6 +321,9 @@ fn process_geojson<T: Read>(
         anyhow::bail!("missing spider:collection_time in {}", path);
     };
 
+    // This spider's features in mainland China, held back until the
+    // spider is read, so that we can find their datum.
+    let mut in_china = Vec::new();
     for line in lines {
         let line = line?;
 
@@ -322,9 +343,39 @@ fn process_geojson<T: Read>(
         let Some(place) = make_place(trimmed, collection_time) else {
             continue;
         };
+        if osm.is_some() && datum::place_in_mainland_china(&place) {
+            in_china.push(place);
+            continue;
+        }
         if let Some(ref channel) = channel {
             channel.send(place)?;
         };
+    }
+
+    if let Some(osm) = osm
+        && !in_china.is_empty()
+    {
+        let (datum, hits) = datum::detect(&in_china, osm)?;
+        log::info!(
+            spider = in_china[0].spider.as_str(),
+            features = in_china.len(),
+            wgs84 = hits[0],
+            gcj02 = hits[1],
+            bd09 = hits[2],
+            datum = datum.as_str();
+            "import_atp: datum in mainland China"
+        );
+        if datum != datum::Datum::Wgs84 {
+            in_china = in_china
+                .into_iter()
+                .map(|place| datum::convert(place, datum))
+                .collect();
+        }
+    }
+    if let Some(ref channel) = channel {
+        for place in in_china {
+            channel.send(place)?;
+        }
     }
     Ok(())
 }
@@ -674,7 +725,7 @@ mod tests {
         path.push("tests/test_data/alltheplaces.zip");
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
         let (tx, rx) = sync_channel(1000);
-        process_zip(&path, &progress, tx)?;
+        process_zip(&path, None, &progress, tx)?;
         let mut counts: HashMap<String, usize> = HashMap::new();
         for place in rx {
             *counts.entry(place.spider).or_insert(0) += 1;
@@ -700,7 +751,7 @@ mod tests {
         let emails = nondescript::Signal::Email.path(workdir.path());
         let domains = brand_domains_path(workdir.path());
 
-        let parquet = import_atp(&input, &progress, workdir.path())?;
+        let parquet = import_atp(&input, None, &progress, workdir.path())?;
         assert!(parquet.exists());
         assert!(phones.exists());
         assert!(emails.exists());
@@ -714,7 +765,10 @@ mod tests {
         std::fs::remove_file(&domains)?;
         std::fs::remove_file(&zip)?;
         let parquet_modified = super::super::modified(&parquet)?;
-        assert_eq!(import_atp(&input, &progress, workdir.path())?, parquet);
+        assert_eq!(
+            import_atp(&input, None, &progress, workdir.path())?,
+            parquet
+        );
         assert!(phones.exists());
         assert!(emails.exists());
         assert_eq!(std::fs::read_to_string(&domains)?, built);
@@ -821,6 +875,6 @@ mod tests {
 
         // Regression test: process_geojson() must return an error rather
         // than panic when handed input that isn't valid GeoJSON.
-        assert!(process_geojson(Cursor::new(b"foo"), "test.json", None).is_err());
+        assert!(process_geojson(Cursor::new(b"foo"), "test.json", None, None).is_err());
     }
 }

@@ -228,12 +228,6 @@ fn run_pipeline_steps(
     let anchor = provenance::anchor_timestamp(&inputs.atp.metadata, &inputs.osm.metadata);
     let date = anchor.date().to_string().replace('-', "");
 
-    let atp = run_step("import_atp", || {
-        atp::import_atp(&inputs.atp, progress, workdir)
-    })?;
-    let osmviews_ranks = run_step("compute_osmviews_ranks", || {
-        osm_views::compute_osmviews_ranks(&atp, &inputs.osmviews.path, workdir)
-    })?;
     // `osm_features` is scoped to just these steps, not bound at
     // this function's top level: it's an `OsmFeatureIndex`, holding the
     // pipeline's largest mmap'd tables (coordinates, features, the
@@ -245,6 +239,15 @@ fn run_pipeline_steps(
     let conflated = {
         let osm_features = run_step("import_osm", || {
             osm::import_osm(&inputs.osm, progress, workdir)
+        })?;
+        // After `import_osm`: positions that some spiders give in
+        // Chinese coordinate systems are converted to WGS-84 by
+        // comparing them with OSM; see `atp::datum`.
+        let atp = run_step("import_atp", || {
+            atp::import_atp(&inputs.atp, Some(&osm_features), progress, workdir)
+        })?;
+        let osmviews_ranks = run_step("compute_osmviews_ranks", || {
+            osm_views::compute_osmviews_ranks(&atp, &inputs.osmviews.path, workdir)
         })?;
         // Only consumed by compute_qrank_quantiles, just below.
         let wikidata_ids = run_step("collect_wikidata_ids", || {
