@@ -210,6 +210,18 @@ pub(super) enum Reason {
     SwissTransitStop,
 }
 
+impl Reason {
+    /// The name in logs and in `conflated.parquet`.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Reason::Wikidata => "wikidata",
+            Reason::Name => "name",
+            Reason::SwissTransitId => "swiss_transit_id",
+            Reason::SwissTransitStop => "swiss_transit_stop",
+        }
+    }
+}
+
 /// What AllThePlaces covers, collected from all its features.
 #[derive(Debug, Default)]
 pub(super) struct AtpCoverage {

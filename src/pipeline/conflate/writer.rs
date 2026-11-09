@@ -72,7 +72,82 @@ pub struct ParquetWriter {
     // See `atp_geometry_tally` above.
     osm_geometry_tally: GeometryTally,
 
+    match_relations: StringBuilder,
+    match_scores: Float32Builder,
+    match_rules: StringBuilder,
+    match_distances: Float32Builder,
+    match_agreeing: ListBuilder<StringBuilder>,
+    match_local_shares: Float32Builder,
+
     importance: Float32Builder,
+}
+
+/// What a row of `conflated.parquet` says about its features, for its
+/// `match.relation` column.
+#[derive(Clone, Copy, Debug, DeepSizeOf, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) enum Relation {
+    /// The ATP and OSM features are the same thing.
+    Same,
+    /// ATP has a feature that we could match, but found none in OSM.
+    MissingInOsm,
+    /// No ATP feature matched the OSM feature, and something suggests
+    /// that it is gone; see `conflate::deletion`.
+    DeletionCandidate,
+}
+
+impl Relation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Relation::Same => "same",
+            Relation::MissingInOsm => "missing_in_osm",
+            Relation::DeletionCandidate => "deletion_candidate",
+        }
+    }
+}
+
+/// What conflate decided about a row, and why, for its `match` column.
+/// The distance and the agreeing tags are computed from the features
+/// themselves, in [ParquetRow::from_conflated].
+#[derive(Clone, Debug, DeepSizeOf, Deserialize, PartialEq, Serialize)]
+pub(super) struct MatchInfo {
+    pub(super) relation: Relation,
+    /// The matcher's score, from 0 to 1; `None` without a match.
+    pub(super) score: Option<f32>,
+    /// The rule that decided: a matcher's [crate::matchers::Matcher::rule],
+    /// or for deletion candidates, the reason.
+    pub(super) rule: Option<String>,
+    /// For deletion candidates by brand, the share of matched OSM
+    /// features of the brand nearby; see `conflate::local_coverage`.
+    pub(super) local_share: Option<f32>,
+}
+
+impl MatchInfo {
+    pub(super) fn same(score: f64, rule: &str) -> Self {
+        MatchInfo {
+            relation: Relation::Same,
+            score: Some(score as f32),
+            rule: Some(rule.to_string()),
+            local_share: None,
+        }
+    }
+
+    pub(super) fn missing_in_osm() -> Self {
+        MatchInfo {
+            relation: Relation::MissingInOsm,
+            score: None,
+            rule: None,
+            local_share: None,
+        }
+    }
+
+    pub(super) fn deletion_candidate(rule: &str, local_share: Option<f64>) -> Self {
+        MatchInfo {
+            relation: Relation::DeletionCandidate,
+            score: None,
+            rule: Some(rule.to_string()),
+            local_share: local_share.map(|s| s as f32),
+        }
+    }
 }
 
 /// A single row in the conflated parquet file.
@@ -117,6 +192,12 @@ pub struct ParquetRow {
     /// score's quantile among all rows, which the writer computes once
     /// every row is known. See `pipeline::importance`.
     score: f32,
+
+    matching: MatchInfo,
+    /// See [super::evidence::distance_meters].
+    distance_m: Option<f32>,
+    /// See [super::evidence::agreeing].
+    agreeing: Vec<String>,
 }
 
 /// Key under which the CycloneDX provenance BOM (see `pipeline::provenance`)
@@ -227,6 +308,17 @@ impl ParquetWriter {
                 /* data_capacity */ max_rows_per_group * 21,
             ),
             osm_geometry_tally: GeometryTally::default(),
+
+            match_relations: StringBuilder::with_capacity(max_rows_per_group, 1024),
+            match_scores: Float32Builder::with_capacity(max_rows_per_group),
+            match_rules: StringBuilder::with_capacity(max_rows_per_group, 1024),
+            match_distances: Float32Builder::with_capacity(max_rows_per_group),
+            match_agreeing: ListBuilder::new(StringBuilder::new()).with_field(Field::new(
+                "item",
+                DataType::Utf8,
+                /* nullable */ false,
+            )),
+            match_local_shares: Float32Builder::with_capacity(max_rows_per_group),
 
             importance: Float32Builder::with_capacity(max_rows_per_group),
         })
@@ -398,6 +490,18 @@ impl ParquetWriter {
             self.osm_geometries.append_null();
         }
 
+        self.match_relations
+            .append_value(row.matching.relation.as_str());
+        self.match_scores.append_option(row.matching.score);
+        self.match_rules.append_option(row.matching.rule);
+        self.match_distances.append_option(row.distance_m);
+        for tag in row.agreeing {
+            self.match_agreeing.values().append_value(tag);
+        }
+        self.match_agreeing.append(true);
+        self.match_local_shares
+            .append_option(row.matching.local_share);
+
         self.importance.append_value(importance);
         self.rows_in_group += 1;
         Ok(())
@@ -562,6 +666,39 @@ impl ParquetWriter {
         // See `atp_geometry` above.
         let osm_geometry = self.osm_geometries.finish();
 
+        let match_fields = match self.schema.field_with_name("match")?.data_type() {
+            DataType::Struct(fields) => fields,
+            _ => panic!("field \"match\" must be DataType::Struct"),
+        };
+        let evidence_fields = match match_fields
+            .iter()
+            .find(|f| f.name() == "evidence")
+            .expect("match.evidence field")
+            .data_type()
+        {
+            DataType::Struct(fields) => fields.clone(),
+            _ => panic!("field \"match.evidence\" must be DataType::Struct"),
+        };
+        let evidence_struct = StructArray::try_new(
+            evidence_fields,
+            vec![
+                Arc::new(self.match_rules.finish()) as ArrayRef,
+                Arc::new(self.match_distances.finish()) as ArrayRef,
+                Arc::new(self.match_agreeing.finish()) as ArrayRef,
+                Arc::new(self.match_local_shares.finish()) as ArrayRef,
+            ],
+            None,
+        )?;
+        let match_struct = StructArray::try_new(
+            match_fields.clone(),
+            vec![
+                Arc::new(self.match_relations.finish()) as ArrayRef,
+                Arc::new(self.match_scores.finish()) as ArrayRef,
+                Arc::new(evidence_struct) as ArrayRef,
+            ],
+            None,
+        )?;
+
         let batch = RecordBatch::try_new(
             self.schema.clone(),
             vec![
@@ -569,6 +706,7 @@ impl ParquetWriter {
                 Arc::new(atp_geometry) as ArrayRef,
                 Arc::new(osm_struct) as ArrayRef,
                 Arc::new(osm_geometry) as ArrayRef,
+                Arc::new(match_struct) as ArrayRef,
                 Arc::new(self.importance.finish()) as ArrayRef,
             ],
         )?;
@@ -605,6 +743,28 @@ impl ParquetRow {
         let atp = cf.atp;
         let osm = cf.osm;
         let score = cf.score;
+        let matching = cf.matching;
+
+        let mut distance_m = None;
+        let mut agreeing = Vec::new();
+        if let (Some(atp), Some(feature)) = (&atp, &osm) {
+            let candidate = OsmCandidate {
+                feature,
+                strings: osm_strings,
+            };
+            if let Result::Ok(osm_geometry) = candidate.geometry() {
+                distance_m =
+                    super::evidence::distance_meters(&atp.shape(), &osm_geometry).map(|d| d as f32);
+            }
+            agreeing = super::evidence::agreeing(
+                atp.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+                candidate.tags(),
+                Some({
+                    let ll = s2::latlng::LatLng::from(s2::cellid::CellID(atp.s2_cell_id));
+                    (ll.lng.deg(), ll.lat.deg())
+                }),
+            );
+        }
 
         // Internal sort key. Available for free from `atp`. OSM-only
         // rows (deletion candidates, see `conflate::deletion`) are
@@ -730,6 +890,9 @@ impl ParquetRow {
             osm_relation_members,
             osm_shape_wkb,
             score,
+            matching,
+            distance_m,
+            agreeing,
         })
     }
 
@@ -839,7 +1002,40 @@ mod schema {
         // see `pipeline::importance`.
         let importance = Field::new("importance", DataType::Float32, NOT_NULLABLE);
 
-        Schema::new(vec![atp, atp_geometry, osm, osm_geometry, importance])
+        // What conflate decided about the row, and why; see
+        // `conflate::writer::MatchInfo`.
+        let evidence = Field::new_struct(
+            "evidence",
+            vec![
+                Field::new("rule", DataType::Utf8, NULLABLE),
+                Field::new("distance_m", DataType::Float32, NULLABLE),
+                Field::new_list(
+                    "agreeing",
+                    Field::new("item", DataType::Utf8, NOT_NULLABLE),
+                    NOT_NULLABLE,
+                ),
+                Field::new("local_share", DataType::Float32, NULLABLE),
+            ],
+            NOT_NULLABLE,
+        );
+        let matching = Field::new_struct(
+            "match",
+            vec![
+                Field::new("relation", DataType::Utf8, NOT_NULLABLE),
+                Field::new("score", DataType::Float32, NULLABLE),
+                evidence,
+            ],
+            NOT_NULLABLE,
+        );
+
+        Schema::new(vec![
+            atp,
+            atp_geometry,
+            osm,
+            osm_geometry,
+            matching,
+            importance,
+        ])
     }
 
     /// Fields of one `osm.relation_members` list entry: the member's own
@@ -928,6 +1124,7 @@ mod tests {
             atp: Some(atp),
             osm: Some(osm),
             score: 0.0,
+            matching: super::MatchInfo::same(1.0, "test"),
         }
     }
 

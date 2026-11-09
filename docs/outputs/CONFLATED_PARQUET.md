@@ -45,6 +45,15 @@ osm                                          STRUCT, nullable
     role      UTF8                           nullable — null if OSM gives the member no role
 osm_geometry  BINARY (WKB)                   nullable — null exactly when osm is null
 
+match                                        STRUCT, non-null
+  relation    UTF8                           non-null ("same" | "missing_in_osm" | "deletion_candidate")
+  score       FLOAT                          nullable — 0.0 to 1.0, null unless relation = "same"
+  evidence                                   STRUCT, non-null
+    rule        UTF8                         nullable — which rule decided, see below
+    distance_m  FLOAT                        nullable — null unless both atp and osm are present
+    agreeing    LIST<UTF8>                   non-null, may be empty
+    local_share FLOAT                        nullable — only for deletion candidates by brand
+
 importance    FLOAT                          non-null, 0.0 to 1.0
 ```
 
@@ -67,8 +76,11 @@ A few things worth calling out that aren’t obvious from the above:
   in Switzerland or Liechtenstein, or in the enclaves of Büsingen and
   Campione that Swiss public transport serves, with an ID that the
   Swiss register doesn’t know; or it is such a stop without IDs, far
-  from any stop in the register. See
-  [the evaluation](../notes/2026-11-05-deletion-candidates.md).
+  from any stop in the register. For brands, networks and operators,
+  enough of their OpenStreetMap features nearby must also have been
+  matched, since AllThePlaces often lists only part of a brand. See
+  [the evaluation](../notes/2026-11-05-deletion-candidates.md) and
+  [local coverage](../notes/2026-11-09-local-deletion-coverage.md).
 - **`atp_geometry`/`osm_geometry` sit outside the `atp`/`osm` structs**,
   at the top level of the file, rather than next to the rest of each
   side’s data — GeoParquet requires geometry columns to live at the
@@ -98,6 +110,69 @@ A few things worth calling out that aren’t obvious from the above:
   `relation_members` is a relation’s members, also in declared order,
   each with its own type (node/way/relation), ID, and role (e.g.
   “outer”, “inner”, or `null` if OpenStreetMap doesn’t record one).
+
+## Match
+
+`match` says what the pipeline decided about a row, and why, so you
+can pick the rows you trust enough for your purpose without redoing
+the matching.
+
+`match.relation` is one of:
+
+- `same`: the AllThePlaces and OpenStreetMap features are the same
+  thing.
+- `missing_in_osm`: nothing in OpenStreetMap matched the AllThePlaces
+  feature (`osm` is null).
+- `deletion_candidate`: nothing in AllThePlaces matched the
+  OpenStreetMap feature, and something suggests that it is gone (`atp`
+  is null).
+
+More relations may come, such as one for a pharmacy inside a
+supermarket. Treat values you don't know as "neither of these".
+
+`match.score` is the matcher's score, from 0.0 to 1.0. Scores of
+different rules don't mean the same: a transit stop matched by name
+scores lower than one matched by its ID, even when both are right.
+
+`match.evidence.rule` says which rule decided:
+
+| relation | rule | meaning |
+|---|---|---|
+| `same` | `brand_wikidata` | same `brand:wikidata` |
+| `same` | `contact` | same phone number or email address |
+| `same` | `brand_name` | same `brand`, `operator` or `network` name |
+| `same` | `brand_domain` | website on a domain of the brand |
+| `same` | `same_id` | transit stop with the same IFOPT ID or `uic_ref` |
+| `same` | `same_stop` | another platform of the same transit stop |
+| `same` | `name` | transit stop with a similar name |
+| `same` | `ref` | street furniture, such as a post box, with the same reference |
+| `same` | `kind` | street furniture of the same kind close by |
+| `deletion_candidate` | `wikidata` | brand, network or operator by Wikidata ID |
+| `deletion_candidate` | `name` | brand, network or operator by name |
+| `deletion_candidate` | `swiss_transit_id` | Swiss stop whose ID the register doesn't know |
+| `deletion_candidate` | `swiss_transit_stop` | Swiss stop without IDs, far from any in the register |
+
+`match.evidence.distance_m` is the shortest distance in meters between
+the two geometries: 0 when the AllThePlaces point lies inside the
+OpenStreetMap building. `match.evidence.agreeing` lists the tags whose
+values agree on both sides, such as `phone` or `opening_hours`,
+compared without regard to case and spacing. Phone numbers, email
+addresses and websites are compared as the matchers compare them:
+phone numbers in their international form, so `+41 44 123 45 67` and
+`044 123 45 67` agree in Switzerland, and websites without scheme,
+`www.` or tracking parameters. `match.evidence.local_share` is, for deletion candidates by
+brand, the share of OpenStreetMap features of that brand nearby that
+AllThePlaces matched; it is at least 0.5, or the row wouldn't be here.
+
+```sh
+duckdb -c "
+SELECT match.relation, match.evidence.rule, count(*)
+FROM read_parquet('conflated.parquet')
+GROUP BY ALL ORDER BY 3 DESC;
+"
+```
+
+Some SQL engines reserve `MATCH` as a keyword; there, write `"match"`.
 
 ## Importance
 

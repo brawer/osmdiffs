@@ -270,6 +270,16 @@ pub struct InfrastructureMatcher {
 }
 
 impl InfrastructureMatcher {
+    /// Whether `candidate` has the same reference as ours, such as the
+    /// number of a post box.
+    fn same_ref(&self, candidate: &OsmCandidate) -> bool {
+        let osm = candidate
+            .tags()
+            .find(|&(k, _)| k == self.settings.osm_ref_key)
+            .and_then(|(_, v)| normalize_ref(v, false));
+        matches!((&self.reference, osm), (Some(atp), Some(osm)) if *atp == osm)
+    }
+
     pub fn for_place(place: &Place) -> Option<InfrastructureMatcher> {
         let tags = || place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
         let kind = Kind::from_tags(tags())?;
@@ -321,11 +331,7 @@ impl InfrastructureMatcher {
                 return (0.0, 0.0);
             }
         }
-        if let (Some(atp), Some(osm)) = (
-            &self.reference,
-            tag(self.settings.osm_ref_key).and_then(|v| normalize_ref(v, false)),
-        ) && *atp == osm
-        {
+        if self.same_ref(candidate) {
             return (1.0, SAME_REF_MIN_SCORE);
         }
         let mut factor = KIND_FACTOR;
@@ -345,6 +351,16 @@ impl InfrastructureMatcher {
 }
 
 impl Matcher for InfrastructureMatcher {
+    /// `ref` when the references agree, else `kind`: the same kind of
+    /// thing close by.
+    fn rule(&self, candidate: &OsmCandidate) -> &'static str {
+        if self.same_ref(candidate) {
+            "ref"
+        } else {
+            "kind"
+        }
+    }
+
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64 {
         let (best, worst) = self.factor(candidate);
         if best == 0.0 {

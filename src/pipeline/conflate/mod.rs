@@ -38,13 +38,14 @@ use std::{
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 mod deletion;
+mod evidence;
 mod local_coverage;
 mod s2_util;
 mod writer;
 use deletion::{AtpCoverage, Candidate, Reason, deletion_reason, local_keys, place_country};
 use local_coverage::{LocalCoverage, LocalKey, MIN_LOCAL_SHARE};
 use s2_util::MergedCellRanges;
-use writer::{ParquetRow, ParquetWriter};
+use writer::{MatchInfo, ParquetRow, ParquetWriter};
 
 /// The files that the `importance` column is computed from; see
 /// `pipeline::importance`.
@@ -131,6 +132,7 @@ struct ConflatedFeature {
     osm: Option<Feature>,
     /// See `pipeline::importance::score`.
     score: f32,
+    matching: MatchInfo,
 }
 
 /// How many candidates we keep for an ATP feature with an exclusive
@@ -146,9 +148,10 @@ struct ExclusiveCandidates {
     /// Hash of the spider name: conflicts only count within a spider,
     /// so two feeds for the same station can both match it.
     spider: u64,
-    /// Score, OSM feature, and whether the matcher allows other ATP
-    /// features to match it too ([crate::matchers::Matcher::may_share]).
-    candidates: Vec<(f64, LocalFeatureRef, bool)>,
+    /// Score, OSM feature, whether the matcher allows other ATP
+    /// features to match it too ([crate::matchers::Matcher::may_share]),
+    /// and the rule that matched ([crate::matchers::Matcher::rule]).
+    candidates: Vec<(f64, LocalFeatureRef, bool, &'static str)>,
     /// The ATP feature's position, for [Self::colocated_radius].
     s2_cell_id: u64,
     /// See [crate::matchers::Matcher::colocated_radius].
@@ -256,7 +259,12 @@ fn produce_rows(
                         feature: &feature,
                         strings: &osm.strings,
                     };
-                    candidates.push((score, r, matcher.may_share(&candidate)));
+                    candidates.push((
+                        score,
+                        r,
+                        matcher.may_share(&candidate),
+                        matcher.rule(&candidate),
+                    ));
                 }
                 let mut hasher = std::hash::DefaultHasher::new();
                 atp.spider.hash(&mut hasher);
@@ -272,11 +280,23 @@ fn produce_rows(
                     });
                 return Ok(());
             }
-            let osm_match = best.first().map(|&(_, r)| r);
-            if let Some(r) = osm_match {
-                matched.insert(r);
-            }
-            send_row(atp, osm_match, osm, signals, &out)
+            let Some(&(score, r)) = best.first() else {
+                return send_row(atp, None, MatchInfo::missing_in_osm(), osm, signals, &out);
+            };
+            matched.insert(r);
+            let feature = osm.index.get_feature(r)?;
+            let rule = matcher.rule(&OsmCandidate {
+                feature: &feature,
+                strings: &osm.strings,
+            });
+            send_row(
+                atp,
+                Some(r),
+                MatchInfo::same(score, rule),
+                osm,
+                signals,
+                &out,
+            )
         })?;
         let countries: Vec<_> = batch
             .par_iter()
@@ -308,17 +328,37 @@ fn produce_rows(
     let exclusive_bytes = exclusive.capacity() * size_of::<ExclusiveCandidates>()
         + exclusive
             .iter()
-            .map(|e| e.candidates.capacity() * size_of::<(f64, LocalFeatureRef, bool)>())
+            .map(|e| {
+                e.candidates.capacity() * size_of::<(f64, LocalFeatureRef, bool, &'static str)>()
+            })
             .sum::<usize>();
-    let assigned = assign_exclusive(exclusive);
+    let assigned = assign_exclusive(&exclusive);
+    // The score and rule of each assigned match.
+    let assigned: HashMap<u64, Option<(LocalFeatureRef, f64, &'static str)>> = exclusive
+        .iter()
+        .map(|e| {
+            let found = assigned[&e.ordinal].and_then(|r| {
+                e.candidates
+                    .iter()
+                    .find(|c| c.1 == r)
+                    .map(|&(score, r, _, rule)| (r, score, rule))
+            });
+            (e.ordinal, found)
+        })
+        .collect();
+    drop(exclusive);
     let mut ordinal: u64 = 0;
     for batch in atp_reader.read_all()? {
         for atp in batch? {
             if let Some(&osm_match) = assigned.get(&ordinal) {
-                if let Some(r) = osm_match {
-                    matched.insert(r);
-                }
-                send_row(&atp, osm_match, osm, signals, &out)?;
+                let matching = match osm_match {
+                    Some((r, score, rule)) => {
+                        matched.insert(r);
+                        MatchInfo::same(score, rule)
+                    }
+                    None => MatchInfo::missing_in_osm(),
+                };
+                send_row(&atp, osm_match.map(|m| m.0), matching, osm, signals, &out)?;
             }
             ordinal += 1;
         }
@@ -388,7 +428,7 @@ fn send_deletion_candidates(
             .entry(reason)
             .or_default() += 1;
     };
-    let send = |feature: Feature, lng: f64, lat: f64| -> Result<()> {
+    let send = |feature: Feature, lng: f64, lat: f64, matching: MatchInfo| -> Result<()> {
         let candidate = OsmCandidate {
             feature: &feature,
             strings: &osm.strings,
@@ -398,6 +438,7 @@ fn send_deletion_candidates(
             atp: None,
             osm: Some(feature),
             score,
+            matching,
         };
         out.send(ParquetRow::from_conflated(conflated, &osm.strings)?)?;
         Ok(())
@@ -429,7 +470,8 @@ fn send_deletion_candidates(
             };
             if found.keys.is_empty() {
                 count_reason(found.reason);
-                send(feature, lng, lat)?;
+                let matching = MatchInfo::deletion_candidate(found.reason.as_str(), None);
+                send(feature, lng, lat, matching)?;
                 return Ok(None);
             }
             Ok(Some((r, found, lng, lat)))
@@ -506,7 +548,9 @@ fn send_deletion_candidates(
                 thin.fetch_add(1, Ordering::Relaxed);
             }
             count_reason(candidate.reason);
-            send(osm.index.get_feature(*r)?, *lng, *lat)
+            let matching =
+                MatchInfo::deletion_candidate(candidate.reason.as_str(), Some(best.share()));
+            send(osm.index.get_feature(*r)?, *lng, *lat, matching)
         })?;
 
     let counts = counts.into_inner().expect("counts lock");
@@ -559,7 +603,7 @@ fn keep_best(best: &mut Vec<(f64, LocalFeatureRef)>, keep: usize, score: f64, r:
 /// [crate::matchers::Matcher::colocated_radius] of the ATP feature
 /// that took it first. Returns the OSM match (or none) of every ATP
 /// feature, by its ordinal.
-fn assign_exclusive(exclusive: Vec<ExclusiveCandidates>) -> HashMap<u64, Option<LocalFeatureRef>> {
+fn assign_exclusive(exclusive: &[ExclusiveCandidates]) -> HashMap<u64, Option<LocalFeatureRef>> {
     let mut assigned: HashMap<u64, Option<LocalFeatureRef>> =
         exclusive.iter().map(|e| (e.ordinal, None)).collect();
     let mut pairs: Vec<(f64, usize, LocalFeatureRef, bool)> = exclusive
@@ -568,7 +612,7 @@ fn assign_exclusive(exclusive: Vec<ExclusiveCandidates>) -> HashMap<u64, Option<
         .flat_map(|(i, e)| {
             e.candidates
                 .iter()
-                .map(move |&(score, r, share)| (score, i, r, share))
+                .map(move |&(score, r, share, _)| (score, i, r, share))
         })
         .collect();
     // Best score first; ties by ordinal and feature, so that runs are
@@ -616,6 +660,7 @@ fn is_colocated(e: &ExclusiveCandidates, s2_cell_id: u64) -> bool {
 fn send_row(
     atp: &Place,
     osm_match: Option<LocalFeatureRef>,
+    matching: MatchInfo,
     osm: &OsmFeatures,
     signals: &Signals,
     out: &SyncSender<ParquetRow>,
@@ -635,6 +680,7 @@ fn send_row(
         atp: Some(atp.deep_clone()),
         osm: feature,
         score,
+        matching,
     };
     out.send(ParquetRow::from_conflated(conflated, &osm.strings)?)?;
     Ok(())
@@ -773,7 +819,7 @@ mod tests {
         ExclusiveCandidates {
             ordinal,
             spider,
-            candidates: c.iter().map(|&(s, i)| (s, r(i), false)).collect(),
+            candidates: c.iter().map(|&(s, i)| (s, r(i), false, "test")).collect(),
             s2_cell_id: cell_at(0.0),
             colocated_radius: None,
         }
@@ -787,7 +833,7 @@ mod tests {
 
     #[test]
     fn test_assign_exclusive() {
-        let assigned = assign_exclusive(vec![
+        let assigned = assign_exclusive(&[
             // Two platforms of one stop both like OSM feature 1 best.
             // The better one keeps it; the other falls back to 2.
             candidates(0, 7, &[(0.6, 1), (0.5, 2)]),
@@ -812,11 +858,11 @@ mod tests {
         let shared = |ordinal, score| ExclusiveCandidates {
             ordinal,
             spider: 7,
-            candidates: vec![(score, r(1), true)],
+            candidates: vec![(score, r(1), true, "test")],
             s2_cell_id: cell_at(0.0),
             colocated_radius: None,
         };
-        let assigned = assign_exclusive(vec![
+        let assigned = assign_exclusive(&[
             // Three quays whose IDs are all on OSM feature 1.
             shared(0, 0.95),
             shared(1, 0.93),
@@ -838,7 +884,7 @@ mod tests {
             colocated_radius: radius,
             ..candidates(ordinal, spider, c)
         };
-        let assigned = assign_exclusive(vec![
+        let assigned = assign_exclusive(&[
             // A car dealer's sales, and its service 10 m away: both
             // get the dealer's one OSM feature.
             at(0, 7, 0.0, &[(0.9, 1)]),
@@ -868,7 +914,7 @@ mod tests {
                 candidates(10, 7, &[(0.5, 1), (0.4, 2)]),
                 candidates(11, 7, &[(0.5, 1), (0.4, 3)]),
             ];
-            let input = order
+            let input: Vec<_> = order
                 .iter()
                 .map(|&o| {
                     let e = &all[(o - 10) as usize];
@@ -881,7 +927,7 @@ mod tests {
                     }
                 })
                 .collect();
-            assign_exclusive(input)
+            assign_exclusive(&input)
         };
         let a = run(&[10, 11]);
         let b = run(&[11, 10]);
