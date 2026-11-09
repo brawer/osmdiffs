@@ -40,10 +40,12 @@ const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 mod deletion;
 mod evidence;
 mod local_coverage;
+mod located_in;
 mod s2_util;
 mod writer;
 use deletion::{AtpCoverage, Candidate, Reason, deletion_reason, local_keys, place_country};
 use local_coverage::{LocalCoverage, LocalKey, MIN_LOCAL_SHARE};
+use located_in::{Host, find_departments, located_in_tag};
 use s2_util::MergedCellRanges;
 use writer::{MatchInfo, ParquetRow, ParquetWriter};
 
@@ -194,6 +196,34 @@ fn produce_rows(
     let exclusive = Mutex::new(Vec::new());
     let matched = MatchedSet::new(osm.index.len());
     let mut coverage = AtpCoverage::default();
+    let departments = find_departments(atp_reader)?;
+    log::info!(
+        departments = departments.len(),
+        elapsed_seconds = start.elapsed().as_secs_f64();
+        "conflate.departments: done"
+    );
+    let host_of = |ordinal: u64, atp: &Place| {
+        located_in_tag(atp).or_else(|| departments.get(&ordinal).cloned())
+    };
+    let located_in_rows = AtomicU64::new(0);
+    let send_unmatched = |atp: &Place, host: Option<&Host>| -> Result<()> {
+        if let Some(host) = host
+            && let Some(r) = find_host(atp, host, osm)?
+        {
+            // The host exists, whether or not ATP has it.
+            matched.insert(r);
+            located_in_rows.fetch_add(1, Ordering::Relaxed);
+            return send_row(
+                atp,
+                Some(r),
+                MatchInfo::located_in(host.rule()),
+                osm,
+                signals,
+                &out,
+            );
+        }
+        send_row(atp, None, MatchInfo::missing_in_osm(), osm, signals, &out)
+    };
 
     let mut batch_start: u64 = 0;
     for batch in atp_reader.read_all()? {
@@ -220,6 +250,7 @@ fn produce_rows(
                 return Ok(());
             };
             has_matcher[i].store(matcher.counts_for_coverage(), Ordering::Relaxed);
+            let host = host_of(batch_start + i as u64, atp);
             let keep = if matcher.is_exclusive() {
                 EXCLUSIVE_CANDIDATES
             } else {
@@ -243,6 +274,9 @@ fn produce_rows(
                         feature: &feature,
                         strings: &osm.strings,
                     };
+                    if host.as_ref().is_some_and(|h| h.excludes(candidate.tags())) {
+                        continue;
+                    }
                     let score = matcher.score_osm_candidate(&candidate);
                     keep_best(&mut best, keep, score, r);
                 }
@@ -281,7 +315,7 @@ fn produce_rows(
                 return Ok(());
             }
             let Some(&(score, r)) = best.first() else {
-                return send_row(atp, None, MatchInfo::missing_in_osm(), osm, signals, &out);
+                return send_unmatched(atp, host.as_ref());
             };
             matched.insert(r);
             let feature = osm.index.get_feature(r)?;
@@ -351,14 +385,20 @@ fn produce_rows(
     for batch in atp_reader.read_all()? {
         for atp in batch? {
             if let Some(&osm_match) = assigned.get(&ordinal) {
-                let matching = match osm_match {
+                match osm_match {
                     Some((r, score, rule)) => {
                         matched.insert(r);
-                        MatchInfo::same(score, rule)
+                        send_row(
+                            &atp,
+                            Some(r),
+                            MatchInfo::same(score, rule),
+                            osm,
+                            signals,
+                            &out,
+                        )?;
                     }
-                    None => MatchInfo::missing_in_osm(),
-                };
-                send_row(&atp, osm_match.map(|m| m.0), matching, osm, signals, &out)?;
+                    None => send_unmatched(&atp, host_of(ordinal, &atp).as_ref())?,
+                }
             }
             ordinal += 1;
         }
@@ -373,6 +413,7 @@ fn produce_rows(
         osm_candidates_decoded = osm_candidates_decoded.load(Ordering::Relaxed),
         exclusive_atp_features = num_exclusive,
         exclusive_bytes = exclusive_bytes,
+        located_in_rows = located_in_rows.load(Ordering::Relaxed),
         exclusive_matched = assigned.values().filter(|m| m.is_some()).count();
         "conflate.match: done"
     );
@@ -655,6 +696,42 @@ fn is_colocated(e: &ExclusiveCandidates, s2_cell_id: u64) -> bool {
     };
     let center = |id| s2::cell::Cell::from(s2::cellid::CellID(id)).center();
     ChordAngle::from(center(e.s2_cell_id).distance(&center(s2_cell_id))) <= radius
+}
+
+/// The OSM feature of `host` nearest to `atp`, within
+/// [located_in::HOST_SEARCH_METERS].
+fn find_host(atp: &Place, host: &Host, osm: &OsmFeatures) -> Result<Option<LocalFeatureRef>> {
+    let coverer = s2::region::RegionCoverer {
+        max_cells: 16,
+        min_level: 12,
+        max_level: s2::cellid::MAX_LEVEL as u8,
+        level_mod: 1,
+    };
+    let center = s2::cell::Cell::from(s2::cellid::CellID(atp.s2_cell_id)).center();
+    let radius = crate::matchers::meters_to_chord_angle(located_in::HOST_SEARCH_METERS);
+    let cap = s2::cap::Cap::from_center_chordangle(&center, &radius);
+    let mut best: Option<(f64, LocalFeatureRef)> = None;
+    for (lo, hi) in MergedCellRanges::new(coverer.covering(&cap)) {
+        for r in osm.index.query(lo..=hi, host.mask()) {
+            let feature = osm.index.get_feature(r)?;
+            let candidate = OsmCandidate {
+                feature: &feature,
+                strings: &osm.strings,
+            };
+            if !host.is_host(candidate.tags()) {
+                continue;
+            }
+            let Some(centroid) = candidate.geometry().ok().and_then(|g| g.centroid()) else {
+                continue;
+            };
+            let ll = s2::latlng::LatLng::from_degrees(centroid.y(), centroid.x());
+            let d = center.distance(&s2::point::Point::from(ll)).rad();
+            if best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, r));
+            }
+        }
+    }
+    Ok(best.map(|(_, r)| r))
 }
 
 fn send_row(
