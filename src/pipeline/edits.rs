@@ -284,6 +284,11 @@ fn extract_conflated_row(batch: &RecordBatch, row: usize) -> Result<Option<Confl
     if osm.is_null(row) {
         return Ok(None);
     }
+    // Only a row about one thing gets edits: in a `located_in` row, the
+    // OSM feature is the store that the ATP feature is inside of.
+    if get_string(get_struct(batch, "match")?, "relation", row)? != "same" {
+        return Ok(None);
+    }
     let modified = get_struct(osm, "modified")?;
 
     Ok(Some(ConflatedRow {

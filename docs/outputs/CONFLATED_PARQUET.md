@@ -46,7 +46,7 @@ osm                                          STRUCT, nullable
 osm_geometry  BINARY (WKB)                   nullable — null exactly when osm is null
 
 match                                        STRUCT, non-null
-  relation    UTF8                           non-null ("same" | "missing_in_osm" | "deletion_candidate")
+  relation    UTF8                           non-null ("same" | "located_in" | "missing_in_osm" | "deletion_candidate")
   score       FLOAT                          nullable — 0.0 to 1.0, null unless relation = "same"
   evidence                                   STRUCT, non-null
     rule        UTF8                         nullable — which rule decided, see below
@@ -121,14 +121,18 @@ the matching.
 
 - `same`: the AllThePlaces and OpenStreetMap features are the same
   thing.
+- `located_in`: the AllThePlaces feature is inside another business,
+  such as a pharmacy inside a supermarket, and OpenStreetMap has no
+  feature of its own for it. `osm` is the host, so this row says where
+  to add it. Never use its tags for editing the host.
 - `missing_in_osm`: nothing in OpenStreetMap matched the AllThePlaces
   feature (`osm` is null).
 - `deletion_candidate`: nothing in AllThePlaces matched the
   OpenStreetMap feature, and something suggests that it is gone (`atp`
   is null).
 
-More relations may come, such as one for a pharmacy inside a
-supermarket. Treat values you don't know as "neither of these".
+More relations may come. Treat values you don't know as "none of
+these".
 
 `match.score` is the matcher's score, from 0.0 to 1.0. Scores of
 different rules don't mean the same: a transit stop matched by name
@@ -147,6 +151,8 @@ scores lower than one matched by its ID, even when both are right.
 | `same` | `name` | transit stop with a similar name |
 | `same` | `ref` | street furniture, such as a post box, with the same reference |
 | `same` | `kind` | street furniture of the same kind close by |
+| `located_in` | `department` | a department of a store of the same brand, such as a Publix pharmacy in a Publix supermarket |
+| `located_in` | `located_in` | the host named by the `located_in` or `located_in:wikidata` tags, such as a Starbucks in a Target |
 | `deletion_candidate` | `wikidata` | brand, network or operator by Wikidata ID |
 | `deletion_candidate` | `name` | brand, network or operator by name |
 | `deletion_candidate` | `swiss_transit_id` | Swiss stop whose ID the register doesn't know |

@@ -90,6 +90,10 @@ pub(super) enum Relation {
     Same,
     /// ATP has a feature that we could match, but found none in OSM.
     MissingInOsm,
+    /// The ATP feature is inside the OSM feature, such as a pharmacy
+    /// inside a supermarket, and OSM has no feature of its own for it;
+    /// see `conflate::located_in`.
+    LocatedIn,
     /// No ATP feature matched the OSM feature, and something suggests
     /// that it is gone; see `conflate::deletion`.
     DeletionCandidate,
@@ -100,6 +104,7 @@ impl Relation {
         match self {
             Relation::Same => "same",
             Relation::MissingInOsm => "missing_in_osm",
+            Relation::LocatedIn => "located_in",
             Relation::DeletionCandidate => "deletion_candidate",
         }
     }
@@ -136,6 +141,15 @@ impl MatchInfo {
             relation: Relation::MissingInOsm,
             score: None,
             rule: None,
+            local_share: None,
+        }
+    }
+
+    pub(super) fn located_in(rule: &str) -> Self {
+        MatchInfo {
+            relation: Relation::LocatedIn,
+            score: None,
+            rule: Some(rule.to_string()),
             local_share: None,
         }
     }
