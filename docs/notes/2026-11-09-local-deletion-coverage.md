@@ -150,8 +150,9 @@ What was dropped, checked by hand for the biggest brands:
   (89 matched). Kept: Bank of America 45 → 45, Dunkin' 43 → 43.
 
 Planet estimate, from the 2026-11-02 output: 331,542 → about 129,000
-`brand:wikidata` candidates. Royal Mail went from 16,226 to 1,336,
-Canada Post from 10,433 to 734, and Burger King US from 6,138 to 16.
+`brand:wikidata` candidates. With a fixed 25 km radius, which keeps a
+bit fewer, Royal Mail went from 16,226 to 1,336, Canada Post from
+10,433 to 734, and Burger King US from 6,138 to 16.
 Dollar General (3,056 → 2,458) and Subway (2,582 → 2,121) barely
 changed: ATP covers them well.
 
