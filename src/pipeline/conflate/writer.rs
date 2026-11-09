@@ -759,6 +759,10 @@ impl ParquetRow {
             agreeing = super::evidence::agreeing(
                 atp.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())),
                 candidate.tags(),
+                Some({
+                    let ll = s2::latlng::LatLng::from(s2::cellid::CellID(atp.s2_cell_id));
+                    (ll.lng.deg(), ll.lat.deg())
+                }),
             );
         }
 

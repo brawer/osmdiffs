@@ -63,8 +63,8 @@ impl Nondescript {
         })
     }
 
-    /// No nondescript values at all, for tests.
-    #[cfg(test)]
+    /// No nondescript values at all, for tests, and for telling
+    /// whether two contacts agree at all, as `conflate::evidence` does.
     pub fn none() -> Nondescript {
         Nondescript {
             phones: None,

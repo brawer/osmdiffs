@@ -156,8 +156,11 @@ scores lower than one matched by its ID, even when both are right.
 the two geometries: 0 when the AllThePlaces point lies inside the
 OpenStreetMap building. `match.evidence.agreeing` lists the tags whose
 values agree on both sides, such as `phone` or `opening_hours`,
-compared without regard to case, spacing, or the prefix of phone
-numbers. `match.evidence.local_share` is, for deletion candidates by
+compared without regard to case and spacing. Phone numbers, email
+addresses and websites are compared as the matchers compare them:
+phone numbers in their international form, so `+41 44 123 45 67` and
+`044 123 45 67` agree in Switzerland, and websites without scheme,
+`www.` or tracking parameters. `match.evidence.local_share` is, for deletion candidates by
 brand, the share of OpenStreetMap features of that brand nearby that
 AllThePlaces matched; it is at least 0.5, or the row wouldn't be here.
 
