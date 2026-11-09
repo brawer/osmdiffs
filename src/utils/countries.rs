@@ -33,6 +33,8 @@ impl Country {
     pub const LIECHTENSTEIN: Country = Country(*b"LI");
     pub const GERMANY: Country = Country(*b"DE");
     pub const ITALY: Country = Country(*b"IT");
+    /// Mainland China; Hong Kong, Macau and Taiwan have their own codes.
+    pub const CHINA: Country = Country(*b"CN");
 
     /// The two-letter code, such as `CH`.
     pub fn code(&self) -> &str {
@@ -83,6 +85,11 @@ mod tests {
         assert_eq!(code(8.9710, 45.9690), Some("IT".to_string())); // Campione
         assert_eq!(code(9.5209, 47.1410), Some("LI".to_string())); // Vaduz
         assert_eq!(code(-97.0, 33.0), Some("US".to_string())); // Texas
+
+        assert_eq!(code(121.4737, 31.2304), Some("CN".to_string())); // Shanghai
+        assert_eq!(code(114.1694, 22.3193), Some("HK".to_string())); // Hong Kong
+        assert_eq!(code(113.5439, 22.1987), Some("MO".to_string())); // Macau
+        assert_eq!(code(121.5654, 25.0330), Some("TW".to_string())); // Taipei
 
         assert_eq!(code(-30.0, 40.0), None); // Atlantic
         assert_eq!(code(0.0, 91.0), None); // invalid
