@@ -370,6 +370,10 @@ fetch away.
   spatial index (`OsmFeatureIndex`), queryable by S2 cell range
   without decoding every candidate (`index.rs`,
   [`src/tables/feature_index.rs`](../src/tables/feature_index.rs)).
+  The index also keeps the country of each feature’s centroid, one
+  byte per feature, so that later steps needn’t decode geometry to
+  find it; looking them up adds about 30 seconds on the planet. An
+  index in an older format is built again.
   **~4h48m** for the whole step on the #665 bare-VM run, back when the
   planet download itself went over BitTorrent and dominated that
   figure. On the newer, HTTPS-based cpx42 run, the download itself

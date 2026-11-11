@@ -237,14 +237,12 @@ mod tests {
         ] {
             symlink(fixture(name), workdir.path().join(name))?;
         }
-        for name in [
-            "alltheplaces.parquet",
-            "osm-features.index",
-            "osm-features.index.inverted",
-            "osm-assemble.strings",
-        ] {
+        for name in ["alltheplaces.parquet", "osm-assemble.strings"] {
             std::fs::write(workdir.path().join(name), b"")?;
         }
+        crate::tables::OsmFeatureIndex::write_stub_for_test(
+            &workdir.path().join("osm-features.index"),
+        )?;
 
         let inputs = fetch_inputs(
             &test_client(),

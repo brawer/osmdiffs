@@ -322,13 +322,10 @@ mod tests {
                 .path()
                 .join(format!("{PLANET_PBF_FILENAME}.meta.json")),
         )?;
-        for name in [
-            "osm-features.index",
-            "osm-features.index.inverted",
-            "osm-assemble.strings",
-        ] {
-            std::fs::write(workdir.path().join(name), b"")?;
-        }
+        std::fs::write(workdir.path().join("osm-assemble.strings"), b"")?;
+        crate::tables::OsmFeatureIndex::write_stub_for_test(
+            &workdir.path().join("osm-features.index"),
+        )?;
 
         let input = fetch_planet(
             UNREACHABLE_URL,
