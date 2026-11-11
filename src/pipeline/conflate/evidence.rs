@@ -7,6 +7,7 @@ use crate::matchers::contact::{
     AtpContacts, Nondescript, is_email_key, is_phone_key, is_website_key,
 };
 use crate::matchers::{normalize_name, split_values};
+use crate::utils::opening_hours::same_schedule;
 use geo::{Distance, Euclidean, Geometry, MapCoords};
 use std::sync::LazyLock;
 
@@ -56,6 +57,14 @@ pub(super) fn agreeing<'a>(
                 let o = values(&mut osm.clone());
                 a.iter().any(|v| o.contains(v))
             }
+            Check::Whole(key, same) => {
+                let a = atp.clone().find(|(k, _)| k == key).map(|(_, v)| v);
+                let o = osm.clone().find(|(k, _)| k == key).map(|(_, v)| v);
+                match (a, o) {
+                    (Some(a), Some(o)) => same(a, o),
+                    _ => false,
+                }
+            }
             Check::Contact(is_key) => {
                 let contacts = AtpContacts::from_tags(
                     atp.clone()
@@ -78,6 +87,10 @@ type Normalize = fn(&str) -> Option<String>;
 enum Check {
     /// The values of these keys, normalized.
     Text(&'static [&'static str], Normalize),
+    /// The whole value of this key, compared by the function: for
+    /// values whose `;`-separated parts mean nothing on their own, such
+    /// as the rules of `opening_hours`.
+    Whole(&'static str, fn(&str, &str) -> bool),
     /// Contacts of the keys for which the function is true, as
     /// [AtpContacts] compares them.
     Contact(fn(&str) -> bool),
@@ -92,7 +105,7 @@ const AGREEING: &[(&str, Check)] = &[
     ("website", Check::Contact(is_website_key)),
     (
         "opening_hours",
-        Check::Text(&["opening_hours"], opening_hours),
+        Check::Whole("opening_hours", same_schedule),
     ),
     ("addr:street", Check::Text(&["addr:street"], text)),
     ("addr:housenumber", Check::Text(&["addr:housenumber"], text)),
@@ -105,11 +118,6 @@ const AGREEING: &[(&str, Check)] = &[
 
 fn text(value: &str) -> Option<String> {
     let v = normalize_name(value);
-    (!v.is_empty()).then_some(v)
-}
-
-fn opening_hours(value: &str) -> Option<String> {
-    let v: String = value.chars().filter(|c| !c.is_whitespace()).collect();
     (!v.is_empty()).then_some(v)
 }
 
@@ -168,5 +176,24 @@ mod tests {
         // Another number: no agreement on phone.
         let other = [("phone", "+41 44 765 43 21")];
         assert!(agreeing(atp.iter().copied(), other.iter().copied(), None).is_empty());
+    }
+
+    #[test]
+    fn test_agreeing_opening_hours() {
+        let agrees = |a, o| {
+            let atp = [("opening_hours", a)];
+            let osm = [("opening_hours", o)];
+            agreeing(atp.iter().copied(), osm.iter().copied(), None) == ["opening_hours"]
+        };
+        assert!(agrees("Mo-Su 00:00-24:00", "24/7"));
+        assert!(agrees(
+            "Mo-Sa 07:30-21:00",
+            "Mo-Fr 07:30-21:00; Sa 07:30-21:00"
+        ));
+        // One rule in common is not agreement.
+        assert!(!agrees(
+            "Mo-Fr 08:00-18:00; Sa 09:00-12:00",
+            "Mo-Fr 08:00-18:00; Sa 10:00-12:00"
+        ));
     }
 }

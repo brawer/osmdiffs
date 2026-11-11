@@ -5,6 +5,7 @@
 //! genuinely small and genuinely cross-cutting.
 
 pub(crate) mod countries;
+pub(crate) mod opening_hours;
 pub(crate) mod parquet;
 
 use anyhow::{Context, Result};

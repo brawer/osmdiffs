@@ -2,6 +2,7 @@ use super::EditSuggester;
 use crate::matchers::contact::{
     AtpContacts, Nondescript, is_email_key, is_phone_key, is_website_key,
 };
+use crate::utils::opening_hours::{has_rich_syntax, same_schedule};
 use std::collections::HashMap;
 
 /// Suggests tag edits for POI-like OSM features (shops today; other
@@ -45,11 +46,16 @@ impl EditSuggester for PoiEditSuggester {
         let tag_edits: Vec<(String, String)> = atp_tags
             .iter()
             .filter(|(key, _atp_value)| Self::is_atp_tag_trustworthy(key))
+            .filter(|(key, atp_value)| !is_date_key(key) || parse_date(atp_value).is_some())
             .filter(|(key, atp_value)| match osm_tags.get(key.as_str()) {
                 Some(osm_value) => !values_agree(key, atp_value, osm_value, country, position),
                 None => true, // OSM feature has no value yet for this key
             })
-            .cloned()
+            .map(|(key, value)| match key.as_str() {
+                // Suggest `2015-12-10`, not `2015-12-10T00:00:00.000Z`.
+                "start_date" | "end_date" => (key.clone(), date_part(value).to_string()),
+                _ => (key.clone(), value.clone()),
+            })
             .collect();
         if tag_edits.is_empty() {
             None
@@ -92,10 +98,49 @@ fn values_agree(
         return contacts.agrees(std::iter::once((key, osm_value)));
     }
     if key == "opening_hours" {
-        let squash = |v: &str| v.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-        return squash(atp_value) == squash(osm_value);
+        // OSM's value may say more than ATP's, such as its hours on
+        // public holidays; don't replace it (brawer/osmdiffs#321).
+        return has_rich_syntax(osm_value) || same_schedule(atp_value, osm_value);
+    }
+    if is_date_key(key) {
+        // OSM's value may be vaguer on purpose, such as `~1980` or
+        // `1980s`; leave such values alone.
+        let Some(osm_date) = parse_date(osm_value) else {
+            return true;
+        };
+        return parse_date(atp_value).is_none_or(|atp_date| {
+            let n = atp_date.len().min(osm_date.len());
+            atp_date[..n] == osm_date[..n]
+        });
     }
     false
+}
+
+fn is_date_key(key: &str) -> bool {
+    key == "start_date" || key == "end_date"
+}
+
+/// Parses a date as `YYYY`, `YYYY-MM` or `YYYY-MM-DD` into its parts,
+/// ignoring a time after the date, as in `2015-12-10T00:00:00.000Z`,
+/// which some spiders emit. Two dates agree if they are the same at the
+/// precision of the vaguer one, so a full date never replaces a year
+/// that it lies in.
+fn parse_date(value: &str) -> Option<Vec<&str>> {
+    let date = date_part(value);
+    let parts: Vec<&str> = date.split('-').collect();
+    let lengths_ok = parts.len() <= 3
+        && parts
+            .iter()
+            .zip([4, 2, 2])
+            .all(|(p, len)| p.len() == len && p.bytes().all(|b| b.is_ascii_digit()));
+    lengths_ok.then_some(parts)
+}
+
+/// The date of a value that may also carry a time, such as
+/// `2015-12-10` of `2015-12-10T00:00:00.000Z`.
+fn date_part(value: &str) -> &str {
+    let value = value.trim();
+    value.split_once('T').map_or(value, |(date, _)| date)
 }
 
 #[cfg(test)]
@@ -214,5 +259,60 @@ mod tests {
         let atp = tags(&[("website", "https://www.dm.at/store/a070/wien")]);
         let osm = tags(&[("website", "https://www.dm.at")]);
         assert!(PoiEditSuggester.suggest_edit(&atp, &osm, None).is_some());
+    }
+
+    #[test]
+    fn opening_hours_compared_as_schedules() {
+        let atp = tags(&[("opening_hours", "Mo-Su 00:00-24:00")]);
+        let osm = tags(&[("opening_hours", "24/7")]);
+        assert!(PoiEditSuggester.suggest_edit(&atp, &osm, None).is_none());
+        let atp = tags(&[("opening_hours", "Mo-Sa 07:30-21:00")]);
+        let osm = tags(&[("opening_hours", "Mo-Fr 07:30-21:00; Sa 07:30-21:00")]);
+        assert!(PoiEditSuggester.suggest_edit(&atp, &osm, None).is_none());
+        // One rule in common isn't enough.
+        let atp = tags(&[("opening_hours", "Mo-Fr 08:00-18:00; Sa 09:00-12:00")]);
+        let osm = tags(&[("opening_hours", "Mo-Fr 08:00-18:00; Sa 10:00-12:00")]);
+        assert!(PoiEditSuggester.suggest_edit(&atp, &osm, None).is_some());
+    }
+
+    #[test]
+    fn opening_hours_with_holidays_left_alone() {
+        let atp = tags(&[("opening_hours", "Mo-Fr 09:00-19:00")]);
+        let osm = tags(&[(
+            "opening_hours",
+            "Mo-Fr 08:30-19:00; PH off; Dec 24 07:30-16:00",
+        )]);
+        assert!(PoiEditSuggester.suggest_edit(&atp, &osm, None).is_none());
+        // A value that just doesn't parse is still replaced.
+        let osm = tags(&[("opening_hours", "Até 22:00 hs")]);
+        assert!(PoiEditSuggester.suggest_edit(&atp, &osm, None).is_some());
+    }
+
+    #[test]
+    fn dates_compared_at_osm_precision() {
+        let edit = |atp: &str, osm: &str| {
+            PoiEditSuggester.suggest_edit(
+                &tags(&[("start_date", atp)]),
+                &tags(&[("start_date", osm)]),
+                None,
+            )
+        };
+        assert!(edit("1994-06-16", "1994").is_none());
+        assert!(edit("1994-06-16", "1994-06").is_none());
+        assert!(edit("2015-12-10T00:00:00.000Z", "2015-12-10").is_none());
+        assert!(edit("1994-06-16", "~1994").is_none());
+        assert!(edit("1994-06-16", "1990s").is_none());
+        assert_eq!(
+            edit("1994-06-16", "1980"),
+            Some(vec![("start_date".to_string(), "1994-06-16".to_string())])
+        );
+        assert_eq!(
+            edit("2015-12-10T00:00:00.000Z", "2016-02-25"),
+            Some(vec![("start_date".to_string(), "2015-12-10".to_string())])
+        );
+        // An ATP value that isn't a date never becomes an edit.
+        assert!(edit("next spring", "2016").is_none());
+        let atp = tags(&[("start_date", "next spring")]);
+        assert!(PoiEditSuggester.suggest_edit(&atp, &[], None).is_none());
     }
 }
