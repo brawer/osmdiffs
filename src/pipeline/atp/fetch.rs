@@ -20,6 +20,11 @@ pub const ATP_RUN_HISTORY_URL: &str = "https://data.alltheplaces.xyz/runs/histor
 /// assembling this pipeline's provenance BOM).
 const META_JSON_FILENAME: &str = "alltheplaces.meta.json";
 
+/// Filename, within `workdir`, of AllThePlaces' own statistics for the
+/// run, which list how many features and errors each spider had; see
+/// [super::run_stats].
+pub(super) const STATS_JSON_FILENAME: &str = "alltheplaces.stats.json";
+
 /// Minimum plausible stats for an AllThePlaces run (see [`AtpMetadata`]).
 /// Below these, we treat the run as broken or incomplete and fall back to
 /// an older one instead of trusting it. Deliberately loose: real runs are
@@ -75,6 +80,13 @@ pub struct AtpMetadata {
     /// Size, in bytes, of `output.zip` as reported by AllThePlaces.
     pub size_bytes: u64,
 
+    /// URL of AllThePlaces' statistics for this run (`_results.json`),
+    /// with the number of features and errors per spider. `None` if
+    /// `history.json` doesn't list one, or in a sidecar written before
+    /// we kept it.
+    #[serde(default)]
+    pub stats_url: Option<String>,
+
     /// SHA-256 of the downloaded `output.zip`, as lowercase hex --
     /// computed by us, not reported by AllThePlaces. Unlike every other
     /// field here, this is `None` for a candidate run fresh out of
@@ -101,6 +113,53 @@ pub struct AtpMetadata {
 /// 3. Otherwise: downloaded, hashed while streaming, and its metadata
 ///    persisted alongside.
 pub async fn fetch_atp(
+    url: &str,
+    client: &Client,
+    progress: &MultiProgress,
+    workdir: &Path,
+) -> Result<Input<AtpMetadata>> {
+    let input = fetch_zip(url, client, progress, workdir).await?;
+    fetch_stats(&input.metadata, client, workdir).await;
+    Ok(input)
+}
+
+/// Downloads AllThePlaces' statistics for the run of `metadata` to
+/// [STATS_JSON_FILENAME] in `workdir`, unless they're already there.
+/// The statistics only feed diagnostics, so a failure is logged and
+/// otherwise ignored.
+async fn fetch_stats(metadata: &AtpMetadata, client: &Client, workdir: &Path) {
+    let dest = workdir.join(STATS_JSON_FILENAME);
+    if dest.exists() {
+        return;
+    }
+    let Some(url) = metadata.stats_url.as_deref() else {
+        log::warn!(run_id = metadata.run_id.as_str(); "fetch_atp: no stats_url for run");
+        return;
+    };
+    let fetch = async {
+        let body = client
+            .get(url)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        // Checked before writing, so a broken file never lands in the
+        // workdir, where it would be reused.
+        super::run_stats::parse(&body)?;
+        let mut tmp = dest.clone();
+        tmp.add_extension("tmp");
+        tokio::fs::write(&tmp, &body).await?;
+        tokio::fs::rename(&tmp, &dest).await?;
+        Ok(())
+    };
+    if let Err(err) = fetch.await {
+        log::warn!(url = url, error = format!("{err:#}").as_str(); "fetch_atp: could not fetch stats");
+    }
+}
+
+async fn fetch_zip(
     url: &str,
     client: &Client,
     progress: &MultiProgress,
@@ -289,6 +348,7 @@ fn parse_run(entry: &serde_json::Value, history_url: &str) -> Result<AtpMetadata
     let spiders = u64_field("spiders")?;
     let total_lines = u64_field("total_lines")?;
     let size_bytes = u64_field("size_bytes")?;
+    let stats_url = str_field("stats_url").ok();
 
     if spiders < MIN_SPIDERS || total_lines < MIN_TOTAL_LINES || size_bytes < MIN_SIZE_BYTES {
         return Err(anyhow!(
@@ -306,6 +366,7 @@ fn parse_run(entry: &serde_json::Value, history_url: &str) -> Result<AtpMetadata
         spiders,
         total_lines,
         size_bytes,
+        stats_url,
         sha256: None,
     })
 }
@@ -378,8 +439,18 @@ mod tests {
         let mut server = Server::new_async().await;
         let server_url = server.url();
         let output_url = format!("{}/atp_data", server_url);
-        let mock_history_payload = json!([fresh_entry("2026-03-04-15-16-17", &output_url, 2)]);
+        let mut entry = fresh_entry("2026-03-04-15-16-17", &output_url, 2);
+        entry["stats_url"] = json!(format!("{}/stats", server_url));
+        let mock_history_payload = json!([entry]);
         let mock_history_url = format!("{}/history", server_url);
+        let stats = r#"{"count":1,"results":[{"spider":"x","errors":0,"features":7}]}"#;
+        let mock_stats = server
+            .mock("GET", "/stats")
+            .with_status(200)
+            .with_body(stats)
+            .expect(1)
+            .create_async()
+            .await;
         let mock_history = server
             .mock("GET", "/history")
             .with_status(200)
@@ -401,6 +472,8 @@ mod tests {
             fetch_atp(&mock_history_url, &client, &progress, workdir.path()).await?;
         mock_history.assert_async().await;
         mock_atp_data.assert_async().await;
+        let stats_path = workdir.path().join(STATS_JSON_FILENAME);
+        assert_eq!(tokio::fs::read_to_string(&stats_path).await?, stats);
 
         assert!(path.exists());
         assert_eq!(tokio::fs::read(&path).await?, b"data");
@@ -431,6 +504,7 @@ mod tests {
         let again = fetch_atp(&mock_history_url, &client, &progress, workdir.path()).await?;
         assert_eq!(again.path, path);
         assert_eq!(again.metadata, metadata);
+        mock_stats.assert_async().await;
 
         Ok(())
     }
@@ -450,6 +524,7 @@ mod tests {
             spiders: MIN_SPIDERS,
             total_lines: MIN_TOTAL_LINES,
             size_bytes: MIN_SIZE_BYTES,
+            stats_url: None,
             sha256: Some("00".repeat(32)),
         };
         write_meta_json(&metadata, &workdir.path().join(META_JSON_FILENAME)).await?;

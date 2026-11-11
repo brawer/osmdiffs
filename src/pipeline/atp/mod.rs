@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use std::fs::{File, rename};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use time::{
@@ -26,6 +27,8 @@ use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 mod datum;
 mod fetch;
 pub(super) mod nondescript;
+mod run_stats;
+mod spider_counts;
 
 // Only these two re-exported crate-wide (rather than making all of
 // `fetch` pub(crate)): provenance needs them to assemble this
@@ -109,7 +112,17 @@ pub fn import_atp(
             if !brand_domains.exists() || is_stale(&brand_domains)? {
                 build_brand_domains_from_parquet(&out, &brand_domains)?;
             }
-            return Ok(out);
+            // The spider counts need the zip, since the features left
+            // out aren't in the parquet file; without it, they stay
+            // missing.
+            let counts = spider_counts::path(workdir);
+            let counts_missing = !counts.exists() || is_stale(&counts)?;
+            if !counts_missing || zip_modified.is_none() {
+                if counts_missing {
+                    log::warn!("import_atp: no spider counts, and no zip to count from");
+                }
+                return Ok(out);
+            }
         }
     }
 
@@ -145,7 +158,14 @@ pub fn import_atp(
         (r1.join().unwrap(), r2.join().unwrap())
     });
     ra?;
-    rb?;
+    let mut counts = rb?;
+    spider_counts::write(&mut counts, &spider_counts::path(workdir))?;
+    let run_stats = run_stats::read(workdir).unwrap_or_else(|err| {
+        log::warn!(error = format!("{err:#}").as_str(); "import_atp: could not read run stats");
+        None
+    });
+    let summary = spider_counts::summarize(&counts, run_stats.as_ref());
+    spider_counts::log_summary(&summary, run_stats.is_some());
 
     Ok(out)
 }
@@ -259,12 +279,14 @@ fn process_places(
     Ok(())
 }
 
+/// Sends the features of the dump at `path` to `channel`, and returns
+/// what happened to each spider's features.
 fn process_zip(
     path: &Path,
     osm: Option<&OsmFeatures>,
     progress: &MultiProgress,
     channel: SyncSender<Place>,
-) -> Result<()> {
+) -> Result<Vec<spider_counts::SpiderCounts>> {
     let file = File::open(path).with_context(|| format!("could not open file `{:?}`", path))?;
     let mapping = unsafe { Mmap::map(&file).context("Couldn't mmap zip file")? };
     let archive = ZipArchive::with_prepended_data(&mapping)
@@ -275,37 +297,63 @@ fn process_zip(
     bar.set_style(ProgressStyle::with_template(PROGRESS_BAR_STYLE)?);
     bar.set_message("feature collections");
 
+    let counts = Mutex::new(Vec::with_capacity(archive.entries().len()));
     archive.entries().par_iter().try_for_each(|entry| {
-        if entry.size > 0 {
+        let path = entry.path.as_str();
+        if path.ends_with(".geojson") {
             let reader = archive.read(entry)?;
-            let path = entry.path.as_str();
-            process_geojson(reader, path, osm, Some(channel.clone()))?;
+            let c = process_geojson(reader, path, osm, Some(channel.clone()))?;
+            counts.lock().expect("counts lock").push(c);
         }
         bar.inc(1);
         Ok(())
     })?;
     bar.finish();
-    Ok(())
+    Ok(counts.into_inner().expect("counts lock"))
 }
 
+/// Sends the features of one spider's file to `channel`, and returns
+/// what happened to them.
 fn process_geojson<T: Read>(
     reader: T,
     path: &str,
     osm: Option<&OsmFeatures>,
     channel: Option<SyncSender<Place>>,
-) -> Result<()> {
+) -> Result<spider_counts::SpiderCounts> {
     let buffer = BufReader::new(reader);
     let mut lines = buffer.lines();
+    // Until the file names its spider, the file name stands in.
+    let stem = path.rsplit('/').next().unwrap_or(path);
+    let mut counts = spider_counts::SpiderCounts {
+        spider: stem.strip_suffix(".geojson").unwrap_or(stem).to_string(),
+        ..Default::default()
+    };
+    let is_feature = |line: &str| !line.is_empty() && line != "]}";
 
     let collection_time: Option<UtcDateTime>;
     if let Some(first_line) = lines.next() {
         let mut json = first_line?;
         json.push_str("]}");
         let parsed = json.parse::<geojson::FeatureCollection>()?;
+        if let Some(spider) = parsed
+            .foreign_members
+            .as_ref()
+            .and_then(|m| m.get("dataset_attributes"))
+            .and_then(|a| a.get("@spider"))
+            .and_then(|s| s.as_str())
+        {
+            counts.spider = spider.to_string();
+        }
         if !is_usable_for_osm(&parsed) {
             // Ignore FeatureCollections that can't be conflated with OSM
             // according to the AllThePlaces metadata.
-            return Ok(());
+            for line in lines {
+                if is_feature(&line?) {
+                    counts.features += 1;
+                    counts.not_for_osm += 1;
+                }
+            }
+            return Ok(counts);
         }
         collection_time = parse_spider_collection_time(&parsed);
     } else {
@@ -314,7 +362,7 @@ fn process_geojson<T: Read>(
         // empty file in alltheplaces.zip. We intentionally ignore
         // this; a crashing spider is not a reason to stop the entire
         // conflation pipeline.
-        return Ok(());
+        return Ok(counts);
     }
 
     let Some(collection_time) = collection_time else {
@@ -328,9 +376,10 @@ fn process_geojson<T: Read>(
         let line = line?;
 
         // Handle end of FeatureCollection, last line in file.
-        if line == "]}" {
+        if !is_feature(&line) {
             continue;
         }
+        counts.features += 1;
 
         // Remove any trailing commas.
         let trimmed = if line.ends_with(',') {
@@ -341,6 +390,7 @@ fn process_geojson<T: Read>(
 
         // Handle individual features.
         let Some(place) = make_place(trimmed, collection_time) else {
+            counts.invalid += 1;
             continue;
         };
         if osm.is_some() && datum::place_in_mainland_china(&place) {
@@ -352,10 +402,12 @@ fn process_geojson<T: Read>(
         };
     }
 
+    counts.in_china = in_china.len() as u64;
     if let Some(osm) = osm
         && !in_china.is_empty()
     {
         let (datum, hits) = datum::detect(&in_china, osm)?;
+        counts.datum = datum.as_str().to_string();
         log::info!(
             spider = in_china[0].spider.as_str(),
             features = in_china.len(),
@@ -377,7 +429,7 @@ fn process_geojson<T: Read>(
             channel.send(place)?;
         }
     }
-    Ok(())
+    Ok(counts)
 }
 
 fn parse_spider_collection_time(fc: &geojson::FeatureCollection) -> Option<UtcDateTime> {
@@ -725,7 +777,7 @@ mod tests {
         path.push("tests/test_data/alltheplaces.zip");
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
         let (tx, rx) = sync_channel(1000);
-        process_zip(&path, None, &progress, tx)?;
+        let mut spiders = process_zip(&path, None, &progress, tx)?;
         let mut counts: HashMap<String, usize> = HashMap::new();
         for place in rx {
             *counts.entry(place.spider).or_insert(0) += 1;
@@ -733,6 +785,23 @@ mod tests {
         assert_eq!(counts["misenso_ch"], 3);
         assert_eq!(counts["tchibo"], 1);
         assert_eq!(counts["winterthur_ch"], 4);
+
+        spiders.sort_by(|a, b| a.spider.cmp(&b.spider));
+        let got: Vec<(&str, u64, u64)> = spiders
+            .iter()
+            .map(|c| (c.spider.as_str(), c.features, c.written()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("denner_ch", 1, 1),
+                ("empty", 0, 0),
+                ("mediamarkt", 1, 1),
+                ("misenso_ch", 3, 3),
+                ("tchibo", 1, 1),
+                ("winterthur_ch", 4, 4),
+            ]
+        );
         Ok(())
     }
 
@@ -753,6 +822,16 @@ mod tests {
 
         let parquet = import_atp(&input, None, &progress, workdir.path())?;
         assert!(parquet.exists());
+        let counts = spider_counts::path(workdir.path());
+        assert_eq!(spider_counts::read(&counts)?.len(), 6);
+
+        // A workdir from before the spider counts existed, with the zip
+        // still there: everything is built again, since the counts need
+        // the zip.
+        std::fs::remove_file(&counts)?;
+        import_atp(&input, None, &progress, workdir.path())?;
+        assert_eq!(spider_counts::read(&counts)?.len(), 6);
+
         assert!(phones.exists());
         assert!(emails.exists());
         let built = std::fs::read_to_string(&domains)?;
@@ -867,6 +946,32 @@ mod tests {
             features: vec![],
             foreign_members: Some(foreign_members),
         }
+    }
+
+    #[test]
+    fn test_process_geojson_counts() -> Result<()> {
+        use std::io::Cursor;
+        let feature = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[8.5,47.4]},"properties":{"@spider":"s","shop":"bakery"}}"#;
+        let no_geometry = r#"{"type":"Feature","geometry":null,"properties":{"@spider":"s"}}"#;
+        let file = |attrs: &str| {
+            format!(
+                "{{\"type\":\"FeatureCollection\",\"dataset_attributes\":{{\"@spider\":\"s\",\"spider:collection_time\":\"2026-11-01T00:00:00\",{attrs}}},\"features\":[\n{feature},\n{no_geometry},\n{feature}\n]}}\n"
+            )
+        };
+        let (tx, rx) = sync_channel(10);
+        let usable = file(r#""spider:lineage":"S_ATP_BRANDS""#);
+        let c = process_geojson(Cursor::new(usable), "output/x.geojson", None, Some(tx))?;
+        assert_eq!(rx.iter().count(), 2);
+        assert_eq!((c.spider.as_str(), c.features, c.invalid), ("s", 3, 1));
+        assert_eq!(c.written(), 2);
+
+        let licensed = file(r#""license:wikidata":"Q20007257""#);
+        let c = process_geojson(Cursor::new(licensed), "output/x.geojson", None, None)?;
+        assert_eq!((c.features, c.not_for_osm, c.written()), (3, 3, 0));
+
+        let c = process_geojson(Cursor::new(""), "output/crashed.geojson", None, None)?;
+        assert_eq!((c.spider.as_str(), c.features), ("crashed", 0));
+        Ok(())
     }
 
     #[test]

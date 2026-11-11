@@ -160,6 +160,36 @@ struct ExclusiveCandidates {
     colocated_radius: Option<ChordAngle>,
 }
 
+fn count_spider(counts: &mut HashMap<String, u64>, spider: &str) {
+    match counts.get_mut(spider) {
+        Some(n) => *n += 1,
+        None => {
+            counts.insert(spider.to_string(), 1);
+        }
+    }
+}
+
+/// The spiders with the most features that no matcher handles, most
+/// first, as `spider:count` separated by commas.
+fn top_spiders(counts: &HashMap<String, u64>, n: usize) -> String {
+    let mut top: Vec<(&String, &u64)> = counts.iter().collect();
+    top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    top.iter()
+        .take(n)
+        .map(|(spider, count)| format!("{spider}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn log_no_matcher(counts: &HashMap<String, u64>) {
+    log::info!(
+        features = counts.values().sum::<u64>(),
+        spiders = counts.len(),
+        top_spiders = top_spiders(counts, 20).as_str();
+        "conflate.match: ATP features without a matcher"
+    );
+}
+
 /// Matches every ATP feature, in two passes. The first pass matches
 /// features whose matcher isn't exclusive, or that have no candidate,
 /// and sends their rows right away; for the others, it keeps the best
@@ -196,6 +226,9 @@ fn produce_rows(
     let exclusive = Mutex::new(Vec::new());
     let matched = MatchedSet::new(osm.index.len());
     let mut coverage = AtpCoverage::default();
+    // ATP features per spider that no matcher handles, and that get no
+    // row in conflated.parquet.
+    let mut no_matcher_by_spider: HashMap<String, u64> = HashMap::new();
     let departments = find_departments(atp_reader)?;
     log::info!(
         departments = departments.len(),
@@ -233,6 +266,7 @@ fn produce_rows(
         // count for `coverage`, since ATP features of a kind that we
         // don't match say nothing about unmatched OSM features.
         let has_matcher: Vec<AtomicBool> = batch.iter().map(|_| AtomicBool::new(false)).collect();
+        let no_matcher: Vec<AtomicBool> = batch.iter().map(|_| AtomicBool::new(false)).collect();
         // Each batch is processed by the Rayon thread pool in parallel,
         // but the outer loop is sequential — so nearby places (within a
         // batch) always go to nearby workers, preserving spatial locality.
@@ -247,6 +281,7 @@ fn produce_rows(
             });
 
             let Some(matcher) = create_matcher(atp, nondescript, brand_domains) else {
+                no_matcher[i].store(true, Ordering::Relaxed);
                 return Ok(());
             };
             has_matcher[i].store(matcher.counts_for_coverage(), Ordering::Relaxed);
@@ -346,9 +381,15 @@ fn produce_rows(
                 coverage.add(atp, country);
             }
         }
+        for (atp, no_matcher) in batch.iter().zip(&no_matcher) {
+            if no_matcher.load(Ordering::Relaxed) {
+                count_spider(&mut no_matcher_by_spider, &atp.spider);
+            }
+        }
         batch_start += batch.len() as u64;
     }
 
+    log_no_matcher(&no_matcher_by_spider);
     let spacing_bytes = coverage.finish();
     log::info!(
         spacing_bytes = spacing_bytes,
@@ -871,6 +912,17 @@ mod tests {
 
     fn r(i: u32) -> LocalFeatureRef {
         LocalFeatureRef::for_test(i)
+    }
+
+    #[test]
+    fn test_top_spiders() {
+        let mut counts = HashMap::new();
+        for spider in ["b", "a", "c", "a", "b", "a"] {
+            count_spider(&mut counts, spider);
+        }
+        count_spider(&mut counts, "d");
+        assert_eq!(top_spiders(&counts, 3), "a:3,b:2,c:1");
+        assert_eq!(top_spiders(&HashMap::new(), 3), "");
     }
 
     #[test]
