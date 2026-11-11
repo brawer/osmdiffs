@@ -227,6 +227,7 @@ graph TD
     OSMVIEWS_R --> CONFLATE
     QRANK_Q --> CONFLATE
     CONFLATE --> CONFLATED[conflated.parquet]
+    CONFLATE --> DIAGNOSTICS[conflate.spider-diagnostics.tsv]
     CONFLATED --> UPLOAD_CONFLATED(upload_conflated) --> S3A[("public S3")]
 
     CONFLATED --> EXTRACT_CONFLATED_LAYERS(extract_conflated_layers)
@@ -241,6 +242,7 @@ graph TD
 
     CONFLATED --> SPIDER_STATS(compute_spider_stats)
     SPIDER_COUNTS --> SPIDER_STATS
+    DIAGNOSTICS --> SPIDER_STATS
     ATP_STATS --> SPIDER_STATS
     OSM_BRANDS --> SPIDER_STATS
     BRAND_NAMES --> SPIDER_STATS
@@ -437,7 +439,11 @@ fetch away.
   matching evidence. Writes one row per ATP feature that a matcher
   handles — matched or not — to
   `conflated.parquet`, and logs how many features of which spiders no
-  matcher handles. Each row comes with an `importance` from 0 to 1 (see
+  matcher handles. On the side, it writes
+  `conflate.spider-diagnostics.tsv` for the spider stats
+  ([`diagnostics.rs`](../src/pipeline/conflate/diagnostics.rs)): why
+  features found no match, and how many of a sample per spider still
+  match when moved 2 km away. Each row comes with an `importance` from 0 to 1 (see
   [`src/pipeline/importance.rs`](../src/pipeline/importance.rs)): a
   weighted mean of the location's OSMViews quantile, the brand's QRank
   quantile and a coarse score for the kind of place

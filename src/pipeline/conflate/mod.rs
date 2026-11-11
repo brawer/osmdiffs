@@ -22,7 +22,7 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
@@ -38,12 +38,14 @@ use std::{
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 mod deletion;
+pub(super) mod diagnostics;
 pub(super) mod evidence;
 mod local_coverage;
 mod located_in;
 mod s2_util;
 mod writer;
 use deletion::{AtpCoverage, Candidate, Reason, deletion_reason, local_keys, place_country};
+use diagnostics::{Diagnostics, Missing};
 use local_coverage::{LocalCoverage, LocalKey, MIN_LOCAL_SHARE};
 use located_in::{Host, find_departments, located_in_tag};
 use s2_util::MergedCellRanges;
@@ -81,7 +83,11 @@ pub fn conflate(
     ])?
     .max(osm.modified()?);
     let out_path = workdir.join("conflated.parquet");
-    if out_path.exists() && last_modified(&[&out_path])? >= input_modified {
+    let diagnostics_path = diagnostics::path(workdir);
+    if out_path.exists()
+        && diagnostics_path.exists()
+        && last_modified(&[&out_path])? >= input_modified
+    {
         return Ok(out_path);
     }
 
@@ -103,7 +109,7 @@ pub fn conflate(
         make_progress_bar(progress, "conflate.match", num_atp_features, "ATP features");
     let writer_progress = make_progress_bar(progress, "conflate.write", 0, "parquet rows");
 
-    let mut producer_result = Ok(());
+    let mut producer_result = Ok(Diagnostics::default());
     let mut writer_result = Ok(());
     thread::scope(|s| {
         let (tx, rx) = sync_channel::<ParquetRow>(8192);
@@ -124,7 +130,7 @@ pub fn conflate(
         });
     });
     writer_result?;
-    producer_result?;
+    producer_result?.write(&diagnostics_path)?;
 
     Ok(out_path)
 }
@@ -207,7 +213,7 @@ fn produce_rows(
     signals: &Signals,
     progress_bar: ProgressBar,
     out: SyncSender<ParquetRow>,
-) -> Result<()> {
+) -> Result<Diagnostics> {
     let coverer = s2::region::RegionCoverer {
         max_cells: 16,
         min_level: 12,
@@ -229,6 +235,8 @@ fn produce_rows(
     // ATP features per spider that no matcher handles, and that get no
     // row in conflated.parquet.
     let mut no_matcher_by_spider: HashMap<String, u64> = HashMap::new();
+    let mut features_by_spider: HashMap<String, u64> = HashMap::new();
+    let mut diagnostics = Diagnostics::default();
     let departments = find_departments(atp_reader)?;
     log::info!(
         departments = departments.len(),
@@ -239,23 +247,27 @@ fn produce_rows(
         located_in_tag(atp).or_else(|| departments.get(&ordinal).cloned())
     };
     let located_in_rows = AtomicU64::new(0);
-    let send_unmatched = |atp: &Place, host: Option<&Host>| -> Result<()> {
+    // Sends the row of an ATP feature without a match, and returns
+    // whether it is `missing_in_osm`, rather than `located_in`.
+    let send_unmatched = |atp: &Place, host: Option<&Host>| -> Result<bool> {
         if let Some(host) = host
             && let Some(r) = find_host(atp, host, osm)?
         {
             // The host exists, whether or not ATP has it.
             matched.insert(r);
             located_in_rows.fetch_add(1, Ordering::Relaxed);
-            return send_row(
+            send_row(
                 atp,
                 Some(r),
                 MatchInfo::located_in(host.rule()),
                 osm,
                 signals,
                 &out,
-            );
+            )?;
+            return Ok(false);
         }
-        send_row(atp, None, MatchInfo::missing_in_osm(), osm, signals, &out)
+        send_row(atp, None, MatchInfo::missing_in_osm(), osm, signals, &out)?;
+        Ok(true)
     };
 
     let mut batch_start: u64 = 0;
@@ -267,6 +279,9 @@ fn produce_rows(
         // don't match say nothing about unmatched OSM features.
         let has_matcher: Vec<AtomicBool> = batch.iter().map(|_| AtomicBool::new(false)).collect();
         let no_matcher: Vec<AtomicBool> = batch.iter().map(|_| AtomicBool::new(false)).collect();
+        // Why each ATP feature of this batch that is missing in OSM
+        // found no match, for the diagnostics.
+        let missing: Vec<OnceLock<Missing>> = batch.iter().map(|_| OnceLock::new()).collect();
         // Each batch is processed by the Rayon thread pool in parallel,
         // but the outer loop is sequential — so nearby places (within a
         // batch) always go to nearby workers, preserving spatial locality.
@@ -301,6 +316,9 @@ fn produce_rows(
                 coverer.covering(&cap)
             };
             let mut best = Vec::<(f64, LocalFeatureRef)>::new();
+            // OSM features of the kind that the matcher found no
+            // evidence for, for the diagnostics.
+            let mut rejected = Vec::new();
             for (lo, hi) in MergedCellRanges::new(covering) {
                 for r in osm.index.query(lo..=hi, atp.mask) {
                     let feature = osm.index.get_feature(r)?;
@@ -313,6 +331,9 @@ fn produce_rows(
                         continue;
                     }
                     let score = matcher.score_osm_candidate(&candidate);
+                    if score <= 0.0 && rejected.len() < diagnostics::MAX_REJECTED {
+                        rejected.push(r);
+                    }
                     keep_best(&mut best, keep, score, r);
                 }
             }
@@ -350,7 +371,15 @@ fn produce_rows(
                 return Ok(());
             }
             let Some(&(score, r)) = best.first() else {
-                return send_unmatched(atp, host.as_ref());
+                if send_unmatched(atp, host.as_ref())? {
+                    let why = if rejected.is_empty() {
+                        Missing::NoCandidate
+                    } else {
+                        Missing::Rejected(diagnostics::nearest(atp, &rejected, osm)?)
+                    };
+                    missing[i].set(why).expect("set once");
+                }
+                return Ok(());
             };
             matched.insert(r);
             let feature = osm.index.get_feature(r)?;
@@ -384,6 +413,12 @@ fn produce_rows(
         for (atp, no_matcher) in batch.iter().zip(&no_matcher) {
             if no_matcher.load(Ordering::Relaxed) {
                 count_spider(&mut no_matcher_by_spider, &atp.spider);
+            }
+            count_spider(&mut features_by_spider, &atp.spider);
+        }
+        for (atp, why) in batch.iter().zip(missing) {
+            if let Some(why) = why.into_inner() {
+                diagnostics.add_missing(&atp.spider, why);
             }
         }
         batch_start += batch.len() as u64;
@@ -438,7 +473,11 @@ fn produce_rows(
                             &out,
                         )?;
                     }
-                    None => send_unmatched(&atp, host_of(ordinal, &atp).as_ref())?,
+                    None => {
+                        if send_unmatched(&atp, host_of(ordinal, &atp).as_ref())? {
+                            diagnostics.add_missing(&atp.spider, Missing::Taken);
+                        }
+                    }
                 }
             }
             ordinal += 1;
@@ -446,6 +485,20 @@ fn produce_rows(
     }
 
     send_deletion_candidates(osm, &coverage, &matched, signals, &out)?;
+
+    let chance_start = Instant::now();
+    diagnostics::chance_pairs(
+        atp_reader,
+        &features_by_spider,
+        osm,
+        nondescript,
+        brand_domains,
+        &mut diagnostics,
+    )?;
+    log::info!(
+        elapsed_seconds = chance_start.elapsed().as_secs_f64();
+        "conflate.chance_pairs: done"
+    );
 
     progress_bar.finish();
     log::info!(
@@ -458,7 +511,7 @@ fn produce_rows(
         exclusive_matched = assigned.values().filter(|m| m.is_some()).count();
         "conflate.match: done"
     );
-    Ok(())
+    Ok(diagnostics)
 }
 
 /// The OSM features that some ATP feature matched, as one bit per
