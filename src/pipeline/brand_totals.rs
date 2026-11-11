@@ -1,0 +1,287 @@
+//! For each brand, operator and network that features refer to by
+//! Wikidata ID: how many OpenStreetMap features it has per country and
+//! main category, and the names that OSM and AllThePlaces give it. The
+//! spider stats compare these totals with AllThePlaces, and show the
+//! names so that their readers needn't look up Wikidata IDs.
+//!
+//! [super::wikidata_ids::collect_wikidata_ids] fills them in, since it
+//! visits the same features anyway.
+
+use crate::matchers::{contact::main_category, parse_wikidata_ids};
+use crate::utils::countries::Country;
+use anyhow::{Context, Result};
+use std::collections::HashMap;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+
+use super::wikidata_ids::WIKIDATA_KEYS;
+
+/// Filename, within `workdir`, of the OSM feature totals.
+const FEATURES_FILENAME: &str = "osm-brands.tsv";
+
+/// Filename, within `workdir`, of the names.
+const NAMES_FILENAME: &str = "brand-names.tsv";
+
+/// The most names kept per Wikidata ID, country and key.
+const MAX_NAMES: usize = 3;
+
+pub(super) fn features_path(workdir: &Path) -> PathBuf {
+    workdir.join(FEATURES_FILENAME)
+}
+
+pub(super) fn names_path(workdir: &Path) -> PathBuf {
+    workdir.join(NAMES_FILENAME)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Source {
+    Osm,
+    Atp,
+}
+
+/// Wikidata ID, country, and the key of the name, such as `brand`.
+type NameKey = (u64, Option<Country>, &'static str);
+
+#[derive(Debug, Default)]
+pub(super) struct BrandTotals {
+    /// OSM features per Wikidata ID, country and main category (see
+    /// [main_category]). A feature that refers to the same ID twice,
+    /// such as by `brand:wikidata` and `operator:wikidata`, counts once.
+    features: HashMap<(u64, Option<Country>, Option<String>), u64>,
+
+    /// How often OSM and ATP features use each name, in that order.
+    names: HashMap<NameKey, HashMap<String, [u64; 2]>>,
+}
+
+impl BrandTotals {
+    /// Adds a feature with `tags` that lies in `country`. Names count
+    /// only where the Wikidata tag names a single ID: with several,
+    /// there's no telling which name goes with which.
+    pub fn add<'a>(
+        &mut self,
+        source: Source,
+        tags: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+        country: Option<Country>,
+    ) {
+        let mut ids: Vec<u64> = Vec::new();
+        for key in WIKIDATA_KEYS {
+            let Some((_, value)) = tags.clone().find(|(k, _)| *k == key) else {
+                continue;
+            };
+            let found: Vec<u64> = parse_wikidata_ids(value).collect();
+            let name_key = key.strip_suffix(":wikidata").expect("Wikidata key");
+            if let [id] = found[..]
+                && let Some((_, name)) = tags.clone().find(|(k, _)| *k == name_key)
+            {
+                let name = clean_name(name);
+                if !name.is_empty() {
+                    let counts = self
+                        .names
+                        .entry((id, country, name_key))
+                        .or_default()
+                        .entry(name)
+                        .or_default();
+                    counts[source as usize] += 1;
+                }
+            }
+            ids.extend(found);
+        }
+        if source != Source::Osm || ids.is_empty() {
+            return;
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let category = main_category(tags);
+        for id in ids {
+            *self
+                .features
+                .entry((id, country, category.clone()))
+                .or_default() += 1;
+        }
+    }
+
+    pub fn merge(mut self, other: BrandTotals) -> BrandTotals {
+        if self.features.len() + self.names.len() < other.features.len() + other.names.len() {
+            return other.merge(self);
+        }
+        for (key, n) in other.features {
+            *self.features.entry(key).or_default() += n;
+        }
+        for (key, names) in other.names {
+            let mine = self.names.entry(key).or_default();
+            for (name, [osm, atp]) in names {
+                let counts = mine.entry(name).or_default();
+                counts[0] += osm;
+                counts[1] += atp;
+            }
+        }
+        self
+    }
+
+    /// Writes the feature totals to [features_path] and the most
+    /// common names to [names_path], both sorted, and returns how many
+    /// lines each has.
+    pub fn write(&self, workdir: &Path) -> Result<(usize, usize)> {
+        let mut features: Vec<_> = self.features.iter().collect();
+        features.sort_by_cached_key(|((id, country, category), _)| {
+            (*id, code(*country), category.clone())
+        });
+        let num_features = features.len();
+        write_tsv(
+            &features_path(workdir),
+            "wikidata_id\tcountry\tcategory\tfeatures",
+            features.into_iter().map(|((id, country, category), n)| {
+                format!(
+                    "Q{id}\t{}\t{}\t{n}",
+                    code(*country),
+                    category.as_deref().unwrap_or("")
+                )
+            }),
+        )?;
+
+        let mut keys: Vec<&NameKey> = self.names.keys().collect();
+        keys.sort_by_cached_key(|(id, country, key)| (*id, code(*country), *key));
+        let mut lines = Vec::new();
+        for k in keys {
+            let mut names: Vec<(&String, &[u64; 2])> = self.names[k].iter().collect();
+            names.sort_by(|a, b| (b.1[0] + b.1[1]).cmp(&(a.1[0] + a.1[1])).then(a.0.cmp(b.0)));
+            for (name, [osm, atp]) in names.into_iter().take(MAX_NAMES) {
+                let (id, country, key) = k;
+                lines.push(format!(
+                    "Q{id}\t{}\t{key}\t{name}\t{osm}\t{atp}",
+                    code(*country)
+                ));
+            }
+        }
+        let num_names = lines.len();
+        write_tsv(
+            &names_path(workdir),
+            "wikidata_id\tcountry\tkey\tname\tosm\tatp",
+            lines.into_iter(),
+        )?;
+        Ok((num_features, num_names))
+    }
+}
+
+fn code(country: Option<Country>) -> String {
+    country.map(|c| c.code().to_string()).unwrap_or_default()
+}
+
+/// `name` without surrounding spaces, and with tabs and line breaks
+/// replaced, so it fits into one TSV column.
+fn clean_name(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+fn write_tsv(out: &Path, header: &str, lines: impl Iterator<Item = String>) -> Result<()> {
+    let mut tmp = out.to_path_buf();
+    tmp.add_extension("tmp");
+    let mut w = BufWriter::new(
+        std::fs::File::create(&tmp).with_context(|| format!("could not create {tmp:?}"))?,
+    );
+    writeln!(w, "{header}")?;
+    for line in lines {
+        writeln!(w, "{line}")?;
+    }
+    w.into_inner()?.sync_all()?;
+    std::fs::rename(&tmp, out)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CH: Option<Country> = Some(Country::SWITZERLAND);
+    const DE: Option<Country> = Some(Country::GERMANY);
+
+    #[test]
+    fn test_brand_totals() -> Result<()> {
+        let mut a = BrandTotals::default();
+        let mut b = BrandTotals::default();
+        let migros = [
+            ("shop", "supermarket"),
+            ("brand", "Migros"),
+            ("brand:wikidata", "Q680727"),
+            ("operator", "Genossenschaft Migros Zürich"),
+            ("operator:wikidata", "Q1"),
+        ];
+        a.add(Source::Osm, migros.iter().copied(), CH);
+        b.add(Source::Osm, migros.iter().copied(), CH);
+        let typo = [
+            ("shop", "supermarket"),
+            ("brand", "Migors"),
+            ("brand:wikidata", "Q680727"),
+        ];
+        b.add(Source::Osm, typo.iter().copied(), CH);
+        // ATP names count, but ATP features don't.
+        let atp = [
+            ("shop", "supermarket"),
+            ("brand", "Migros\t"),
+            ("brand:wikidata", "Q680727"),
+        ];
+        b.add(Source::Atp, atp.iter().copied(), CH);
+        // Two IDs: no name.
+        let two = [
+            ("amenity", "fuel"),
+            ("brand", "Migrol;Migros"),
+            ("brand:wikidata", "Q1;Q680727"),
+        ];
+        b.add(Source::Osm, two.iter().copied(), DE);
+        // The same ID twice counts once.
+        let same = [
+            ("brand", "Migros"),
+            ("brand:wikidata", "Q680727"),
+            ("operator:wikidata", "Q680727"),
+        ];
+        b.add(Source::Osm, same.iter().copied(), None);
+        let totals = a.merge(b);
+
+        let dir = tempfile::tempdir()?;
+        assert_eq!(totals.write(dir.path())?, (5, 4));
+        assert_eq!(
+            std::fs::read_to_string(features_path(dir.path()))?,
+            "wikidata_id\tcountry\tcategory\tfeatures\n\
+             Q1\tCH\tshop=supermarket\t2\n\
+             Q1\tDE\tamenity=fuel\t1\n\
+             Q680727\t\t\t1\n\
+             Q680727\tCH\tshop=supermarket\t3\n\
+             Q680727\tDE\tamenity=fuel\t1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(names_path(dir.path()))?,
+            "wikidata_id\tcountry\tkey\tname\tosm\tatp\n\
+             Q1\tCH\toperator\tGenossenschaft Migros Zürich\t2\t0\n\
+             Q680727\t\tbrand\tMigros\t1\t0\n\
+             Q680727\tCH\tbrand\tMigros\t2\t1\n\
+             Q680727\tCH\tbrand\tMigors\t1\t0\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_max_names() -> Result<()> {
+        let mut totals = BrandTotals::default();
+        for (name, n) in [("A", 1), ("B", 4), ("C", 2), ("D", 3)] {
+            for _ in 0..n {
+                totals.add(
+                    Source::Osm,
+                    [("brand", name), ("brand:wikidata", "Q7")].into_iter(),
+                    CH,
+                );
+            }
+        }
+        let dir = tempfile::tempdir()?;
+        totals.write(dir.path())?;
+        let names: Vec<String> = std::fs::read_to_string(names_path(dir.path()))?
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').nth(3).unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["B", "D", "C"]);
+        Ok(())
+    }
+}
