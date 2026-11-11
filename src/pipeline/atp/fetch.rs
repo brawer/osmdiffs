@@ -81,9 +81,8 @@ pub struct AtpMetadata {
     pub size_bytes: u64,
 
     /// URL of AllThePlaces' statistics for this run (`_results.json`),
-    /// with the number of features and errors per spider. `None` if
-    /// `history.json` doesn't list one, or in a sidecar written before
-    /// we kept it.
+    /// with the number of features and errors per spider. `None` only
+    /// in a sidecar written before we kept it.
     #[serde(default)]
     pub stats_url: Option<String>,
 
@@ -119,22 +118,27 @@ pub async fn fetch_atp(
     workdir: &Path,
 ) -> Result<Input<AtpMetadata>> {
     let input = fetch_zip(url, client, progress, workdir).await?;
-    fetch_stats(&input.metadata, client, workdir).await;
+    fetch_stats(&input.metadata, client, workdir).await?;
     Ok(input)
 }
 
 /// Downloads AllThePlaces' statistics for the run of `metadata` to
 /// [STATS_JSON_FILENAME] in `workdir`, unless they're already there.
-/// The statistics only feed diagnostics, so a failure is logged and
-/// otherwise ignored.
-async fn fetch_stats(metadata: &AtpMetadata, client: &Client, workdir: &Path) {
+/// Without them, the spider stats couldn't tell a spider that found
+/// fewer places from one whose places we dropped, so a failure stops
+/// the pipeline, while it's still fetching its inputs.
+async fn fetch_stats(metadata: &AtpMetadata, client: &Client, workdir: &Path) -> Result<()> {
     let dest = workdir.join(STATS_JSON_FILENAME);
-    if dest.exists() {
-        return;
+    if tokio::fs::try_exists(&dest).await? {
+        return Ok(());
     }
     let Some(url) = metadata.stats_url.as_deref() else {
-        log::warn!(run_id = metadata.run_id.as_str(); "fetch_atp: no stats_url for run");
-        return;
+        return Err(anyhow!(
+            "{} has no stats_url, and there is no {}; delete the AllThePlaces files \
+             in the workdir to fetch the run again",
+            META_JSON_FILENAME,
+            STATS_JSON_FILENAME
+        ));
     };
     let fetch = async {
         let body = client
@@ -154,9 +158,9 @@ async fn fetch_stats(metadata: &AtpMetadata, client: &Client, workdir: &Path) {
         tokio::fs::rename(&tmp, &dest).await?;
         Ok(())
     };
-    if let Err(err) = fetch.await {
-        log::warn!(url = url, error = format!("{err:#}").as_str(); "fetch_atp: could not fetch stats");
-    }
+    fetch
+        .await
+        .with_context(|| format!("Failed to fetch AllThePlaces stats from {url}"))
 }
 
 async fn fetch_zip(
@@ -348,7 +352,7 @@ fn parse_run(entry: &serde_json::Value, history_url: &str) -> Result<AtpMetadata
     let spiders = u64_field("spiders")?;
     let total_lines = u64_field("total_lines")?;
     let size_bytes = u64_field("size_bytes")?;
-    let stats_url = str_field("stats_url").ok();
+    let stats_url = Some(str_field("stats_url")?);
 
     if spiders < MIN_SPIDERS || total_lines < MIN_TOTAL_LINES || size_bytes < MIN_SIZE_BYTES {
         return Err(anyhow!(
@@ -431,6 +435,7 @@ mod tests {
             "spiders": MIN_SPIDERS + 1,
             "total_lines": MIN_TOTAL_LINES + 1,
             "size_bytes": MIN_SIZE_BYTES + 1,
+            "stats_url": format!("{output_url}.stats"),
         })
     }
 
@@ -439,13 +444,11 @@ mod tests {
         let mut server = Server::new_async().await;
         let server_url = server.url();
         let output_url = format!("{}/atp_data", server_url);
-        let mut entry = fresh_entry("2026-03-04-15-16-17", &output_url, 2);
-        entry["stats_url"] = json!(format!("{}/stats", server_url));
-        let mock_history_payload = json!([entry]);
+        let mock_history_payload = json!([fresh_entry("2026-03-04-15-16-17", &output_url, 2)]);
         let mock_history_url = format!("{}/history", server_url);
         let stats = r#"{"count":1,"results":[{"spider":"x","errors":0,"features":7}]}"#;
         let mock_stats = server
-            .mock("GET", "/stats")
+            .mock("GET", "/atp_data.stats")
             .with_status(200)
             .with_body(stats)
             .expect(1)
@@ -510,6 +513,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_atp_fails_without_stats() -> Result<()> {
+        let mut server = Server::new_async().await;
+        let output_url = format!("{}/atp_data", server.url());
+        let history = json!([fresh_entry("2026-03-04-15-16-17", &output_url, 2)]);
+        let _history = server
+            .mock("GET", "/history")
+            .with_body(history.to_string())
+            .create_async()
+            .await;
+        let _data = server
+            .mock("GET", "/atp_data")
+            .with_body(b"data")
+            .create_async()
+            .await;
+        for (status, body) in [(503, "{}"), (200, "<html>")] {
+            let stats = server
+                .mock("GET", "/atp_data.stats")
+                .with_status(status)
+                .with_body(body)
+                .create_async()
+                .await;
+            let workdir = TempDir::new()?;
+            let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+            let history_url = format!("{}/history", server.url());
+            let err = fetch_atp(
+                &history_url,
+                &test_client(&server),
+                &progress,
+                workdir.path(),
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("stats"), "{err:#}");
+            assert!(!workdir.path().join(STATS_JSON_FILENAME).exists());
+            stats.remove_async().await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_fetch_atp_reuses_parquet_when_zip_was_deleted() -> Result<()> {
         // The zip is gone, but its sidecar and the parquet file built
         // from it are still there: no download (the history URL points
@@ -532,6 +575,24 @@ mod tests {
 
         let client = Client::builder().no_proxy().build()?;
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+
+        // A sidecar from before we kept the stats URL, and no stats:
+        // there is no way to get them for this run.
+        let err = fetch_atp(
+            "http://127.0.0.1:9/history.json",
+            &client,
+            &progress,
+            workdir.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no stats_url"), "{err:#}");
+
+        tokio::fs::write(
+            workdir.path().join(STATS_JSON_FILENAME),
+            b"{\"results\":[]}",
+        )
+        .await?;
         let input = fetch_atp(
             "http://127.0.0.1:9/history.json",
             &client,

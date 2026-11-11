@@ -353,8 +353,9 @@ fetch away.
   datum converted ([`spider_counts.rs`](../src/pipeline/atp/spider_counts.rs)).
   It logs the totals, compared with AllThePlaces' own statistics for
   the run (`alltheplaces.stats.json`, fetched along with the zip from
-  the `stats_url` in `history.json`): how many spiders had errors, and
-  how many have a different number of features in the dump.
+  the `stats_url` in `history.json`; like any other input, the run
+  stops if it can't be fetched): how many spiders had errors, and how
+  many have a different number of features in the dump.
   **~3 minutes.**
 - **`import_osm`** ([`src/pipeline/osm/`](../src/pipeline/osm/)) —
   does a first pass over the planet dump that
