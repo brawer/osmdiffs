@@ -31,12 +31,14 @@
 //! Feature storage (`out`):
 //!
 //! ```text
-//! byte 0..8:   magic "featstg0"
+//! byte 0..8:   magic "featstg1"
 //! byte 8..16:  entry count, u64 little-endian
 //! byte 16..24: offset of the `id` array, u64 little-endian
 //! byte 24..32: offset of the `starts` array, u64 little-endian
 //! byte 32..40: offset of the `blobs` region, u64 little-endian
-//! byte 40..64: reserved, zero-filled
+//! byte 40..48: offset of the `countries` array, u64 little-endian
+//! byte 48..56: offset of the `country_codes` table, u64 little-endian
+//! byte 56..64: number of country codes, u64 little-endian
 //!
 //! id array:     `entry count` OSM feature ids, u64 little-endian each
 //! starts array: `entry count + 1` byte offsets into `blobs`, u64
@@ -45,6 +47,14 @@
 //!               range is `starts[i]..starts[i+1]` without special-casing
 //!               the final entry
 //! blobs region: concatenated `Feature.encode_to_vec()` bytes
+//! countries:    `entry count` bytes, the country of each feature's
+//!               centroid: 0 for none, else 1 + its position in
+//!               `country_codes`
+//! country_codes: two-letter ISO 3166-1 codes, two ASCII bytes each,
+//!               as `crate::utils::countries::all` gave them when the
+//!               index was built. Stored, rather than taken from the
+//!               running binary, so that an index stays readable after
+//!               the boundary data changes.
 //! ```
 //!
 //! Inverted index (`out` with an added `.inverted` extension):
@@ -68,6 +78,7 @@
 use crate::matchers::MatchMask;
 use crate::pipeline::EXTERNAL_SORT_CHUNK_BYTES;
 use crate::tables::{Feature, FeatureToIndex, StringPool};
+use crate::utils::countries::{self, Country};
 use anyhow::{Context, Result};
 use deepsize::DeepSizeOf;
 use ext_sort::{
@@ -91,7 +102,7 @@ use std::{
 /// Size of each file's header, in bytes: see the "File format" section above.
 const HEADER_SIZE: usize = 8 * 8;
 
-const FEATURES_FILE_SIGNATURE: &[u8; 8] = b"featstg0";
+const FEATURES_FILE_SIGNATURE: &[u8; 8] = b"featstg1";
 const INVERTED_INDEX_FILE_SIGNATURE: &[u8; 8] = b"featinv0";
 
 /// An opaque reference to a feature's position in an [OsmFeatureIndex]'s
@@ -146,6 +157,8 @@ pub struct OsmFeatureIndex<'a> {
     id: &'a [u64],
     starts: &'a [u64],
     blobs: &'a [u8],
+    countries: &'a [u8],
+    country_codes: Vec<Option<Country>>,
 
     inverted_index_file: File,
     _inverted_index_mmap: Mmap,
@@ -187,11 +200,27 @@ impl<'a> OsmFeatureIndex<'a> {
         p
     }
 
+    /// Writes files at `path` that [OsmFeatureIndex::exists] accepts
+    /// but that can't be opened, for tests that only check whether an
+    /// index is there.
+    #[cfg(test)]
+    pub(crate) fn write_stub_for_test(path: &Path) -> Result<()> {
+        std::fs::write(path, FEATURES_FILE_SIGNATURE)?;
+        std::fs::write(Self::inverted_index_path(path), b"")?;
+        Ok(())
+    }
+
     /// Whether both files an `OsmFeatureIndex` at `path` needs already
-    /// exist -- for callers that memoize an expensive build step behind
-    /// an existence check rather than reopening unconditionally.
+    /// exist, in the current format -- for callers that memoize an
+    /// expensive build step behind an existence check rather than
+    /// reopening unconditionally. An index in an older format counts as
+    /// missing, so that it gets built again.
     pub fn exists(path: &Path) -> bool {
-        path.exists() && Self::inverted_index_path(path).exists()
+        let mut signature = [0_u8; 8];
+        let current = File::open(path)
+            .and_then(|mut f| f.read_exact(&mut signature))
+            .is_ok_and(|_| &signature == FEATURES_FILE_SIGNATURE);
+        current && Self::inverted_index_path(path).exists()
     }
 
     /// Builds an `OsmFeatureIndex` from `fti`, which may be in any order.
@@ -254,7 +283,8 @@ impl<'a> OsmFeatureIndex<'a> {
             let fti = FeatureToIndex::decode(item.fti_bytes.as_slice())
                 .context("failed to decode a FeatureToIndex spooled during pass 1")?;
             let feature = fti.feature.expect("feature");
-            feature_storage_writer.write(feature.id, &feature.encode_to_vec())?;
+            let country = centroid_country(fti.centroid_s2_cell_id);
+            feature_storage_writer.write(feature.id, country, &feature.encode_to_vec())?;
             for cell_id in &fti.coverage_s2_cell_id {
                 pass2_writer.write_all(&cell_id.to_le_bytes())?;
                 pass2_writer.write_all(&fti.match_mask.to_le_bytes())?;
@@ -357,18 +387,28 @@ impl<'a> OsmFeatureIndex<'a> {
             path,
             "starts",
         )?;
-        let blobs = {
-            let blobs_offset = usize::try_from(u64::from_le(header[4]))?;
-            if blobs_offset <= features_mmap.len() {
-                // SAFETY: Verified length; no alignment constraints on &[u8].
-                unsafe {
-                    let ptr = features_mmap.as_ptr().add(blobs_offset);
-                    std::slice::from_raw_parts(ptr, features_mmap.len() - blobs_offset)
-                }
-            } else {
-                anyhow::bail!("misplaced blobs in OsmFeatureIndex: {}", path.display());
-            }
+        let blobs_offset = usize::try_from(u64::from_le(header[4]))?;
+        let countries_offset = usize::try_from(u64::from_le(header[5]))?;
+        let codes_offset = usize::try_from(u64::from_le(header[6]))?;
+        let num_codes = usize::try_from(u64::from_le(header[7]))?;
+        if blobs_offset > countries_offset
+            || countries_offset + entries_count != codes_offset
+            || codes_offset + 2 * num_codes != features_mmap.len()
+        {
+            anyhow::bail!("misplaced arrays in OsmFeatureIndex: {}", path.display());
+        }
+        // SAFETY: Verified length; no alignment constraints on &[u8].
+        let bytes = |offset: usize, len: usize| -> &'a [u8] {
+            unsafe { std::slice::from_raw_parts(features_mmap.as_ptr().add(offset), len) }
         };
+        let blobs = bytes(blobs_offset, countries_offset - blobs_offset);
+        let countries = bytes(countries_offset, entries_count);
+        let country_codes = bytes(codes_offset, 2 * num_codes)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|code| Country::from_code(*code))
+            .collect();
 
         let inverted_index_path = Self::inverted_index_path(path);
         let inverted_index_file = File::open(&inverted_index_path).with_context(|| {
@@ -418,6 +458,8 @@ impl<'a> OsmFeatureIndex<'a> {
             id,
             starts,
             blobs,
+            countries,
+            country_codes,
 
             inverted_index_file,
             _inverted_index_mmap: inverted_index_mmap,
@@ -497,6 +539,18 @@ impl<'a> OsmFeatureIndex<'a> {
         let count = u32::try_from(self.entries_count)
             .expect("OsmFeatureIndex::create never writes more than u32::MAX features");
         (0..count).into_par_iter().map(LocalFeatureRef)
+    }
+
+    /// The country of the feature `r` refers to, by its centroid, or
+    /// `None` if it lies in none, such as in the open sea. No decode;
+    /// `None` too for a country that the running binary's boundary data
+    /// doesn't know, which can only happen with an index built by
+    /// another version.
+    pub fn country(&self, r: LocalFeatureRef) -> Option<Country> {
+        match self.countries[r.0 as usize] {
+            0 => None,
+            i => self.country_codes.get(i as usize - 1).copied().flatten(),
+        }
     }
 
     /// Fully decodes the feature `r` refers to. The only operation on
@@ -602,6 +656,28 @@ impl Iterator for QueryIter<'_> {
 /// rather than the `&Mmap` reference -- otherwise the borrow checker
 /// would tie the slice to this function's local borrow of `mmap`, not to
 /// the `Mmap` value itself once it's moved into the returned struct.
+/// The country at the centroid of a feature, given as an S2 cell id;
+/// 0 means the feature has no centroid.
+fn centroid_country(cell_id: u64) -> Option<Country> {
+    if cell_id == 0 {
+        return None;
+    }
+    let ll = s2::latlng::LatLng::from(CellID(cell_id));
+    countries::country(ll.lng.deg(), ll.lat.deg())
+}
+
+/// How `country` is stored: 0 for none, else 1 + its position in
+/// [countries::all].
+fn country_byte(country: Option<Country>) -> u8 {
+    let Some(country) = country else {
+        return 0;
+    };
+    match countries::all().binary_search(&country) {
+        std::result::Result::Ok(i) => u8::try_from(i + 1).expect("fewer than 255 countries"),
+        Err(_) => 0,
+    }
+}
+
 fn read_u64_array<'a>(
     mmap: &Mmap,
     offset: usize,
@@ -646,6 +722,9 @@ struct FeatureStorageWriter {
     blobs_path: PathBuf,
     blobs_writer: BufWriter<File>,
 
+    countries_path: PathBuf,
+    countries_writer: BufWriter<File>,
+
     entries_count: u64,
 }
 
@@ -664,6 +743,10 @@ impl FeatureStorageWriter {
         blobs_path.add_extension("blobs.tmp");
         let blobs_writer = BufWriter::with_capacity(32 * 1024, File::create(&blobs_path)?);
 
+        let mut countries_path = PathBuf::from(path);
+        countries_path.add_extension("countries.tmp");
+        let countries_writer = BufWriter::with_capacity(32 * 1024, File::create(&countries_path)?);
+
         Ok(FeatureStorageWriter {
             path: PathBuf::from(path),
             tmp_path,
@@ -672,16 +755,19 @@ impl FeatureStorageWriter {
             starts_writer,
             blobs_path,
             blobs_writer,
+            countries_path,
+            countries_writer,
             entries_count: 0,
         })
     }
 
     /// Appends `feature_bytes` (a `Feature.encode_to_vec()`), recording
-    /// `id` alongside it at the same position.
-    fn write(&mut self, id: u64, feature_bytes: &[u8]) -> Result<()> {
+    /// `id` and `country` alongside it at the same position.
+    fn write(&mut self, id: u64, country: Option<Country>, feature_bytes: &[u8]) -> Result<()> {
         let start: u64 = self.blobs_writer.stream_position()?;
         self.starts_writer.write_all(&start.to_le_bytes())?;
         self.blobs_writer.write_all(feature_bytes)?;
+        self.countries_writer.write_all(&[country_byte(country)])?;
 
         self.writer.write_all(&id.to_le_bytes())?;
         self.entries_count += 1;
@@ -716,12 +802,28 @@ impl FeatureStorageWriter {
         std::io::copy(&mut File::open(&self.blobs_path)?, &mut self.writer)?;
         remove_file(&self.blobs_path)?;
 
+        let countries_offset: u64 = self.writer.stream_position()?;
+        self.countries_writer.flush()?; // flush() returns errors
+        drop(self.countries_writer); // drop() does not return errors
+        std::io::copy(&mut File::open(&self.countries_path)?, &mut self.writer)?;
+        remove_file(&self.countries_path)?;
+
+        let codes_offset: u64 = self.writer.stream_position()?;
+        assert_eq!(codes_offset, countries_offset + self.entries_count);
+        let codes = countries::all();
+        for country in codes {
+            self.writer.write_all(&country.code_bytes())?;
+        }
+
         self.writer.seek(SeekFrom::Start(0))?;
         self.writer.write_all(FEATURES_FILE_SIGNATURE)?;
         self.writer.write_all(&self.entries_count.to_le_bytes())?;
         self.writer.write_all(&ids_offset.to_le_bytes())?;
         self.writer.write_all(&starts_offset.to_le_bytes())?;
         self.writer.write_all(&blobs_offset.to_le_bytes())?;
+        self.writer.write_all(&countries_offset.to_le_bytes())?;
+        self.writer.write_all(&codes_offset.to_le_bytes())?;
+        self.writer.write_all(&(codes.len() as u64).to_le_bytes())?;
         assert!(self.writer.stream_position()? <= HEADER_SIZE as u64);
 
         self.writer.seek(SeekFrom::End(0))?;
@@ -1021,6 +1123,52 @@ mod tests {
         std::fs::write(&bad, b"not the right file format at all, padded to 64+ bytes so it clears the header-size check")
             .expect("write");
         assert!(OsmFeatureIndex::open(&bad).is_err());
+    }
+
+    #[test]
+    fn country() {
+        let cell = |lng: f64, lat: f64| CellID::from(s2::latlng::LatLng::from_degrees(lat, lng)).0;
+        let (_dir, index) = build(vec![
+            fti(11, cell(8.5402, 47.3782), &[1], MatchMask::SHOP.0), // Zürich
+            fti(21, cell(-30.0, 40.0), &[2], MatchMask::SHOP.0),     // Atlantic
+            fti(31, 0, &[3], MatchMask::SHOP.0),                     // no centroid
+            fti(41, cell(121.5654, 25.0330), &[4], MatchMask::SHOP.0), // Taipei
+        ]);
+        let mut found: Vec<(u64, Option<String>)> = (0..index.len() as u32)
+            .map(LocalFeatureRef)
+            .map(|r| {
+                (
+                    index.feature_id(r),
+                    index.country(r).map(|c| c.code().to_string()),
+                )
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                (11, Some("CH".into())),
+                (21, None),
+                (31, None),
+                (41, Some("TW".into()))
+            ]
+        );
+    }
+
+    #[test]
+    fn exists_rejects_older_format() {
+        let dir = TempDir::new().expect("tempdir");
+        let out = dir.path().join("osm-features.index");
+        OsmFeatureIndex::create(
+            vec![fti(1, 1, &[1], MatchMask::SHOP.0)].into_iter(),
+            dir.path(),
+            &out,
+        )
+        .expect("create");
+        let mut bytes = std::fs::read(&out).expect("read");
+        bytes[..8].copy_from_slice(b"featstg0");
+        std::fs::write(&out, bytes).expect("write");
+        assert!(!OsmFeatureIndex::exists(&out));
     }
 
     #[test]

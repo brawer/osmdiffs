@@ -542,7 +542,8 @@ fn send_deletion_candidates(
                 strings: &osm.strings,
             };
             let location = || centroid(&candidate);
-            let Some(found) = deletion_reason(candidate.tags(), coverage, location) else {
+            let country = osm.index.country(r);
+            let Some(found) = deletion_reason(candidate.tags(), coverage, country, location) else {
                 return Ok(None);
             };
             // A feature without a location can't be put on a map, nor

@@ -508,13 +508,15 @@ fn swiss_uics(value: &str) -> impl Iterator<Item = &str> {
     split_values(value).filter(|code| code.starts_with("85"))
 }
 
-/// Why the unmatched OSM feature with `tags` is a candidate for
-/// deletion, or `None` if nothing suggests so. `location` gives the
-/// feature's (longitude, latitude); it is only called when needed,
-/// and at most once, since it means decoding the geometry.
+/// Why the unmatched OSM feature with `tags` in `country` is a
+/// candidate for deletion, or `None` if nothing suggests so.
+/// `location` gives the feature's (longitude, latitude); it is only
+/// called when needed, and at most once, since it means decoding the
+/// geometry.
 pub(super) fn deletion_reason<'a>(
     tags: impl Iterator<Item = (&'a str, &'a str)> + Clone,
     atp: &AtpCoverage,
+    country: Option<Country>,
     location: impl FnOnce() -> Option<(f64, f64)>,
 ) -> Option<Candidate> {
     let mut location = Some(location);
@@ -551,7 +553,7 @@ pub(super) fn deletion_reason<'a>(
             // stops that the register has since given their own
             // country's codes, such as `uic_ref=8581987` in Nauders,
             // Austria. Neither Swiss signal is about such a stop.
-            if in_swiss_home(country(lng, lat), lng, lat) {
+            if in_swiss_home(country, lng, lat) {
                 if has_swiss_id {
                     return Some(Candidate::swiss(Reason::SwissTransitId));
                 }
@@ -569,7 +571,6 @@ pub(super) fn deletion_reason<'a>(
 
     let brand = brand_tags(tags)?;
     let local_kind = brand.local_kind();
-    let country = locate().and_then(|(lng, lat)| country(lng, lat));
     let keys: Vec<LocalKey> = brand
         .ids
         .iter()
@@ -792,7 +793,8 @@ mod tests {
     }
 
     fn reason(atp: &AtpCoverage, tags: &[(&str, &str)], at: (f64, f64)) -> Option<Reason> {
-        deletion_reason(tags.iter().copied(), atp, || Some(at)).map(|c| c.reason)
+        deletion_reason(tags.iter().copied(), atp, country(at.0, at.1), || Some(at))
+            .map(|c| c.reason)
     }
 
     #[test]
@@ -1081,7 +1083,10 @@ mod tests {
 
         // Without a location.
         let tags = [("highway", "bus_stop")];
-        assert_eq!(deletion_reason(tags.iter().copied(), &atp, || None), None);
+        assert_eq!(
+            deletion_reason(tags.iter().copied(), &atp, None, || None),
+            None
+        );
 
         // ATP lacks the Swiss register this week.
         assert_eq!(reason(&coverage(false), &tags, ZURICH_NORTH), None);
@@ -1190,7 +1195,7 @@ mod tests {
         assert_eq!(reason(&atp, &tags, SINGEN), Some(Reason::Wikidata));
         // Without a location, nothing says where the stop is.
         assert_eq!(
-            deletion_reason(old_code.iter().copied(), &atp, || None),
+            deletion_reason(old_code.iter().copied(), &atp, None, || None),
             None
         );
     }
@@ -1199,7 +1204,13 @@ mod tests {
     fn test_candidate_keys() {
         let atp = coverage(false);
         let tags = [("shop", "supermarket"), ("brand:wikidata", "Q9;Q1")];
-        let c = deletion_reason(tags.iter().copied(), &atp, || Some(SINGEN)).expect("candidate");
+        let c = deletion_reason(
+            tags.iter().copied(),
+            &atp,
+            country(SINGEN.0, SINGEN.1),
+            || Some(SINGEN),
+        )
+        .expect("candidate");
         assert_eq!(c.reason, Reason::Wikidata);
         // Only Q1 is covered by ATP, so only Q1 counts locally.
         assert_eq!(c.keys, vec![LocalKey::wikidata(1, None)]);

@@ -5,7 +5,7 @@
 //! crate, whose boundaries are derived from OpenStreetMap
 //! (© OpenStreetMap contributors, ODbL) via JOSM's `boundaries.osm`.
 
-use country_boundaries::{BOUNDARIES_ODBL_360X180, CountryBoundaries, LatLon};
+use country_boundaries::{BOUNDARIES_ODBL_360X180, BoundingBox, CountryBoundaries, LatLon};
 use std::sync::LazyLock;
 
 /// The version of the `country-boundaries` crate, which ships the
@@ -25,7 +25,7 @@ static BOUNDARIES: LazyLock<CountryBoundaries> = LazyLock::new(|| {
 });
 
 /// A country, by its two-letter ISO 3166-1 code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Country([u8; 2]);
 
 impl Country {
@@ -40,6 +40,34 @@ impl Country {
     pub fn code(&self) -> &str {
         std::str::from_utf8(&self.0).expect("ASCII")
     }
+
+    /// The two-letter code as bytes, such as `*b"CH"`.
+    pub fn code_bytes(&self) -> [u8; 2] {
+        self.0
+    }
+
+    /// The country with the two-letter code `code`, if it is one that
+    /// [country] can return.
+    pub fn from_code(code: [u8; 2]) -> Option<Country> {
+        all().binary_search(&Country(code)).ok().map(|i| all()[i])
+    }
+}
+
+static ALL: LazyLock<Vec<Country>> = LazyLock::new(|| {
+    let world = BoundingBox::new(-90.0, -180.0, 90.0, 179.999_999).expect("valid bounds");
+    let mut all: Vec<Country> = BOUNDARIES
+        .intersecting_ids(world)
+        .into_iter()
+        .filter_map(|id| <[u8; 2]>::try_from(id.as_bytes()).ok())
+        .map(Country)
+        .collect();
+    all.sort();
+    all
+});
+
+/// Every country that [country] can return, sorted by code.
+pub fn all() -> &'static [Country] {
+    &ALL
 }
 
 /// The country that (`lng`, `lat`), in degrees, lies in, or `None` if
@@ -93,5 +121,28 @@ mod tests {
 
         assert_eq!(code(-30.0, 40.0), None); // Atlantic
         assert_eq!(code(0.0, 91.0), None); // invalid
+    }
+
+    #[test]
+    fn test_all() {
+        let all = all();
+        // Fits into a byte, with 0 for none; see OsmFeatureIndex. As of
+        // country-boundaries 1.2.0, there are exactly 255. If a newer
+        // version has more, OsmFeatureIndex needs two bytes per feature.
+        assert!(all.len() <= 255, "{}", all.len());
+        assert!(all.len() > 190, "{}", all.len());
+        assert!(all.windows(2).all(|w| w[0] < w[1]));
+        assert!(all.contains(&Country::SWITZERLAND));
+        assert!(all.contains(&Country(*b"HK")));
+        assert_eq!(Country::from_code(*b"CH"), Some(Country::SWITZERLAND));
+        assert_eq!(Country::from_code(*b"ZZ"), None);
+        // Every country found on a grid over the world is in `all`.
+        for lat in (-89..90).step_by(1) {
+            for lng in (-179..180).step_by(1) {
+                if let Some(c) = country(lng as f64 + 0.5, lat as f64 + 0.5) {
+                    assert!(all.binary_search(&c).is_ok(), "{c:?}");
+                }
+            }
+        }
     }
 }

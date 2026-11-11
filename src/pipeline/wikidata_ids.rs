@@ -27,9 +27,7 @@ use crate::make_progress_bar;
 use crate::matchers::{OsmCandidate, parse_wikidata_ids};
 use crate::places::PlaceReader;
 use crate::tables::{OsmFeatures, U64Set};
-use crate::utils::countries::country;
 use anyhow::Result;
-use geo::Centroid;
 use indicatif::MultiProgress;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -141,8 +139,8 @@ fn collect_from_atp(atp: &Path) -> Result<(Vec<u64>, BrandTotals)> {
 /// The Wikidata IDs in `osm`'s brand/operator/network tags, with
 /// duplicates, and their [BrandTotals]. Visits every feature in the
 /// index, in parallel; tag keys are compared as string pool indices, so
-/// only features with matching tags get their tags looked up as strings
-/// and their geometry decoded, for the country.
+/// only features with matching tags get their tags looked up as
+/// strings.
 fn collect_from_osm(
     osm: &OsmFeatures,
     progress: &MultiProgress,
@@ -185,12 +183,7 @@ fn collect_from_osm(
                         feature: &feature,
                         strings: &osm.strings,
                     };
-                    let country = candidate
-                        .geometry()
-                        .ok()
-                        .and_then(|g| g.centroid())
-                        .and_then(|c| country(c.x(), c.y()));
-                    totals.add(Source::Osm, candidate.tags(), country);
+                    totals.add(Source::Osm, candidate.tags(), osm.index.country(r));
                 }
                 Ok::<_, anyhow::Error>((ids, totals))
             },
