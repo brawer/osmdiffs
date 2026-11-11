@@ -177,3 +177,38 @@ candidates, so that is an upper bound: at 41 bytes per slot, at most
 about 90 MB. The positions should take 50 to 100 MB on the planet, and
 they are freed once the first matching pass ends. The deletion pass
 takes under 0.6 s in every eval region, about 10% more than before.
+
+### Production run of 2026-11-10
+
+v0.8.13 on the OSM planet of 2026-11-02 (`2026-11-02T00:59:53Z`) and
+the ATP run of 2026-10-31 (`2026-10-31-13-32-34`), with 6 CPUs and an
+8 GiB cgroup limit; see
+[#907](https://github.com/brawer/osmdiffs/issues/907).
+
+| log line | field | estimate | measured |
+|---|---|---:|---:|
+| `conflate.coverage: done` | `spacing_bytes` | 50–100 MB | 47.3 MB |
+| | `coverage_bytes` | | 12.6 MB |
+| | `radii` | | 54,787 |
+| `conflate.deletion_candidates: done` | `local_coverage_bytes` | ≤ 90 MB | 37.6 MB |
+| | `local_coverage_entries` | ≤ 1.2 million | 685,201 |
+| `conflate.match: done` | `exclusive_bytes` | | 189.2 MB |
+
+All of them fit in what the process already used. During
+`conflate.match`, the sampled `rss_anon_bytes` peaked at 1.02 GB,
+against 0.92 GB in the v0.8.12 run on the same inputs; at the end of
+`conflate`, it was 138 MB, against 202 MB. Most of the resident memory
+is file-backed (the OSM index), so `rss_peak_bytes` stayed at 8.46 GB
+in both runs. The progress samples stop when the first matching pass
+ends, so the log has no sample while the exclusive candidates and the
+local counts are both alive.
+
+The deletion pass took 438 s on the planet, against 400 s for v0.8.12
+on the same inputs. But the whole run was slower, including steps this
+change doesn't touch (`import_osm.prune` 2,505 s against 1,938 s), so
+the machine probably accounts for most of that.
+
+`brand:wikidata` candidates (`wikidata` in the log line) came out at
+151,919, against the estimate of about 129,000; by name, 11,056.
+`thin_local_evidence` was 13,338, or 8.2% of the 162,975 kept
+candidates by brand or name.
