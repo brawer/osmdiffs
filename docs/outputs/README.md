@@ -12,6 +12,9 @@ pipeline’s code, not for people using its output.)
 - [`CONFLATED_TILES.md`](CONFLATED_TILES.md) — `conflated.pmtiles`,
   visualizing `conflated.parquet`, matched or not, useful for
   debugging.
+- [`SPIDER_STATS.md`](SPIDER_STATS.md) — `spider-stats.parquet`, what
+  became of each AllThePlaces spider's features, for a dashboard;
+  useful for debugging.
 
 ## Downloading the current output
 
@@ -62,7 +65,9 @@ have `jq` installed there.
 
 The `conflated` resource is [`conflated.parquet`](CONFLATED_PARQUET.md);
 `bom` is its [CycloneDX](CONFLATED_PARQUET.md#data-provenance)
-provenance BOM as a standalone file. The two `*-tiles` resources are
+provenance BOM as a standalone file. `spider-stats` is
+[`spider-stats.parquet`](SPIDER_STATS.md), a debugging aid like the
+tiles. The two `*-tiles` resources are
 PMTiles archives you can open right in the browser via
 [`pmtiles.io`](https://pmtiles.io) (append
 `#url=<the-url>&inspectFeatures=true`) — but they’re a debugging aid,

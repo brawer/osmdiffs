@@ -45,6 +45,7 @@ mod osm_views;
 mod packaged;
 mod provenance;
 mod qrank;
+mod spider_stats;
 
 // Only these re-exported at the pipeline level (rather than making all
 // of `atp`/`osm` pub(crate)): `provenance` needs them to assemble this
@@ -343,6 +344,13 @@ fn run_pipeline_steps(
     })?;
     published.push(run_step("upload_conflated_tiles", || {
         upload::upload_conflated_tiles(&conflated_tiles_out, &date, progress)
+    })?);
+
+    let spider_stats = run_step("compute_spider_stats", || {
+        spider_stats::compute_spider_stats(&conflated, progress, workdir)
+    })?;
+    published.push(run_step("upload_spider_stats", || {
+        upload::upload_spider_stats(&spider_stats, &date, progress)
     })?);
 
     let edits = run_step("suggest_edits", || {
