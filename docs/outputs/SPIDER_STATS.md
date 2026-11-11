@@ -47,7 +47,16 @@ same                     UINT64   non-null — rows with match.relation = "same"
 located_in               UINT64   non-null — rows with match.relation = "located_in"
 missing_in_osm           UINT64   non-null — rows with match.relation = "missing_in_osm"
 shared_osm_features      UINT64   non-null — same rows whose OSM feature another feature of the spider also matched
+shared_positions         UINT64   non-null — features at the same position as another feature of the spider
+offset_east_m            FLOAT    nullable — median of how far same rows lie east of their OSM feature
+offset_north_m           FLOAT    nullable — ... and north
 distance_m               LIST<UINT64> non-null — histogram of match distances, see below
+missing_no_candidate     UINT64   non-null — missing_in_osm: no OSM feature of the kind close enough
+missing_rejected         UINT64   non-null — missing_in_osm: the matcher found no evidence for any
+missing_taken            UINT64   non-null — missing_in_osm: another feature of the spider took them
+rejected_distance_m      LIST<UINT64> non-null — histogram of the distance to the nearest rejected one
+chance_sampled           UINT64   non-null — features moved 2 km to find chance pairs
+chance_matched           UINT64   non-null — ... and how many of them still matched
 opening_hours_top_share  FLOAT    nullable — share of features with the most common opening_hours
 rules                    LIST<STRUCT> non-null
   rule                   UTF8     non-null — match.evidence.rule
@@ -68,6 +77,8 @@ brands                   LIST<STRUCT> non-null
   missing_in_osm         UINT64   non-null
   osm_features           UINT64   nullable — OSM features with this ID in this country
   deletion_candidates    UINT64   nullable — deletion candidates with this ID in this country
+  offset_east_m          FLOAT    nullable — like offset_east_m above, for this brand and country
+  offset_north_m         FLOAT    nullable
 ```
 
 ### What became of the features
@@ -75,8 +86,9 @@ brands                   LIST<STRUCT> non-null
 The counts add up like this:
 
 ```
-dump_features = not_for_osm + invalid + no_matcher + rows
-rows          = same + located_in + missing_in_osm
+dump_features  = not_for_osm + invalid + no_matcher + rows
+rows           = same + located_in + missing_in_osm
+missing_in_osm = missing_no_candidate + missing_rejected + missing_taken
 ```
 
 `atp_features` and `atp_errors` come from AllThePlaces' own statistics
@@ -111,10 +123,56 @@ also matched another feature of the same spider. A high count hints at
 duplicates in the spider, or at OpenStreetMap having one feature where
 there are several.
 
+`shared_positions` counts features of the spider at exactly the same
+position as another one of its features. Some are right, such as the
+departments of one store, but many hint at a spider that puts features
+it can't place at a default position.
+
+`offset_east_m` and `offset_north_m` are the medians of how far the
+AllThePlaces feature of a `same` row lies east and north of its
+OpenStreetMap feature, from centroid to centroid, in meters (negative
+for west and south). Single features scatter in all directions, so
+the medians stay near zero, unless a spider shifts all its features
+the same way. For example, `c_and_a` once placed all its stores
+about 150 m west of where they are. The same medians per brand and
+country show a shift in only one country.
+
 `opening_hours_top_share` is the share of the spider's features with
 `opening_hours` that have its most common value. Near 1 for a large
 spider, it suggests that the spider writes the same hours everywhere,
 such as those of its head office.
+
+### Why features are missing
+
+The `missing_*` columns say why the matcher found nothing for a
+feature that ends up `missing_in_osm`:
+
+- `missing_no_candidate`: OpenStreetMap has no feature of the same kind
+  (such as a shop, for a shop) within the distance the matcher looks.
+  Either OpenStreetMap lacks it, or the spider's coordinates are far
+  off.
+- `missing_rejected`: there are such features, but the matcher found no
+  evidence that any is the same, such as the same brand, phone number
+  or name. `rejected_distance_m` is a histogram of the distance to the
+  nearest of them, with the bins of `distance_m`. Many rejected
+  features close by hint at a matcher that misses some evidence, or at
+  tags that differ between the spider and OpenStreetMap.
+- `missing_taken`: the matcher accepted some, but another feature of the
+  same spider took them first; see
+  [`CONFLATED_PARQUET.md`](CONFLATED_PARQUET.md#match).
+
+### Chance pairs
+
+To see how many matches may come from chance, conflate moves about
+100 features of each spider (all of a smaller spider) 2 km in a random
+direction and matches them again. `chance_matched` of
+`chance_sampled` still find a match, which can only be wrong. Their
+share estimates the share of wrong matches among the spider's matches,
+and overstates it, since in the real matching a true partner usually
+takes the feature first. The sample is chosen by hashing, so it stays
+the same from run to run on the same input. See
+[the notes on infrastructure matching](../notes/2026-11-05-infrastructure-matching.md)
+for where this comes from.
 
 ### How far tags agree
 

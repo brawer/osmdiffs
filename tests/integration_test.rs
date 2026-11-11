@@ -213,6 +213,32 @@ fn assert_spider_stats(path: &Path) -> Result<()> {
     // Two Winterthur features have no matcher, so no conflated row.
     assert_eq!(numbers("no_matcher"), [0, 0, 0, 0, 0, 2]);
 
+    // Why features are missing in OSM adds up to how many are.
+    let missing = numbers("missing_in_osm");
+    let (no_candidate, rejected, taken) = (
+        numbers("missing_no_candidate"),
+        numbers("missing_rejected"),
+        numbers("missing_taken"),
+    );
+    for i in 0..spiders.len() {
+        assert_eq!(no_candidate[i] + rejected[i] + taken[i], missing[i]);
+    }
+    // One Misenso shop has a shop of the same kind right next to it in
+    // OSM, which the matcher rejected.
+    assert_eq!(rejected, [0, 0, 0, 1, 0, 0]);
+    // Small spiders move all their features for chance pairs.
+    assert_eq!(numbers("chance_sampled"), [1, 0, 1, 3, 1, 2]);
+
+    let offset = column("offset_east_m");
+    let offset = offset
+        .as_any()
+        .downcast_ref::<arrow::array::Float32Array>()
+        .unwrap();
+    let same = numbers("same");
+    for (i, same) in same.iter().enumerate() {
+        assert_eq!(offset.is_valid(i), *same > 0, "offset of {}", spiders[i]);
+    }
+
     // denner_ch matched 13.8 m away: bin 2, from 10 to 25 meters.
     let distance = column("distance_m");
     let distance = distance.as_any().downcast_ref::<ListArray>().unwrap();

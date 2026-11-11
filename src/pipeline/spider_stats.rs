@@ -16,6 +16,7 @@
 
 use super::atp::{run_stats, spider_counts};
 use super::brand_totals;
+use super::conflate::diagnostics::{self, SpiderDiagnostics};
 use super::conflate::evidence::{compared_tags, has_compared_tag};
 use super::wikidata_ids::WIKIDATA_KEYS;
 use crate::make_progress_bar;
@@ -39,6 +40,7 @@ use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use wkb::reader::read_wkb;
@@ -53,7 +55,8 @@ const ROWS_PER_GROUP: usize = 64;
 
 /// Upper bounds, in meters, of the bins of the `distance_m` histogram;
 /// the last bin has no upper bound.
-pub(super) const DISTANCE_BINS_M: [f32; 7] = [1.0, 10.0, 25.0, 50.0, 100.0, 250.0, 1000.0];
+pub(in crate::pipeline) const DISTANCE_BINS_M: [f32; 7] =
+    [1.0, 10.0, 25.0, 50.0, 100.0, 250.0, 1000.0];
 
 /// Computes the stats of every spider from `conflated` and the side
 /// files in `workdir`, and writes them to `workdir/spider-stats.parquet`,
@@ -76,6 +79,7 @@ pub fn compute_spider_stats(
     let run_stats = run_stats::read(workdir)?.unwrap_or_default();
     let osm_brands = brand_totals::read_features(workdir)?;
     let names = brand_totals::read_names(workdir)?;
+    let diagnostics = diagnostics::read(&diagnostics::path(workdir))?;
 
     let stats = scan_conflated(conflated, progress)?;
 
@@ -89,6 +93,7 @@ pub fn compute_spider_stats(
             spider,
             counts: counts.get(spider),
             run_stats: run_stats.get(spider),
+            diagnostics: diagnostics.get(spider),
             stats: stats.spiders.get(spider).unwrap_or(&empty),
         })
         .collect();
@@ -128,6 +133,11 @@ struct RowInfo {
     opening_hours: Option<String>,
     /// The OSM feature of a `same` row, as `id * 4 + type`.
     osm_ref: Option<u64>,
+    /// For a `same` row, how far the ATP feature lies east and north of
+    /// the OSM one, in meters, from centroid to centroid.
+    offset: Option<(f32, f32)>,
+    /// Hash of the ATP geometry, to find features at the same position.
+    position: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -157,6 +167,7 @@ struct Brand {
     /// The main categories of the ATP features, so that the OSM total
     /// counts features of the same kinds only.
     categories: HashSet<String>,
+    offsets: Vec<(f32, f32)>,
 }
 
 /// What we count for one spider from `conflated.parquet`.
@@ -173,6 +184,8 @@ struct Spider {
     tags: Vec<[u64; 4]>,
     opening_hours: HashMap<String, u64>,
     osm_refs: HashMap<u64, u64>,
+    offsets: Vec<(f32, f32)>,
+    positions: HashMap<u64, u64>,
     /// By country and Wikidata ID; 0 for features without one.
     brands: HashMap<(Option<Country>, u64), Brand>,
 }
@@ -213,6 +226,12 @@ impl Spider {
         if let Some(r) = row.osm_ref {
             *self.osm_refs.entry(r).or_default() += 1;
         }
+        if let Some(offset) = row.offset {
+            self.offsets.push(offset);
+        }
+        if let Some(p) = row.position {
+            *self.positions.entry(p).or_default() += 1;
+        }
         let ids = if row.wikidata.is_empty() {
             vec![0]
         } else {
@@ -232,6 +251,9 @@ impl Spider {
             {
                 brand.categories.insert(c.clone());
             }
+            if let Some(offset) = row.offset {
+                brand.offsets.push(offset);
+            }
         }
     }
 
@@ -241,6 +263,12 @@ impl Spider {
         self.osm_refs.values().filter(|&&n| n > 1).sum()
     }
 
+    /// ATP features at the same position as another feature of this
+    /// spider.
+    fn shared_positions(&self) -> u64 {
+        self.positions.values().filter(|&&n| n > 1).sum()
+    }
+
     /// The share of ATP features with `opening_hours` that have the
     /// most common value, or `None` if none have any.
     fn opening_hours_top_share(&self) -> Option<f32> {
@@ -248,6 +276,23 @@ impl Spider {
         let top = self.opening_hours.values().max()?;
         Some(*top as f32 / total as f32)
     }
+}
+
+/// The median of the east and north components of `offsets`, each
+/// on its own, or `None` if there are none.
+fn median_offset(offsets: &[(f32, f32)]) -> Option<(f32, f32)> {
+    if offsets.is_empty() {
+        return None;
+    }
+    let median = |mut values: Vec<f32>| {
+        let mid = values.len() / 2;
+        let (_, m, _) = values.select_nth_unstable_by(mid, f32::total_cmp);
+        *m
+    };
+    Some((
+        median(offsets.iter().map(|o| o.0).collect()),
+        median(offsets.iter().map(|o| o.1).collect()),
+    ))
 }
 
 #[derive(Debug, Default)]
@@ -335,6 +380,11 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
     let atp_tag_refs = || atp_tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
     let spider = get_string(get_struct(atp, "fetched")?, "spider", row)?;
     let geometry = get_binary(batch, "atp_geometry", row)?;
+    let position = {
+        let mut hasher = std::hash::DefaultHasher::new();
+        geometry.hash(&mut hasher);
+        hasher.finish()
+    };
 
     let mut tags = Vec::new();
     if relation == Relation::Same {
@@ -352,15 +402,19 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
             tags.push((i, state));
         }
     }
-    let osm_ref = if relation == Relation::Same {
+    let (osm_ref, offset) = if relation == Relation::Same {
         let kind = match get_string(osm, "type", row)?.as_str() {
             "node" => 1,
             "way" => 2,
             _ => 3,
         };
-        Some(get_u64(osm, "id", row)? * 4 + kind)
+        let osm_geometry = get_binary(batch, "osm_geometry", row)?;
+        (
+            Some(get_u64(osm, "id", row)? * 4 + kind),
+            wkb_offset(&geometry, &osm_geometry),
+        )
     } else {
-        None
+        (None, None)
     };
     Ok(RowInfo {
         spider: Some(spider),
@@ -375,7 +429,20 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
             .find(|(k, _)| *k == "opening_hours")
             .map(|(_, v)| v.to_string()),
         osm_ref,
+        offset,
+        position: Some(position),
     })
+}
+
+/// How far the centroid of `atp` lies east and north of the centroid
+/// of `osm`, in meters.
+fn wkb_offset(atp: &[u8], osm: &[u8]) -> Option<(f32, f32)> {
+    let a = read_wkb(atp).ok()?.to_geometry().centroid()?;
+    let o = read_wkb(osm).ok()?.to_geometry().centroid()?;
+    const METERS_PER_DEGREE: f64 = 111_320.0;
+    let east = (a.x() - o.x()) * METERS_PER_DEGREE * o.y().to_radians().cos();
+    let north = (a.y() - o.y()) * METERS_PER_DEGREE;
+    Some((east as f32, north as f32))
 }
 
 /// The distinct brand, operator and network Wikidata IDs in `tags`.
@@ -441,6 +508,7 @@ struct Row<'a> {
     spider: &'a str,
     counts: Option<&'a spider_counts::SpiderCounts>,
     run_stats: Option<&'a run_stats::SpiderRunStats>,
+    diagnostics: Option<&'a SpiderDiagnostics>,
     stats: &'a Spider,
 }
 
@@ -466,6 +534,8 @@ fn brand_fields() -> Fields {
         u64_field("missing_in_osm"),
         Field::new("osm_features", DataType::UInt64, true),
         Field::new("deletion_candidates", DataType::UInt64, true),
+        Field::new("offset_east_m", DataType::Float32, true),
+        Field::new("offset_north_m", DataType::Float32, true),
     ])
 }
 
@@ -484,6 +554,14 @@ fn rule_fields() -> Fields {
         Field::new("rule", DataType::Utf8, false),
         u64_field("rows"),
     ])
+}
+
+fn histogram_field(name: &str) -> Field {
+    Field::new(
+        name,
+        DataType::List(Arc::new(Field::new("item", DataType::UInt64, false))),
+        false,
+    )
 }
 
 fn list_of(fields: Fields) -> DataType {
@@ -510,11 +588,16 @@ pub(super) fn schema() -> Schema {
         u64_field("located_in"),
         u64_field("missing_in_osm"),
         u64_field("shared_osm_features"),
-        Field::new(
-            "distance_m",
-            DataType::List(Arc::new(Field::new("item", DataType::UInt64, false))),
-            false,
-        ),
+        u64_field("shared_positions"),
+        Field::new("offset_east_m", DataType::Float32, true),
+        Field::new("offset_north_m", DataType::Float32, true),
+        histogram_field("distance_m"),
+        u64_field("missing_no_candidate"),
+        u64_field("missing_rejected"),
+        u64_field("missing_taken"),
+        histogram_field("rejected_distance_m"),
+        u64_field("chance_sampled"),
+        u64_field("chance_matched"),
         Field::new("opening_hours_top_share", DataType::Float32, true),
         Field::new("rules", list_of(rule_fields()), false),
         Field::new("tags", list_of(tag_fields()), false),
@@ -565,11 +648,23 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
     let mut located_in = UInt64Builder::new();
     let mut missing_in_osm = UInt64Builder::new();
     let mut shared = UInt64Builder::new();
-    let mut distance = ListBuilder::new(UInt64Builder::new()).with_field(Arc::new(Field::new(
-        "item",
-        DataType::UInt64,
-        false,
-    )));
+    let mut shared_positions = UInt64Builder::new();
+    let mut offset_east = Float32Builder::new();
+    let mut offset_north = Float32Builder::new();
+    let histogram = || {
+        ListBuilder::new(UInt64Builder::new()).with_field(Arc::new(Field::new(
+            "item",
+            DataType::UInt64,
+            false,
+        )))
+    };
+    let mut distance = histogram();
+    let mut no_candidate = UInt64Builder::new();
+    let mut rejected = UInt64Builder::new();
+    let mut taken = UInt64Builder::new();
+    let mut rejected_distance = histogram();
+    let mut chance_sampled = UInt64Builder::new();
+    let mut chance_matched = UInt64Builder::new();
     let mut oh_share = Float32Builder::new();
     let struct_list = |fields: Fields| {
         ListBuilder::new(StructBuilder::from_fields(fields.clone(), 0)).with_field(Arc::new(
@@ -601,8 +696,28 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         located_in.append_value(s.located_in);
         missing_in_osm.append_value(s.missing_in_osm);
         shared.append_value(s.shared_osm_features());
+        shared_positions.append_value(s.shared_positions());
+        let offset = median_offset(&s.offsets);
+        offset_east.append_option(offset.map(|o| o.0));
+        offset_north.append_option(offset.map(|o| o.1));
         distance.values().append_slice(&s.distance_m);
         distance.append(true);
+        let d = row
+            .diagnostics
+            .cloned()
+            .unwrap_or_else(|| SpiderDiagnostics {
+                rejected_distance_m: vec![0; DISTANCE_BINS_M.len() + 1],
+                ..Default::default()
+            });
+        no_candidate.append_value(d.no_candidate);
+        rejected.append_value(d.rejected);
+        taken.append_value(d.taken);
+        rejected_distance
+            .values()
+            .append_slice(&d.rejected_distance_m);
+        rejected_distance.append(true);
+        chance_sampled.append_value(d.chance_sampled);
+        chance_matched.append_value(d.chance_matched);
         oh_share.append_option(s.opening_hours_top_share());
 
         let mut rule_counts: Vec<(&String, &u64)> = s.rules.iter().collect();
@@ -685,6 +800,13 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
             b.field_builder::<UInt64Builder>(8)
                 .unwrap()
                 .append_option(deletions);
+            let offset = median_offset(&brand.offsets);
+            b.field_builder::<Float32Builder>(9)
+                .unwrap()
+                .append_option(offset.map(|o| o.0));
+            b.field_builder::<Float32Builder>(10)
+                .unwrap()
+                .append_option(offset.map(|o| o.1));
             b.append(true);
         }
         brands.append(true);
@@ -705,7 +827,16 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         Arc::new(located_in.finish()),
         Arc::new(missing_in_osm.finish()),
         Arc::new(shared.finish()),
+        Arc::new(shared_positions.finish()),
+        Arc::new(offset_east.finish()),
+        Arc::new(offset_north.finish()),
         Arc::new(distance.finish()),
+        Arc::new(no_candidate.finish()),
+        Arc::new(rejected.finish()),
+        Arc::new(taken.finish()),
+        Arc::new(rejected_distance.finish()),
+        Arc::new(chance_sampled.finish()),
+        Arc::new(chance_matched.finish()),
         Arc::new(oh_share.finish()),
         Arc::new(rules.finish()),
         Arc::new(tags.finish()),
@@ -731,6 +862,8 @@ mod tests {
             tags: vec![(0, TagState::Agreeing), (1, TagState::Differing)],
             opening_hours: Some("Mo-Sa 08:00-20:00".into()),
             osm_ref: Some(osm_ref),
+            offset: Some((distance_m, -1.0)),
+            position: Some(osm_ref),
         }
     }
 
@@ -753,6 +886,9 @@ mod tests {
         assert_eq!(s.tags[0], [4, 4, 0, 0]);
         assert_eq!(s.tags[1], [4, 0, 4, 0]);
         assert_eq!(s.shared_osm_features(), 2);
+        assert_eq!(s.shared_positions(), 2);
+        assert_eq!(median_offset(&s.offsets), Some((24.9, -1.0)));
+        assert_eq!(median_offset(&[]), None);
         assert_eq!(s.opening_hours_top_share(), Some(0.8));
         let ch = Country::from_code(*b"CH");
         assert_eq!(s.brands[&(ch, 379911)].same, 4);
@@ -794,12 +930,14 @@ mod tests {
                 spider: "denner",
                 counts: Some(&counts),
                 run_stats: None,
+                diagnostics: None,
                 stats: &stats,
             },
             Row {
                 spider: "unknown",
                 counts: None,
                 run_stats: None,
+                diagnostics: None,
                 stats: &empty,
             },
         ];
@@ -833,6 +971,7 @@ mod tests {
         assert_eq!(u64s("no_matcher").value(0), 1);
         assert!(u64s("no_matcher").is_null(1));
         assert!(u64s("atp_features").is_null(0));
+        assert_eq!(u64s("missing_taken").value(1), 0);
 
         let brands = batch.column_by_name("brands").unwrap();
         let brands = brands.as_any().downcast_ref::<ListArray>().unwrap();
