@@ -73,7 +73,11 @@ on nearest `part: "atp"` feature of the same `spider`.
 ### z13–16: the detail
 
 **Full-tag features**, where a tile covers a few km and the tag
-payload costs nothing.
+payload costs nothing. Every zoom from z13 to z16 shows every feature:
+there is no random dot-dropping (`-r 1`), and only
+`--drop-densest-as-needed` would thin out a tile that gets too large.
+For the 2026-11-02 planet, the largest z13 tile then comes to about
+240 KB gzipped (estimated in #916), well below tippecanoe's 500 KB limit.
 
 - A **`matched`** row yields up to three features:
   - the AllThePlaces point (`part: "atp"`),

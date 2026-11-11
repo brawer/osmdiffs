@@ -139,19 +139,19 @@ fn make_tippecanoe_command(
             cmd.arg(format!("-Z{min}")).arg(format!("-z{max}"));
         }
     }
-    match importance_attr {
-        // Importance decides what coarse zooms show, so no additional
-        // random dot-dropping; `--drop-densest-as-needed` still thins
-        // out any tile that would otherwise be too large.
-        Some(attr) => {
-            cmd.arg("-r")
-                .arg("1")
-                .arg("-j")
-                .arg(importance_filter(attr));
-        }
-        None => {
-            cmd.arg("-r").arg("1.2");
-        }
+    // No random dot-dropping (`-r 1`): with an importance filter, that
+    // filter decides what coarse zooms show; without one, every zoom
+    // shows every point. Tippecanoe's default rate of 2.5 (or any rate
+    // above 1) drops a share of points at each zoom below the base
+    // zoom, which in the `conflated.pmtiles` detail pass (`-Z13 -z16`)
+    // hid a third of the points at z14, leaving `link` lines without
+    // their host or ATP point
+    // ([#916](https://github.com/brawer/osmdiffs/issues/916)).
+    // `--drop-densest-as-needed` still thins out any tile that would
+    // otherwise be too large.
+    cmd.arg("-r").arg("1");
+    if let Some(attr) = importance_attr {
+        cmd.arg("-j").arg(importance_filter(attr));
     }
     cmd.arg("--drop-densest-as-needed");
     for layer in layers.iter() {
@@ -319,7 +319,7 @@ mod tests {
                 "-zg",
                 "--extend-zooms-if-still-dropping",
                 "-r",
-                "1.2",
+                "1",
                 "--drop-densest-as-needed",
                 &shop_layer_arg,
                 "--output",
@@ -359,6 +359,11 @@ mod tests {
                 .any(|a| a == "-zg" || a == "--extend-zooms-if-still-dropping"),
             "bounded zoom range should not also pass auto-zoom flags: {args:?}"
         );
+        // The detail pass of conflated.pmtiles must keep every point
+        // at every zoom (#916).
+        let r = args.iter().position(|a| a == "-r").expect("-r");
+        assert_eq!(args[r + 1], "1");
+        assert!(!args.iter().any(|a| a == "-j"), "no filter: {args:?}");
     }
 
     #[test]
