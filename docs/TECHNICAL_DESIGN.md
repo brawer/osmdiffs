@@ -211,6 +211,8 @@ graph TD
     ATP_PARQUET --> COLLECT_WIKI(collect_wikidata_ids)
     OSM_INDEX --> COLLECT_WIKI
     COLLECT_WIKI --> WIKIDATA[wikidata-ids]
+    COLLECT_WIKI --> OSM_BRANDS[osm-brands.tsv]
+    COLLECT_WIKI --> BRAND_NAMES[brand-names.tsv]
     WIKIDATA --> QRANK_QUANTILES(compute_qrank_quantiles)
     QRANK_CSV --> QRANK_QUANTILES
     QRANK_QUANTILES --> QRANK_Q[qrank-quantiles]
@@ -395,6 +397,14 @@ fetch away.
   ([#713](https://github.com/brawer/osmdiffs/issues/713)). Plain
   `wikidata` is left out, since on OSM it mostly points at cities,
   rivers and the like. Visits every feature in `osm-features.index`.
+  On the side, it writes `osm-brands.tsv`, the number of OSM features
+  per Wikidata ID, country and main category (such as
+  `shop=supermarket`), and `brand-names.tsv`, one `brand`,
+  `operator` or `network` name per ID and key: the most common one in
+  Latin script, or else the most common one, from OSM and ATP
+  ([`brand_totals.rs`](../src/pipeline/brand_totals.rs)). The spider
+  stats compare ATP with the first, and show the second so that
+  readers needn't look up Wikidata IDs.
 - **`compute_qrank_quantiles`**
   ([`src/pipeline/qrank/mod.rs`](../src/pipeline/qrank/mod.rs)) — gives
   each ID in `wikidata-ids` that has pageviews its QRank quantile among

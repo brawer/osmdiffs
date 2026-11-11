@@ -17,12 +17,19 @@
 //! point at cities, rivers, churches and the like rather than at
 //! brands. So are other `*:wikidata` keys such as `species:wikidata` or
 //! `trough:material:wikidata`, which are about something else entirely.
+//!
+//! On the side, it counts the OSM features of each ID per country and
+//! main category, and the names that features give it; see
+//! [super::brand_totals].
 
+use super::brand_totals::{self, BrandTotals, Source};
 use crate::make_progress_bar;
-use crate::matchers::parse_wikidata_ids;
+use crate::matchers::{OsmCandidate, parse_wikidata_ids};
 use crate::places::PlaceReader;
 use crate::tables::{OsmFeatures, U64Set};
+use crate::utils::countries::country;
 use anyhow::Result;
+use geo::Centroid;
 use indicatif::MultiProgress;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -43,7 +50,8 @@ pub(super) fn is_wikidata_key(key: &str) -> bool {
 
 /// Collects brand/operator/network Wikidata IDs from both `atp`
 /// (`alltheplaces.parquet`) and `osm`, and writes their union to
-/// `workdir/wikidata-ids` as a [U64Set].
+/// `workdir/wikidata-ids` as a [U64Set], and their [BrandTotals] next
+/// to it.
 pub fn collect_wikidata_ids(
     atp: &Path,
     osm: &OsmFeatures,
@@ -52,14 +60,24 @@ pub fn collect_wikidata_ids(
 ) -> Result<PathBuf> {
     let out = workdir.join(WIKIDATA_IDS_FILENAME);
     let input_modified = super::last_modified(&[atp])?.max(osm.modified()?);
-    if out.exists() && super::last_modified(&[&out])? >= input_modified {
+    let outputs = [
+        out.clone(),
+        brand_totals::features_path(workdir),
+        brand_totals::names_path(workdir),
+    ];
+    if outputs.iter().all(|p| p.exists())
+        && super::last_modified(&outputs.iter().map(PathBuf::as_path).collect::<Vec<_>>())?
+            >= input_modified
+    {
         return Ok(out);
     }
 
-    let mut ids = collect_from_atp(atp)?;
+    let (mut ids, atp_totals) = collect_from_atp(atp)?;
     let num_atp_ids = ids.len();
-    ids.extend(collect_from_osm(osm, progress)?);
+    let (osm_ids, osm_totals) = collect_from_osm(osm, progress)?;
+    ids.extend(osm_ids);
     let num_osm_ids = ids.len() - num_atp_ids;
+    let (brand_features, brand_names) = osm_totals.merge(atp_totals).write(workdir)?;
 
     // Sole external sort in this step (see `run_step("collect_wikidata_ids",
     // ...)` in pipeline/mod.rs), so it gets the full chunk-size budget.
@@ -73,41 +91,69 @@ pub fn collect_wikidata_ids(
     log::info!(
         atp_tags = num_atp_ids,
         osm_tags = num_osm_ids,
-        unique_ids = unique;
+        unique_ids = unique,
+        brand_features_lines = brand_features,
+        brand_names_lines = brand_names;
         "collect_wikidata_ids: done"
     );
     Ok(out)
 }
 
 /// The Wikidata IDs in `atp`'s brand/operator/network tags, with
-/// duplicates.
-fn collect_from_atp(atp: &Path) -> Result<Vec<u64>> {
+/// duplicates, and the names that go with them. Unlike for OSM, the
+/// country doesn't matter here, so it isn't looked up.
+fn collect_from_atp(atp: &Path) -> Result<(Vec<u64>, BrandTotals)> {
     let reader = PlaceReader::open(atp)?;
     let mut ids = Vec::new();
+    let mut totals = BrandTotals::default();
     for batch in reader.read_all()? {
-        for place in batch? {
-            for (key, value) in &place.tags {
-                if is_wikidata_key(key) {
-                    ids.extend(parse_wikidata_ids(value));
-                }
-            }
-        }
+        let (batch_ids, batch_totals) = batch?
+            .par_iter()
+            .fold(
+                || (Vec::new(), BrandTotals::default()),
+                |(mut ids, mut totals), place| {
+                    let len = ids.len();
+                    for (key, value) in &place.tags {
+                        if is_wikidata_key(key) {
+                            ids.extend(parse_wikidata_ids(value));
+                        }
+                    }
+                    if ids.len() > len {
+                        let tags = place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+                        totals.add(Source::Atp, tags, None);
+                    }
+                    (ids, totals)
+                },
+            )
+            .reduce(
+                || (Vec::new(), BrandTotals::default()),
+                |(mut a, ta), (b, tb)| {
+                    a.extend(b);
+                    (a, ta.merge(tb))
+                },
+            );
+        ids.extend(batch_ids);
+        totals = totals.merge(batch_totals);
     }
-    Ok(ids)
+    Ok((ids, totals))
 }
 
 /// The Wikidata IDs in `osm`'s brand/operator/network tags, with
-/// duplicates. Visits every feature in the index, in parallel; tag
-/// keys are compared as string pool indices, so only the values of
-/// matching tags get looked up as strings.
-fn collect_from_osm(osm: &OsmFeatures, progress: &MultiProgress) -> Result<Vec<u64>> {
+/// duplicates, and their [BrandTotals]. Visits every feature in the
+/// index, in parallel; tag keys are compared as string pool indices, so
+/// only features with matching tags get their tags looked up as strings
+/// and their geometry decoded, for the country.
+fn collect_from_osm(
+    osm: &OsmFeatures,
+    progress: &MultiProgress,
+) -> Result<(Vec<u64>, BrandTotals)> {
     let key_ids: Vec<u32> = WIKIDATA_KEYS
         .iter()
         .filter_map(|key| osm.strings.lookup(key))
         .map(|id| id as u32)
         .collect();
     if key_ids.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), BrandTotals::default()));
     }
 
     let progress_bar = make_progress_bar(
@@ -116,28 +162,48 @@ fn collect_from_osm(osm: &OsmFeatures, progress: &MultiProgress) -> Result<Vec<u
         osm.index.len() as u64,
         "OSM features",
     );
-    let ids = osm
+    let result = osm
         .index
         .all_refs()
-        .map(|r| {
-            progress_bar.inc(1);
-            let feature = osm.index.get_feature(r)?;
-            let ids: Vec<u64> = feature
-                .tags
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .filter(|[k, _]| key_ids.contains(k))
-                .flat_map(|[_, v]| parse_wikidata_ids(osm.strings.get(*v as usize)))
-                .collect();
-            Ok::<_, anyhow::Error>(ids)
-        })
-        .try_reduce(Vec::new, |mut a, b| {
-            a.extend(b);
-            Ok(a)
-        })?;
+        .try_fold(
+            || (Vec::new(), BrandTotals::default()),
+            |(mut ids, mut totals), r| {
+                progress_bar.inc(1);
+                let feature = osm.index.get_feature(r)?;
+                let len = ids.len();
+                ids.extend(
+                    feature
+                        .tags
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .filter(|[k, _]| key_ids.contains(k))
+                        .flat_map(|[_, v]| parse_wikidata_ids(osm.strings.get(*v as usize))),
+                );
+                if ids.len() > len {
+                    let candidate = OsmCandidate {
+                        feature: &feature,
+                        strings: &osm.strings,
+                    };
+                    let country = candidate
+                        .geometry()
+                        .ok()
+                        .and_then(|g| g.centroid())
+                        .and_then(|c| country(c.x(), c.y()));
+                    totals.add(Source::Osm, candidate.tags(), country);
+                }
+                Ok::<_, anyhow::Error>((ids, totals))
+            },
+        )
+        .try_reduce(
+            || (Vec::new(), BrandTotals::default()),
+            |(mut a, ta), (b, tb)| {
+                a.extend(b);
+                Ok((a, ta.merge(tb)))
+            },
+        )?;
     progress_bar.finish();
-    Ok(ids)
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -222,7 +288,7 @@ mod tests {
                 &[("shop", "supermarket"), ("brand:wikidata", "Q1")],
             ],
         )?;
-        let mut ids = collect_from_osm(&osm, &MultiProgress::new())?;
+        let (mut ids, _) = collect_from_osm(&osm, &MultiProgress::new())?;
         ids.sort();
         assert_eq!(ids, vec![1, 1, 2, 3, 4]);
         Ok(())
@@ -232,7 +298,7 @@ mod tests {
     fn test_collect_from_osm_without_wikidata_keys() -> Result<()> {
         let dir = TempDir::new()?;
         let osm = build_osm(dir.path(), &[&[("shop", "bakery")]])?;
-        assert!(collect_from_osm(&osm, &MultiProgress::new())?.is_empty());
+        assert!(collect_from_osm(&osm, &MultiProgress::new())?.0.is_empty());
         Ok(())
     }
 
@@ -274,6 +340,12 @@ mod tests {
         assert!(set.contains(564213));
         assert!(set.contains(680727));
         assert!(!set.contains(72));
+
+        let features = std::fs::read_to_string(brand_totals::features_path(workdir.path()))?;
+        assert_eq!(features.lines().count(), 1 + 2, "{features}");
+        assert!(features.contains("Q680727\t\tshop=supermarket\t1\n"));
+        let names = std::fs::read_to_string(brand_totals::names_path(workdir.path()))?;
+        assert!(names.contains("Q379911\tbrand\tDenner\t0\t1\n"), "{names}");
 
         // Calling again should reuse the existing file, not fail or
         // recompute.
