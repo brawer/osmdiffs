@@ -37,6 +37,29 @@ use std::{
 /// tables, not RSS at a fixed fraction of progress.
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Like `log::info!` with key-value pairs, but adds the fields of a
+/// `pipeline::memstats` snapshot, so the memory usage between the
+/// step's start and end lines shows up in the log: the sub-steps of
+/// `conflate` hold large structures (the exclusive-match candidates,
+/// the local coverage counts) that are gone again by `conflate: end`.
+macro_rules! info_with_memory {
+    ($($key:ident = $value:expr),* ; $message:literal) => {{
+        let stats = crate::pipeline::memstats::snapshot();
+        log::info!(
+            $($key = $value,)*
+            rss_bytes = stats.rss_bytes,
+            rss_peak_bytes = stats.rss_peak_bytes,
+            rss_anon_bytes = stats.rss_anon_bytes,
+            rss_file_bytes = stats.rss_file_bytes,
+            rss_shmem_bytes = stats.rss_shmem_bytes,
+            cgroup_current_bytes = stats.cgroup_current_bytes,
+            cgroup_max_bytes = stats.cgroup_max_bytes,
+            cgroup_peak_bytes = stats.cgroup_peak_bytes;
+            $message
+        )
+    }};
+}
+
 mod deletion;
 pub(super) mod diagnostics;
 pub(super) mod evidence;
@@ -426,7 +449,7 @@ fn produce_rows(
 
     log_no_matcher(&no_matcher_by_spider);
     let spacing_bytes = coverage.finish();
-    log::info!(
+    info_with_memory!(
         spacing_bytes = spacing_bytes,
         coverage_bytes = coverage.bytes(),
         radii = coverage.num_radii();
@@ -501,7 +524,7 @@ fn produce_rows(
     );
 
     progress_bar.finish();
-    log::info!(
+    info_with_memory!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
         atp_features_processed = atp_features_processed.load(Ordering::Relaxed),
         osm_candidates_decoded = osm_candidates_decoded.load(Ordering::Relaxed),
@@ -693,7 +716,7 @@ fn send_deletion_candidates(
     let count = |reason| counts.get(&reason).copied().unwrap_or(0);
     let dropped = dropped.into_inner().expect("dropped lock");
     let num_dropped = |reason| dropped.get(&reason).copied().unwrap_or(0);
-    log::info!(
+    info_with_memory!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
         atp_wikidata_countries = coverage.num_wikidata_countries(),
         atp_name_countries = coverage.num_name_countries(),
@@ -885,19 +908,10 @@ fn maybe_log_progress(
     }
 
     let (atp_features_processed, osm_candidates_decoded) = counts();
-    let stats = crate::pipeline::memstats::snapshot();
-    log::info!(
+    info_with_memory!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
         atp_features_processed = atp_features_processed,
-        osm_candidates_decoded = osm_candidates_decoded,
-        rss_bytes = stats.rss_bytes,
-        rss_peak_bytes = stats.rss_peak_bytes,
-        rss_anon_bytes = stats.rss_anon_bytes,
-        rss_file_bytes = stats.rss_file_bytes,
-        rss_shmem_bytes = stats.rss_shmem_bytes,
-        cgroup_current_bytes = stats.cgroup_current_bytes,
-        cgroup_max_bytes = stats.cgroup_max_bytes,
-        cgroup_peak_bytes = stats.cgroup_peak_bytes;
+        osm_candidates_decoded = osm_candidates_decoded;
         "conflate.match: progress"
     );
 }
@@ -951,7 +965,7 @@ fn write_conflated(
     }
     writer.close()?;
     progress.finish();
-    log::info!(
+    info_with_memory!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
         rows_written = row_count.load(Ordering::SeqCst),
         bytes_written = std::fs::metadata(out)?.len();
