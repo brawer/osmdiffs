@@ -122,3 +122,56 @@ detect.
 Cost: the vote queries the OSM index three times for each ATP feature
 in mainland China, about 30,000 features in the whole ATP run, against
 3.5 million features that `conflate` matches.
+
+## Unclear votes and deletion candidates
+
+There is no separate state for an unclear vote. A spider without a
+clear winner stays at WGS-84, and its features in mainland China go
+into conflation as given, like any others. Deletion candidates don't
+look at the datum either. Their only safeguard is the rule of
+[`2026-11-09-local-deletion-coverage.md`](2026-11-09-local-deletion-coverage.md):
+at least half of the brand's OSM features nearby must have been
+matched. But features that are still shifted can match another branch
+a few hundred meters away. Such wrong matches count as matched, and
+then the OSM feature of the right branch can become a candidate.
+
+We checked how often this happens in the first production run with
+this change: `osmdiffs:v0.8.13`, `conflated-20261102-a4a70f0f.parquet`
+(OSM planet of 2026-11-02), with the votes from the log line
+`import_atp: datum in mainland China`. Of the 113 spiders with
+features in mainland China, 12 chose GCJ-02, 2 chose BD-09, and 99
+stayed at WGS-84, most of them with no votes at all.
+
+Mainland China had 383 deletion candidates. For 369, at least one
+spider of the brand had a clear vote; most are Starbucks, Burger King,
+Adidas and Nike, all GCJ-02. The other 14 come from spiders that
+stayed at WGS-84 on almost no votes:
+
+| brand | candidates | spider | votes WGS-84 / GCJ-02 / BD-09 | median distance of `same` |
+|---|---:|---|---|---:|
+| Skechers | 4 | `skechers` | 0 / 1 / 0 | 85 m |
+| Vans | 2 | `vans` | 0 / 1 / 0 | 127 m |
+| Omega | 2 | `omegawatches` | 0 / 1 / 0 | 237 m |
+| Burberry | 1 | `burberry` | 0 / 1 / 0 | 145 m |
+| Tiffany | 1 | `tiffany` | 0 / 2 / 0 | 122 m |
+| Porsche | 1 | `porsche` | 0 / 3 / 2 | 11 m |
+| Hugo Boss | 1 | `hugo_boss` | 0 / 0 / 0 | 13 m |
+| CoCo Ichibanya | 1 | `coco_ichibanya` | 0 / 0 / 0 | 20 m |
+| FamilyMart | 1 | `familymart_tw` | 0 / 0 / 0 | — |
+
+For `starbucks_cn`, converted to WGS-84, the median distance of `same`
+matches is 24 m. So Skechers, Vans, Omega, Burberry and Tiffany are
+probably still shifted, and their candidates are doubtful. `skechers`
+alone has 3,169 features in mainland China, but OSM has few Skechers
+stores with `brand:wikidata` there, so its vote is tiny. The distances
+are over all of each spider's `same` rows in a box around China, so
+they include some outside the mainland.
+
+A vote can also be unclear because two shifted systems compete:
+`audi` had 0 / 10 / 24 votes and `hm` 0 / 7 / 4. Both are clearly not
+WGS-84, but neither shifted system won by a factor of three, so both
+stayed at WGS-84. Neither had a deletion candidate in mainland China.
+
+We could skip deletion candidates in mainland China whose brand has
+only spiders with an unclear vote. For 14 of 383 candidates, that is
+not worth the code for now.
