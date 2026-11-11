@@ -29,6 +29,10 @@ fn run_pipeline_on_fixtures(extra_args: &[&str]) -> Result<TempDir> {
         workdir.path().join("alltheplaces.meta.json"),
     )?;
     symlink(
+        fixture("alltheplaces.stats.json"),
+        workdir.path().join("alltheplaces.stats.json"),
+    )?;
+    symlink(
         fixture("zugerland.osm.pbf"),
         workdir.path().join("planet-latest.osm.pbf"),
     )?;

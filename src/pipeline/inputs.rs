@@ -177,6 +177,7 @@ mod tests {
         for (src, dst) in [
             ("alltheplaces.zip", "alltheplaces.zip"),
             ("alltheplaces.meta.json", "alltheplaces.meta.json"),
+            ("alltheplaces.stats.json", "alltheplaces.stats.json"),
             ("zugerland.osm.pbf", "planet-latest.osm.pbf"),
             (
                 "planet-latest.osm.pbf.meta.json",
@@ -227,6 +228,7 @@ mod tests {
         let workdir = tempfile::tempdir()?;
         for name in [
             "alltheplaces.meta.json",
+            "alltheplaces.stats.json",
             "planet-latest.osm.pbf.meta.json",
             "qrank.csv.gz",
             "qrank.meta.json",

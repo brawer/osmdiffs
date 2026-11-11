@@ -189,6 +189,7 @@ graph TD
     end
     INPUTS --> FETCH_INPUTS("fetch_inputs<br/>(all in parallel)")
     FETCH_INPUTS --> ATP_ZIP[alltheplaces.zip]
+    FETCH_INPUTS --> ATP_STATS[alltheplaces.stats.json]
     FETCH_INPUTS --> OSM_PBF[planet-latest.osm.pbf]
     FETCH_INPUTS --> QRANK_CSV[qrank.csv.gz]
     FETCH_INPUTS --> OSMVIEWS_TIFF[osmviews.tiff]
@@ -199,6 +200,8 @@ graph TD
     IMPORT_ATP --> NONDESCRIPT_EMAILS[alltheplaces.nondescript-emails]
     IMPORT_ATP --> NONDESCRIPT_WEBSITES[alltheplaces.nondescript-websites]
     IMPORT_ATP --> BRAND_DOMAINS[alltheplaces.brand-domains.tsv]
+    ATP_STATS --> IMPORT_ATP
+    IMPORT_ATP --> SPIDER_COUNTS[alltheplaces.spider-counts.tsv]
     ATP_PARQUET --> OSMVIEWS_RANKS(compute_osmviews_ranks)
     OSMVIEWS_TIFF --> OSMVIEWS_RANKS
     OSMVIEWS_RANKS --> OSMVIEWS_R[osmviews-ranks]
@@ -344,6 +347,15 @@ fetch away.
   conflation can tell the brand of an OSM feature that has a website
   but no `brand:wikidata`; see
   [`notes/2026-11-06-brand-domains.md`](notes/2026-11-06-brand-domains.md).
+  Finally, it writes `alltheplaces.spider-counts.tsv`, which says for
+  each spider how many features its file had, and how many were left
+  out for their license or for having no usable geometry, or had their
+  datum converted ([`spider_counts.rs`](../src/pipeline/atp/spider_counts.rs)).
+  It logs the totals, compared with AllThePlaces' own statistics for
+  the run (`alltheplaces.stats.json`, fetched along with the zip from
+  the `stats_url` in `history.json`; like any other input, the run
+  stops if it can't be fetched): how many spiders had errors, and how
+  many have a different number of features in the dump.
   **~3 minutes.**
 - **`import_osm`** ([`src/pipeline/osm/`](../src/pipeline/osm/)) —
   does a first pass over the planet dump that
@@ -399,8 +411,10 @@ fetch away.
   scoring each (see [`src/matchers/`](../src/matchers/)) and keeping
   the best. Opens the nondescript phone and email sets from
   `import_atp`, so that hotlines and central mailboxes never count as
-  matching evidence. Writes one row per ATP feature — matched or not — to
-  `conflated.parquet`, each with an `importance` from 0 to 1 (see
+  matching evidence. Writes one row per ATP feature that a matcher
+  handles — matched or not — to
+  `conflated.parquet`, and logs how many features of which spiders no
+  matcher handles. Each row comes with an `importance` from 0 to 1 (see
   [`src/pipeline/importance.rs`](../src/pipeline/importance.rs)): a
   weighted mean of the location's OSMViews quantile, the brand's QRank
   quantile and a coarse score for the kind of place
