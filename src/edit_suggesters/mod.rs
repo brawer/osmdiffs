@@ -21,11 +21,14 @@ mod poi;
 /// on both sides matter.
 pub trait EditSuggester {
     /// Returns the changed/added tags to propose, or `None` if there's
-    /// nothing worth suggesting.
+    /// nothing worth suggesting. `position` is where the feature lies,
+    /// as (longitude, latitude) in degrees, for reading OSM phone
+    /// numbers in national format.
     fn suggest_edit(
         &self,
         atp_tags: &[(String, String)],
         osm_tags: &[(String, String)],
+        position: Option<(f64, f64)>,
     ) -> Option<Vec<(String, String)>>;
 }
 
