@@ -191,6 +191,72 @@ fn clean_name(name: &str) -> String {
         .collect()
 }
 
+/// OSM features per Wikidata ID, country and main category.
+pub(super) type OsmFeatureCounts = HashMap<(u64, Option<Country>, String), u64>;
+
+/// Reads [features_path].
+pub(super) fn read_features(workdir: &Path) -> Result<OsmFeatureCounts> {
+    let mut features = HashMap::new();
+    for cols in read_tsv(&features_path(workdir), 4)? {
+        let n = cols[3]
+            .parse()
+            .with_context(|| format!("bad count {:?}", cols[3]))?;
+        features.insert(
+            (
+                parse_id(&cols[0])?,
+                parse_country(&cols[1]),
+                cols[2].clone(),
+            ),
+            n,
+        );
+    }
+    Ok(features)
+}
+
+/// Reads [names_path] into one name per Wikidata ID: its `brand` name,
+/// or else its `operator` name, or else its `network` name.
+pub(super) fn read_names(workdir: &Path) -> Result<HashMap<u64, String>> {
+    let rank = |key: &str| {
+        ["brand", "operator", "network"]
+            .iter()
+            .position(|k| *k == key)
+    };
+    let mut best: HashMap<u64, (usize, String)> = HashMap::new();
+    for cols in read_tsv(&names_path(workdir), 5)? {
+        let Some(r) = rank(&cols[1]) else { continue };
+        let id = parse_id(&cols[0])?;
+        if best.get(&id).is_none_or(|(old, _)| r < *old) {
+            best.insert(id, (r, cols[2].clone()));
+        }
+    }
+    Ok(best.into_iter().map(|(id, (_, name))| (id, name)).collect())
+}
+
+fn parse_id(id: &str) -> Result<u64> {
+    id.strip_prefix('Q')
+        .and_then(|n| n.parse().ok())
+        .with_context(|| format!("bad Wikidata ID {id:?}"))
+}
+
+fn parse_country(code: &str) -> Option<Country> {
+    <[u8; 2]>::try_from(code.as_bytes())
+        .ok()
+        .and_then(Country::from_code)
+}
+
+/// The lines of a TSV file after its header, split into `columns`.
+fn read_tsv(path: &Path, columns: usize) -> Result<Vec<Vec<String>>> {
+    let data = std::fs::read_to_string(path).with_context(|| format!("could not read {path:?}"))?;
+    data.lines()
+        .skip(1)
+        .map(|line| {
+            let cols: Vec<String> = line.split('\t').map(String::from).collect();
+            anyhow::ensure!(cols.len() == columns, "bad line in {path:?}: {line:?}");
+            Ok(cols)
+        })
+        .collect()
+}
+
 fn write_tsv(out: &Path, header: &str, lines: impl Iterator<Item = String>) -> Result<()> {
     let mut tmp = out.to_path_buf();
     tmp.add_extension("tmp");
@@ -272,6 +338,27 @@ mod tests {
              Q1\toperator\tGenossenschaft Migros Zürich\t2\t0\n\
              Q680727\tbrand\tMigros\t3\t1\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_read() -> Result<()> {
+        let mut totals = BrandTotals::default();
+        let tags = [
+            ("shop", "supermarket"),
+            ("brand", "Migros"),
+            ("brand:wikidata", "Q680727"),
+            ("operator", "Migros Zürich"),
+            ("operator:wikidata", "Q680727"),
+        ];
+        totals.add(Source::Osm, tags.iter().copied(), CH);
+        totals.add(Source::Osm, tags.iter().copied(), None);
+        let dir = tempfile::tempdir()?;
+        totals.write(dir.path())?;
+        let features = read_features(dir.path())?;
+        assert_eq!(features[&(680727, CH, "shop=supermarket".to_string())], 1);
+        assert_eq!(features[&(680727, None, "shop=supermarket".to_string())], 1);
+        assert_eq!(read_names(dir.path())?[&680727], "Migros");
         Ok(())
     }
 

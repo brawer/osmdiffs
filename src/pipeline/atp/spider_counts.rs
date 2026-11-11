@@ -16,12 +16,12 @@ const FILENAME: &str = "alltheplaces.spider-counts.tsv";
 const HEADER: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum";
 
 /// Path of the counts that `import_atp` writes in `workdir`.
-pub(super) fn path(workdir: &Path) -> PathBuf {
+pub(in crate::pipeline) fn path(workdir: &Path) -> PathBuf {
     workdir.join(FILENAME)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct SpiderCounts {
+pub(in crate::pipeline) struct SpiderCounts {
     pub spider: String,
 
     /// Features in the spider's file of the dump. A spider that crashed
@@ -75,8 +75,7 @@ pub(super) fn write(counts: &mut [SpiderCounts], out: &Path) -> Result<()> {
 }
 
 /// Reads counts that [write] wrote.
-#[allow(dead_code)] // Used by tests until the spider stats read it.
-pub(super) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
+pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
     let file = std::fs::File::open(path).with_context(|| format!("could not open {path:?}"))?;
     let mut lines = BufReader::new(file).lines();
     if lines.next().transpose()?.as_deref() != Some(HEADER) {

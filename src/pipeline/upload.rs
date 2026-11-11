@@ -404,6 +404,19 @@ const EDITS_TILES: Publish = Publish {
     sha512: false,
 };
 
+const SPIDER_STATS: Publish = Publish {
+    name: "spider-stats",
+    stem: "spider-stats",
+    ext: "parquet",
+    title: "spider-stats.parquet \u{2014} per-spider conflation statistics",
+    description: "Debugging aid for the AllThePlaces dashboard. Not a data product; \
+        structure may change, or production may stop, without notice.",
+    format: "parquet",
+    mediatype: "application/vnd.apache.parquet",
+    describes: None,
+    sha512: false,
+};
+
 /// Hashes `local`, uploads it to `data/<stem>-<date>-<hash8>.<ext>` on
 /// the public bucket, and returns its manifest entry.
 fn publish(
@@ -447,6 +460,14 @@ pub fn upload_conflated(
     progress: &MultiProgress,
 ) -> Result<PublishedFile> {
     publish(&CONFLATED, conflated, date, progress)
+}
+
+pub fn upload_spider_stats(
+    stats: &Path,
+    date: &str,
+    progress: &MultiProgress,
+) -> Result<PublishedFile> {
+    publish(&SPIDER_STATS, stats, date, progress)
 }
 
 pub fn upload_conflated_tiles(

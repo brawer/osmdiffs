@@ -116,6 +116,30 @@ const AGREEING: &[(&str, Check)] = &[
     ("uic_ref", Check::Text(&["uic_ref"], text)),
 ];
 
+/// The names of the tags that [agreeing] compares, in its order.
+pub(in crate::pipeline) fn compared_tags() -> impl Iterator<Item = &'static str> {
+    AGREEING.iter().map(|(name, _)| *name)
+}
+
+/// Whether `tags` have a value for the tag that [agreeing] calls
+/// `name`, such as any phone key for `phone`.
+pub(in crate::pipeline) fn has_compared_tag<'a>(
+    name: &str,
+    mut tags: impl Iterator<Item = (&'a str, &'a str)>,
+) -> bool {
+    let Some((_, check)) = AGREEING.iter().find(|(n, _)| *n == name) else {
+        return false;
+    };
+    tags.any(|(k, v)| {
+        !v.trim().is_empty()
+            && match check {
+                Check::Text(keys, _) => keys.contains(&k),
+                Check::Whole(key, _) => k == *key,
+                Check::Contact(is_key) => is_key(k),
+            }
+    })
+}
+
 fn text(value: &str) -> Option<String> {
     let v = normalize_name(value);
     (!v.is_empty()).then_some(v)
@@ -127,6 +151,21 @@ mod tests {
 
     fn point(x: f64, y: f64) -> Geometry {
         Geometry::from(geo::Point::new(x, y))
+    }
+
+    #[test]
+    fn test_has_compared_tag() {
+        let tags = [
+            ("contact:phone", "+41 44 000 00 00"),
+            ("name", " "),
+            ("brand", "X"),
+        ];
+        assert!(has_compared_tag("phone", tags.iter().copied()));
+        assert!(has_compared_tag("brand", tags.iter().copied()));
+        assert!(!has_compared_tag("name", tags.iter().copied()));
+        assert!(!has_compared_tag("email", tags.iter().copied()));
+        assert!(!has_compared_tag("unknown", tags.iter().copied()));
+        assert_eq!(compared_tags().next(), Some("name"));
     }
 
     #[test]

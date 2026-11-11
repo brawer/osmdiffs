@@ -239,6 +239,14 @@ graph TD
     JOIN_CONFLATED_TILES --> CONFLATED_PMTILES[conflated.pmtiles]
     CONFLATED_PMTILES --> UPLOAD_CONFLATED_TILES(upload_conflated_tiles) --> S3C[("public S3")]
 
+    CONFLATED --> SPIDER_STATS(compute_spider_stats)
+    SPIDER_COUNTS --> SPIDER_STATS
+    ATP_STATS --> SPIDER_STATS
+    OSM_BRANDS --> SPIDER_STATS
+    BRAND_NAMES --> SPIDER_STATS
+    SPIDER_STATS --> SPIDER_STATS_PARQUET[spider-stats.parquet]
+    SPIDER_STATS_PARQUET --> UPLOAD_SPIDER_STATS(upload_spider_stats) --> S3A
+
     CONFLATED --> SUGGEST_EDITS(suggest_edits) --> LAYERS["*.jsonl (for visualization)"]
     LAYERS --> RENDER_TILES("render_tiles<br/>(tippecanoe, auto zoom)") --> PMTILES[diffed-places.pmtiles]
     PMTILES --> UPLOAD_TILES(upload_tiles) --> S3B[("public S3")]
@@ -247,10 +255,11 @@ graph TD
     UPLOAD_CONFLATED --> UPLOAD_DATAPACKAGE
     UPLOAD_CONFLATED_TILES --> UPLOAD_DATAPACKAGE
     UPLOAD_TILES --> UPLOAD_DATAPACKAGE
+    UPLOAD_SPIDER_STATS --> UPLOAD_DATAPACKAGE
     UPLOAD_BOM --> UPLOAD_DATAPACKAGE(upload_datapackage<br/>data/datapackage.json) --> S3A
 
     classDef process fill:#fce4ec,stroke:#ad1457,stroke-width:2px,color:#4a0e28,font-weight:bold;
-    class FETCH_INPUTS,IMPORT_ATP,OSMVIEWS_RANKS,COLLECT_WIKI,QRANK_QUANTILES,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SUGGEST_EDITS,RENDER_TILES,UPLOAD_TILES,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
+    class FETCH_INPUTS,IMPORT_ATP,OSMVIEWS_RANKS,COLLECT_WIKI,QRANK_QUANTILES,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SPIDER_STATS,UPLOAD_SPIDER_STATS,SUGGEST_EDITS,RENDER_TILES,UPLOAD_TILES,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
 ```
 
 (Pink boxes are processing steps; plain rectangles are the files they
@@ -520,6 +529,16 @@ fetch away.
   higher zoom levels” example). **~2m41s**, **2.16 GB peak RSS**,
   **~1.8 GB output** (z0–16) on the same run — total added cost over a
   single-pass `conflated.pmtiles` build: **~4m47s**, **+~1.05 GB**.
+- **`compute_spider_stats`**
+  ([`src/pipeline/spider_stats.rs`](../src/pipeline/spider_stats.rs))
+  — scans `conflated.parquet` once and writes `spider-stats.parquet`,
+  one row per AllThePlaces spider: what became of its features, how
+  they matched, how far their tags agree, and how its brands compare
+  with OpenStreetMap by country. Adds the counts that `import_atp`
+  and `collect_wikidata_ids` set aside, and AllThePlaces' own run
+  statistics. See
+  [`docs/outputs/SPIDER_STATS.md`](outputs/SPIDER_STATS.md) for the
+  schema. Uploaded by `upload_spider_stats`, like the files below.
 - **`suggest_edits`** ([`src/pipeline/edits.rs`](../src/pipeline/edits.rs))
   — scans `conflated.parquet` for matched rows and asks an
   [`edit_suggesters`](../src/edit_suggesters/) implementation what

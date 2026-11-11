@@ -38,7 +38,7 @@ use std::{
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 mod deletion;
-mod evidence;
+pub(super) mod evidence;
 mod local_coverage;
 mod located_in;
 mod s2_util;

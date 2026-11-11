@@ -84,6 +84,7 @@ fn test_pipeline() -> Result<()> {
         );
     }
     assert_publish_artifacts(workdir.path())?;
+    assert_spider_stats(&workdir.path().join("spider-stats.parquet"))?;
 
     Ok(())
 }
@@ -106,8 +107,8 @@ fn assert_publish_artifacts(workdir: &Path) -> Result<()> {
     assert_eq!(manifest["name"], "osmdiffs");
 
     let resources = manifest["resources"].as_array().context("no resources")?;
-    // conflated + bom + conflated-tiles + edits-tiles
-    assert_eq!(resources.len(), 4, "manifest resources: {resources:#?}");
+    // conflated + bom + conflated-tiles + spider-stats + edits-tiles
+    assert_eq!(resources.len(), 5, "manifest resources: {resources:#?}");
     // Resource name -> the workdir file it was uploaded from (the local
     // copies keep their undated names; only the S3 key and the manifest
     // path carry the date+hash).
@@ -115,6 +116,7 @@ fn assert_publish_artifacts(workdir: &Path) -> Result<()> {
         "conflated" => "conflated.parquet",
         "conflated-tiles" => "conflated.pmtiles",
         "edits-tiles" => "diffed-places.pmtiles",
+        "spider-stats" => "spider-stats.parquet",
         "bom" => "", // exists under its manifest path
         other => panic!("unexpected resource {other}"),
     };
@@ -156,6 +158,88 @@ fn assert_publish_artifacts(workdir: &Path) -> Result<()> {
     // The standalone BOM carries the finished Parquet's own digests.
     assert_eq!(bom["metadata"]["component"]["hashes"][0]["alg"], "SHA-256");
     assert_eq!(bom["metadata"]["component"]["hashes"][1]["alg"], "SHA-512");
+    Ok(())
+}
+
+/// Checks `spider-stats.parquet` against the fixture: one row per
+/// spider, in order, with the counts that `assert_conflated_parquet`
+/// expects of `conflated.parquet`.
+fn assert_spider_stats(path: &Path) -> Result<()> {
+    use arrow::array::{Array, ListArray, StringArray, StructArray, UInt64Array};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path)?)?;
+    let kv = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .context("no key-value metadata")?;
+    assert!(
+        kv.iter().any(|e| e.key == "osmdiffs:distance_bins_m"
+            && e.value.as_deref() == Some("1,10,25,50,100,250,1000")),
+        "distance bins missing from {kv:?}"
+    );
+    let batches = builder.build()?.collect::<Result<Vec<_>, _>>()?;
+    let batch = arrow::compute::concat_batches(&batches[0].schema(), &batches)?;
+    let column = |name: &str| batch.column_by_name(name).expect(name).clone();
+    let strings = |name: &str| -> Vec<String> {
+        let c = column(name);
+        let a = c.as_any().downcast_ref::<StringArray>().expect(name);
+        (0..a.len()).map(|i| a.value(i).to_string()).collect()
+    };
+    let numbers = |name: &str| -> Vec<u64> {
+        let c = column(name);
+        let a = c.as_any().downcast_ref::<UInt64Array>().expect(name);
+        (0..a.len()).map(|i| a.value(i)).collect()
+    };
+
+    let spiders = strings("spider");
+    assert_eq!(
+        spiders,
+        [
+            "denner_ch",
+            "empty",
+            "mediamarkt",
+            "misenso_ch",
+            "tchibo",
+            "winterthur_ch"
+        ]
+    );
+    // 8 conflated rows, 3 of them matched; see assert_conflated_parquet.
+    assert_eq!(numbers("rows"), [1, 0, 1, 3, 1, 2]);
+    assert_eq!(numbers("same"), [1, 0, 1, 0, 1, 0]);
+    assert_eq!(numbers("missing_in_osm"), [0, 0, 0, 3, 0, 2]);
+    assert_eq!(numbers("atp_features"), [1, 0, 1, 3, 1, 4]);
+    // Two Winterthur features have no matcher, so no conflated row.
+    assert_eq!(numbers("no_matcher"), [0, 0, 0, 0, 0, 2]);
+
+    // denner_ch matched 13.8 m away: bin 2, from 10 to 25 meters.
+    let distance = column("distance_m");
+    let distance = distance.as_any().downcast_ref::<ListArray>().unwrap();
+    let denner = distance.value(0);
+    let denner = denner.as_any().downcast_ref::<UInt64Array>().unwrap();
+    assert_eq!(denner.values().to_vec(), [0, 0, 1, 0, 0, 0, 0, 0]);
+
+    let brands = column("brands");
+    let brands = brands.as_any().downcast_ref::<ListArray>().unwrap();
+    let denner = brands.value(0);
+    let denner = denner.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(denner.len(), 1);
+    let field = |name: &str| denner.column_by_name(name).expect(name).clone();
+    let string_at = |name: &str| {
+        field(name)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .to_string()
+    };
+    assert_eq!(string_at("country"), "CH");
+    assert_eq!(string_at("wikidata_id"), "Q379911");
+    assert_eq!(string_at("name"), "Denner");
+    let osm_features = field("osm_features");
+    let osm_features = osm_features.as_any().downcast_ref::<UInt64Array>().unwrap();
+    assert_eq!(osm_features.value(0), 1);
     Ok(())
 }
 

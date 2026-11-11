@@ -10,7 +10,7 @@ use std::path::Path;
 
 /// What AllThePlaces reports for one spider.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-pub(super) struct SpiderRunStats {
+pub(in crate::pipeline) struct SpiderRunStats {
     pub spider: String,
 
     /// Features the spider wrote.
@@ -35,7 +35,7 @@ pub(super) fn parse(json: &[u8]) -> Result<Vec<SpiderRunStats>> {
 
 /// Reads the statistics that `fetch_atp` stored in `workdir`, by
 /// spider, or `None` if there are none.
-pub(super) fn read(workdir: &Path) -> Result<Option<HashMap<String, SpiderRunStats>>> {
+pub(in crate::pipeline) fn read(workdir: &Path) -> Result<Option<HashMap<String, SpiderRunStats>>> {
     let path = workdir.join(super::fetch::STATS_JSON_FILENAME);
     if !path.exists() {
         return Ok(None);

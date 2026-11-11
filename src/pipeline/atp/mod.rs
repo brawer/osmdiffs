@@ -27,8 +27,8 @@ use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 mod datum;
 mod fetch;
 pub(super) mod nondescript;
-mod run_stats;
-mod spider_counts;
+pub(super) mod run_stats;
+pub(super) mod spider_counts;
 
 // Only these two re-exported crate-wide (rather than making all of
 // `fetch` pub(crate)): provenance needs them to assemble this
