@@ -1,6 +1,6 @@
 //! For each brand, operator and network that features refer to by
 //! Wikidata ID: how many OpenStreetMap features it has per country and
-//! main category, and the names that OSM and AllThePlaces give it. The
+//! main category, and a name for it, from OSM or AllThePlaces. The
 //! spider stats compare these totals with AllThePlaces, and show the
 //! names so that their readers needn't look up Wikidata IDs.
 //!
@@ -22,9 +22,6 @@ const FEATURES_FILENAME: &str = "osm-brands.tsv";
 /// Filename, within `workdir`, of the names.
 const NAMES_FILENAME: &str = "brand-names.tsv";
 
-/// The most names kept per Wikidata ID, country and key.
-const MAX_NAMES: usize = 3;
-
 pub(super) fn features_path(workdir: &Path) -> PathBuf {
     workdir.join(FEATURES_FILENAME)
 }
@@ -39,8 +36,8 @@ pub(super) enum Source {
     Atp,
 }
 
-/// Wikidata ID, country, and the key of the name, such as `brand`.
-type NameKey = (u64, Option<Country>, &'static str);
+/// Wikidata ID, and the key of the name, such as `brand`.
+type NameKey = (u64, &'static str);
 
 #[derive(Debug, Default)]
 pub(super) struct BrandTotals {
@@ -54,9 +51,10 @@ pub(super) struct BrandTotals {
 }
 
 impl BrandTotals {
-    /// Adds a feature with `tags` that lies in `country`. Names count
-    /// only where the Wikidata tag names a single ID: with several,
-    /// there's no telling which name goes with which.
+    /// Adds a feature with `tags` that lies in `country`, which only
+    /// matters for OSM features. Names count only where the Wikidata
+    /// tag names a single ID: with several, there's no telling which
+    /// name goes with which.
     pub fn add<'a>(
         &mut self,
         source: Source,
@@ -77,7 +75,7 @@ impl BrandTotals {
                 if !name.is_empty() {
                     let counts = self
                         .names
-                        .entry((id, country, name_key))
+                        .entry((id, name_key))
                         .or_default()
                         .entry(name)
                         .or_default();
@@ -118,9 +116,11 @@ impl BrandTotals {
         self
     }
 
-    /// Writes the feature totals to [features_path] and the most
-    /// common names to [names_path], both sorted, and returns how many
-    /// lines each has.
+    /// Writes the feature totals to [features_path] and a name per
+    /// Wikidata ID and key to [names_path], both sorted, and returns
+    /// how many lines each has. The name is the most common one in
+    /// Latin script, or if there is none, the most common one: enough
+    /// to tell brands apart for readers of the spider stats.
     pub fn write(&self, workdir: &Path) -> Result<(usize, usize)> {
         let mut features: Vec<_> = self.features.iter().collect();
         features.sort_by_cached_key(|((id, country, category), _)| {
@@ -140,27 +140,42 @@ impl BrandTotals {
         )?;
 
         let mut keys: Vec<&NameKey> = self.names.keys().collect();
-        keys.sort_by_cached_key(|(id, country, key)| (*id, code(*country), *key));
-        let mut lines = Vec::new();
-        for k in keys {
-            let mut names: Vec<(&String, &[u64; 2])> = self.names[k].iter().collect();
-            names.sort_by(|a, b| (b.1[0] + b.1[1]).cmp(&(a.1[0] + a.1[1])).then(a.0.cmp(b.0)));
-            for (name, [osm, atp]) in names.into_iter().take(MAX_NAMES) {
-                let (id, country, key) = k;
-                lines.push(format!(
-                    "Q{id}\t{}\t{key}\t{name}\t{osm}\t{atp}",
-                    code(*country)
-                ));
-            }
-        }
+        keys.sort();
+        let lines: Vec<String> = keys
+            .into_iter()
+            .filter_map(|k| {
+                let (name, [osm, atp]) = display_name(&self.names[k])?;
+                let (id, key) = k;
+                Some(format!("Q{id}\t{key}\t{name}\t{osm}\t{atp}"))
+            })
+            .collect();
         let num_names = lines.len();
         write_tsv(
             &names_path(workdir),
-            "wikidata_id\tcountry\tkey\tname\tosm\tatp",
+            "wikidata_id\tkey\tname\tosm\tatp",
             lines.into_iter(),
         )?;
         Ok((num_features, num_names))
     }
+}
+
+/// The name to show, out of `names` with their counts: the most
+/// common in Latin script, or else the most common, with ties broken
+/// by the name itself.
+fn display_name(names: &HashMap<String, [u64; 2]>) -> Option<(&String, [u64; 2])> {
+    let rank = |(name, counts): &(&String, &[u64; 2])| (is_latin(name), counts[0] + counts[1]);
+    names
+        .iter()
+        .max_by(|a, b| rank(a).cmp(&rank(b)).then(b.0.cmp(a.0)))
+        .map(|(name, counts)| (name, *counts))
+}
+
+/// Whether every letter of `name` is in Latin script, such as
+/// `Migros` or `Żabka`, unlike `ミニストップ`.
+fn is_latin(name: &str) -> bool {
+    name.chars().filter(|c| c.is_alphabetic()).all(
+        |c| matches!(c, 'A'..='Z' | 'a'..='z' | '\u{00C0}'..='\u{024F}' | '\u{1E00}'..='\u{1EFF}'),
+    )
 }
 
 fn code(country: Option<Country>) -> String {
@@ -241,7 +256,7 @@ mod tests {
         let totals = a.merge(b);
 
         let dir = tempfile::tempdir()?;
-        assert_eq!(totals.write(dir.path())?, (5, 4));
+        assert_eq!(totals.write(dir.path())?, (5, 2));
         assert_eq!(
             std::fs::read_to_string(features_path(dir.path()))?,
             "wikidata_id\tcountry\tcategory\tfeatures\n\
@@ -253,35 +268,40 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(names_path(dir.path()))?,
-            "wikidata_id\tcountry\tkey\tname\tosm\tatp\n\
-             Q1\tCH\toperator\tGenossenschaft Migros Zürich\t2\t0\n\
-             Q680727\t\tbrand\tMigros\t1\t0\n\
-             Q680727\tCH\tbrand\tMigros\t2\t1\n\
-             Q680727\tCH\tbrand\tMigors\t1\t0\n"
+            "wikidata_id\tkey\tname\tosm\tatp\n\
+             Q1\toperator\tGenossenschaft Migros Zürich\t2\t0\n\
+             Q680727\tbrand\tMigros\t3\t1\n"
         );
         Ok(())
     }
 
     #[test]
-    fn test_max_names() -> Result<()> {
-        let mut totals = BrandTotals::default();
-        for (name, n) in [("A", 1), ("B", 4), ("C", 2), ("D", 3)] {
-            for _ in 0..n {
-                totals.add(
-                    Source::Osm,
-                    [("brand", name), ("brand:wikidata", "Q7")].into_iter(),
-                    CH,
-                );
-            }
-        }
-        let dir = tempfile::tempdir()?;
-        totals.write(dir.path())?;
-        let names: Vec<String> = std::fs::read_to_string(names_path(dir.path()))?
-            .lines()
-            .skip(1)
-            .map(|l| l.split('\t').nth(3).unwrap().to_string())
-            .collect();
-        assert_eq!(names, vec!["B", "D", "C"]);
-        Ok(())
+    fn test_display_name() {
+        let shown = |list: &[(&str, u64)]| {
+            let names: HashMap<String, [u64; 2]> =
+                list.iter().map(|(n, c)| (n.to_string(), [*c, 0])).collect();
+            display_name(&names).map(|(n, _)| n.clone())
+        };
+        assert_eq!(shown(&[("A", 1), ("B", 4), ("C", 4)]), Some("B".into()));
+        assert_eq!(
+            shown(&[("ミニストップ", 9), ("Ministop", 2)]),
+            Some("Ministop".into())
+        );
+        assert_eq!(
+            shown(&[("ミニストップ", 9), ("ローソン", 2)]),
+            Some("ミニストップ".into())
+        );
+        assert_eq!(shown(&[]), None);
+    }
+
+    #[test]
+    fn test_is_latin() {
+        assert!(is_latin("Migros"));
+        assert!(is_latin("Coop Pronto 24/7"));
+        assert!(is_latin("Żabka"));
+        assert!(is_latin("Phở Hòa"));
+        assert!(!is_latin("ミニストップ"));
+        assert!(!is_latin("Пятёрочка"));
+        assert!(!is_latin("7-Eleven セブン"));
     }
 }

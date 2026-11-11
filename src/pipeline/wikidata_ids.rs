@@ -25,9 +25,9 @@
 use super::brand_totals::{self, BrandTotals, Source};
 use crate::make_progress_bar;
 use crate::matchers::{OsmCandidate, parse_wikidata_ids};
-use crate::places::{Place, PlaceReader};
+use crate::places::PlaceReader;
 use crate::tables::{OsmFeatures, U64Set};
-use crate::utils::countries::{Country, country};
+use crate::utils::countries::country;
 use anyhow::Result;
 use geo::Centroid;
 use indicatif::MultiProgress;
@@ -100,7 +100,8 @@ pub fn collect_wikidata_ids(
 }
 
 /// The Wikidata IDs in `atp`'s brand/operator/network tags, with
-/// duplicates, and the names that go with them.
+/// duplicates, and the names that go with them. Unlike for OSM, the
+/// country doesn't matter here, so it isn't looked up.
 fn collect_from_atp(atp: &Path) -> Result<(Vec<u64>, BrandTotals)> {
     let reader = PlaceReader::open(atp)?;
     let mut ids = Vec::new();
@@ -119,7 +120,7 @@ fn collect_from_atp(atp: &Path) -> Result<(Vec<u64>, BrandTotals)> {
                     }
                     if ids.len() > len {
                         let tags = place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-                        totals.add(Source::Atp, tags, place_country(place));
+                        totals.add(Source::Atp, tags, None);
                     }
                     (ids, totals)
                 },
@@ -135,11 +136,6 @@ fn collect_from_atp(atp: &Path) -> Result<(Vec<u64>, BrandTotals)> {
         totals = totals.merge(batch_totals);
     }
     Ok((ids, totals))
-}
-
-fn place_country(place: &Place) -> Option<Country> {
-    let ll = s2::latlng::LatLng::from(s2::cellid::CellID(place.s2_cell_id));
-    country(ll.lng.deg(), ll.lat.deg())
 }
 
 /// The Wikidata IDs in `osm`'s brand/operator/network tags, with
@@ -349,10 +345,7 @@ mod tests {
         assert_eq!(features.lines().count(), 1 + 2, "{features}");
         assert!(features.contains("Q680727\t\tshop=supermarket\t1\n"));
         let names = std::fs::read_to_string(brand_totals::names_path(workdir.path()))?;
-        assert!(
-            names.contains("Q379911\tCH\tbrand\tDenner\t0\t1\n"),
-            "{names}"
-        );
+        assert!(names.contains("Q379911\tbrand\tDenner\t0\t1\n"), "{names}");
 
         // Calling again should reuse the existing file, not fail or
         // recompute.

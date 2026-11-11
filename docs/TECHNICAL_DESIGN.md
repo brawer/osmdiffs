@@ -399,9 +399,9 @@ fetch away.
   rivers and the like. Visits every feature in `osm-features.index`.
   On the side, it writes `osm-brands.tsv`, the number of OSM features
   per Wikidata ID, country and main category (such as
-  `shop=supermarket`), and `brand-names.tsv`, the three most common
-  `brand`, `operator` or `network` names per ID, country and key, with
-  how often OSM and ATP use them
+  `shop=supermarket`), and `brand-names.tsv`, one `brand`,
+  `operator` or `network` name per ID and key: the most common one in
+  Latin script, or else the most common one, from OSM and ATP
   ([`brand_totals.rs`](../src/pipeline/brand_totals.rs)). The spider
   stats compare ATP with the first, and show the second so that
   readers needn't look up Wikidata IDs.
