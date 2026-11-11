@@ -214,7 +214,9 @@ fn produce_edits(
             let Some(suggester) = create_edit_suggester(&row.atp_tags) else {
                 return Ok(());
             };
-            let Some(tags) = suggester.suggest_edit(&row.atp_tags, &row.osm_tags) else {
+            let centroid = decode_centroid(&row.osm_geometry_wkb)?;
+            let Some(tags) = suggester.suggest_edit(&row.atp_tags, &row.osm_tags, Some(centroid))
+            else {
                 return Ok(());
             };
             let edit = SuggestedEdit {
@@ -222,7 +224,7 @@ fn produce_edits(
                 osm_type: row.osm_type.clone(),
                 osm_version: row.osm_version,
                 tags,
-                centroid: decode_centroid(&row.osm_geometry_wkb)?,
+                centroid,
                 importance: row.importance,
             };
             num_edits.fetch_add(1, Ordering::Relaxed);
