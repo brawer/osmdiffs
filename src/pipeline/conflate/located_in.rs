@@ -13,6 +13,10 @@
 //!   `brand:wikidata` in a [HOST_CATEGORIES] category, such as the
 //!   pharmacy and the liquor store that the `publix_us` spider lists
 //!   next to each Publix supermarket.
+//!   A department-category ATP feature inside an OSM feature of a
+//!   [HOST_CATEGORIES] category and of its own `brand:wikidata` is a
+//!   department too, however far the ATP host is; see
+//!   [enclosing_host].
 //! - An ATP feature with `located_in:wikidata` or `located_in`, which
 //!   some spiders set, such as `starbucks_us` for its cafés in Target
 //!   stores.
@@ -261,6 +265,47 @@ pub(super) fn find_departments(reader: &PlaceReader) -> Result<HashMap<u64, Host
     Ok(departments)
 }
 
+/// The main category and `brand:wikidata` IDs of `place`, if it is in
+/// a [DEPARTMENT_CATEGORIES] category and has a brand. Such a feature
+/// is a department if an OSM host of its brand contains it; see
+/// [enclosing_host].
+pub(super) fn department_brands(place: &Place) -> Option<(&'static str, Vec<u64>)> {
+    let tags = || place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+    let own = main_category(tags())
+        .and_then(|c| DEPARTMENT_CATEGORIES.iter().find(|d| **d == c).copied())?;
+    let brands: Vec<u64> = brand_ids(tags()).collect();
+    (!brands.is_empty()).then_some((own, brands))
+}
+
+/// The host of a department-category ATP feature of main category
+/// `own` and `brand:wikidata` `brands`, at `point`, if the OSM feature
+/// with `tags` is a [HOST_CATEGORIES] store of one of these brands and
+/// its `geometry` contains `point`. `geometry` is only called for such
+/// a store. Spiders sometimes put the
+/// pharmacy of a large supermarket more than [DEPARTMENT_METERS] from
+/// the supermarket, but still inside its building; see
+/// [brawer/osmdiffs#930](https://github.com/brawer/osmdiffs/issues/930).
+pub(super) fn enclosing_host<'a>(
+    own: &'static str,
+    brands: &[u64],
+    tags: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+    geometry: impl FnOnce() -> Option<geo::Geometry>,
+    point: &geo::Point,
+) -> Option<Host> {
+    use geo::Contains;
+    let category = main_category(tags.clone())
+        .and_then(|c| HOST_CATEGORIES.iter().find(|h| **h == c).copied())?;
+    let ids: Vec<u64> = brand_ids(tags).filter(|id| brands.contains(id)).collect();
+    if ids.is_empty() || !geometry().is_some_and(|g| g.contains(point)) {
+        return None;
+    }
+    Some(Host::Department {
+        brands: ids,
+        category,
+        own,
+    })
+}
+
 /// The category in [DEPARTMENT_CATEGORIES] or [HOST_CATEGORIES] that
 /// equals `category`.
 fn known_category(category: &str) -> Option<&'static str> {
@@ -356,6 +401,87 @@ mod tests {
         assert!(same_business_name("edeka brehm", "edeka"));
         assert!(!same_business_name("hit", "hitachi"));
         assert!(!same_business_name("", "rewe"));
+    }
+
+    #[test]
+    fn test_enclosing_host() {
+        let building: geo::Geometry = geo::Polygon::new(
+            geo::LineString::from(vec![(0.0, 0.0), (0.002, 0.0), (0.002, 0.002), (0.0, 0.002)]),
+            vec![],
+        )
+        .into();
+        let inside = geo::Point::new(0.0019, 0.0019);
+        let outside = geo::Point::new(0.003, 0.001);
+        let supermarket = [("shop", "supermarket"), ("brand:wikidata", "Q7;Q9")];
+        assert_eq!(
+            enclosing_host(
+                "amenity=pharmacy",
+                &[7],
+                supermarket.iter().copied(),
+                || Some(building.clone()),
+                &inside
+            ),
+            Some(Host::Department {
+                brands: vec![7],
+                category: "shop=supermarket",
+                own: "amenity=pharmacy",
+            })
+        );
+        let host = |tags: &[(&'static str, &'static str)], brands: &[u64], p: &geo::Point| {
+            enclosing_host(
+                "amenity=pharmacy",
+                brands,
+                tags.iter().copied(),
+                || Some(building.clone()),
+                p,
+            )
+        };
+        assert_eq!(host(&supermarket, &[7], &outside), None);
+        assert_eq!(host(&supermarket, &[8], &inside), None);
+        let mall = [("shop", "mall"), ("brand:wikidata", "Q7")];
+        assert_eq!(host(&mall, &[7], &inside), None);
+        let pharmacy = [("amenity", "pharmacy"), ("brand:wikidata", "Q7")];
+        assert_eq!(host(&pharmacy, &[7], &inside), None);
+        let node: geo::Geometry = geo::Point::new(0.0018, 0.0019).into();
+        assert_eq!(
+            enclosing_host(
+                "amenity=pharmacy",
+                &[7],
+                supermarket.iter().copied(),
+                || Some(node.clone()),
+                &inside
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_department_brands() {
+        let place = |tags: &[(&str, &str)]| {
+            let coord = geo::Coord { x: 8.5, y: 47.4 };
+            Place::new(
+                &coord,
+                "test_spider".to_string(),
+                MatchMask::SHOP,
+                tags.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                &geo::Point::from(coord).into(),
+                crate::utils::UtcTimestamp(
+                    time::UtcDateTime::from_unix_timestamp(1_770_000_000).unwrap(),
+                ),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            department_brands(&place(&[("amenity", "pharmacy"), ("brand:wikidata", "Q7")])),
+            Some(("amenity=pharmacy", vec![7]))
+        );
+        assert_eq!(department_brands(&place(&[("amenity", "pharmacy")])), None);
+        assert_eq!(
+            department_brands(&place(&[("shop", "supermarket"), ("brand:wikidata", "Q7")])),
+            None
+        );
     }
 
     #[test]

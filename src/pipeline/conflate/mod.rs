@@ -70,7 +70,7 @@ mod writer;
 use deletion::{AtpCoverage, Candidate, Reason, deletion_reason, local_keys, place_country};
 use diagnostics::{Diagnostics, Missing};
 use local_coverage::{LocalCoverage, LocalKey, MIN_LOCAL_SHARE};
-use located_in::{Host, find_departments, located_in_tag};
+use located_in::{Host, department_brands, enclosing_host, find_departments, located_in_tag};
 use s2_util::MergedCellRanges;
 use writer::{MatchInfo, ParquetRow, ParquetWriter};
 
@@ -266,8 +266,20 @@ fn produce_rows(
         elapsed_seconds = start.elapsed().as_secs_f64();
         "conflate.departments: done"
     );
+    // Departments that [find_departments] missed, but whose position is
+    // inside an OSM store of their brand, by ordinal; see
+    // [enclosing_host].
+    let enclosing_hosts: Mutex<HashMap<u64, Host>> = Mutex::new(HashMap::new());
     let host_of = |ordinal: u64, atp: &Place| {
-        located_in_tag(atp).or_else(|| departments.get(&ordinal).cloned())
+        located_in_tag(atp)
+            .or_else(|| departments.get(&ordinal).cloned())
+            .or_else(|| {
+                enclosing_hosts
+                    .lock()
+                    .expect("enclosing_hosts lock")
+                    .get(&ordinal)
+                    .cloned()
+            })
     };
     let located_in_rows = AtomicU64::new(0);
     // Sends the row of an ATP feature without a match, and returns
@@ -323,7 +335,7 @@ fn produce_rows(
                 return Ok(());
             };
             has_matcher[i].store(matcher.counts_for_coverage(), Ordering::Relaxed);
-            let host = host_of(batch_start + i as u64, atp);
+            let mut host = host_of(batch_start + i as u64, atp);
             let keep = if matcher.is_exclusive() {
                 EXCLUSIVE_CANDIDATES
             } else {
@@ -342,23 +354,69 @@ fn produce_rows(
             // OSM features of the kind that the matcher found no
             // evidence for, for the diagnostics.
             let mut rejected = Vec::new();
-            for (lo, hi) in MergedCellRanges::new(covering) {
-                for r in osm.index.query(lo..=hi, atp.mask) {
-                    let feature = osm.index.get_feature(r)?;
-                    osm_candidates_decoded.fetch_add(1, Ordering::Relaxed);
+            // A department-category feature that isn't known to be in a
+            // host yet may still be inside an OSM store of its brand, so
+            // its candidates are held and scored only once all have been
+            // seen, when the host is known; see [enclosing_host].
+            let maybe_enclosed = match host {
+                None => department_brands(atp),
+                Some(_) => None,
+            };
+            let point = maybe_enclosed.as_ref().map(|_| {
+                let ll = s2::latlng::LatLng::from(s2::cellid::CellID(atp.s2_cell_id));
+                geo::Point::new(ll.lng.deg(), ll.lat.deg())
+            });
+            let mut held = Vec::new();
+            let mut score_candidate =
+                |r: LocalFeatureRef, feature: &Feature, host: Option<&Host>| -> Result<()> {
                     let candidate = OsmCandidate {
-                        feature: &feature,
+                        feature,
                         strings: &osm.strings,
                     };
-                    if host.as_ref().is_some_and(|h| h.excludes(candidate.tags())) {
-                        continue;
+                    if host.is_some_and(|h| h.excludes(candidate.tags())) {
+                        return Ok(());
                     }
                     let score = matcher.score_osm_candidate(&candidate);
                     if score <= 0.0 && rejected.len() < diagnostics::MAX_REJECTED {
                         rejected.push(r);
                     }
                     keep_best(&mut best, keep, score, r);
+                    Ok(())
+                };
+            for (lo, hi) in MergedCellRanges::new(covering) {
+                for r in osm.index.query(lo..=hi, atp.mask) {
+                    let feature = osm.index.get_feature(r)?;
+                    osm_candidates_decoded.fetch_add(1, Ordering::Relaxed);
+                    let (Some((own, brands)), Some(point)) = (&maybe_enclosed, &point) else {
+                        score_candidate(r, &feature, host.as_ref())?;
+                        continue;
+                    };
+                    if host.is_none() {
+                        let candidate = OsmCandidate {
+                            feature: &feature,
+                            strings: &osm.strings,
+                        };
+                        host = enclosing_host(
+                            own,
+                            brands,
+                            candidate.tags(),
+                            || candidate.geometry().ok(),
+                            point,
+                        );
+                    }
+                    held.push((r, feature));
                 }
+            }
+            for (r, feature) in &held {
+                score_candidate(*r, feature, host.as_ref())?;
+            }
+            if maybe_enclosed.is_some()
+                && let Some(host) = &host
+            {
+                enclosing_hosts
+                    .lock()
+                    .expect("enclosing_hosts lock")
+                    .insert(batch_start + i as u64, host.clone());
             }
 
             // An exclusive matcher without candidates has nothing to

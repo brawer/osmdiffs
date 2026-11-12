@@ -48,7 +48,12 @@ in `src/pipeline/conflate/mod.rs`.
    (supermarket, hypermarket, department store, furniture, wholesale)
    is within 75 m. Spiders often put a department at the entrance and
    the store at its center, so the distance has to allow for large
-   buildings.
+   buildings. It is also a department if its position lies inside an
+   OSM feature of a host category and of its own `brand:wikidata`,
+   however far the ATP store is. In the production run of 2026-11-10,
+   six pharmacies of `albertsons` and `safeway` were 77 to 235 m from
+   their ATP supermarket but inside its OSM building, and matched the
+   supermarket ([#930](https://github.com/brawer/osmdiffs/issues/930)).
 2. **Keep it off the host.** A department doesn't match OSM features in
    a host category, nor those in another department category: the
    Publix pharmacy must not take the Publix Liquors either. Café, fast
