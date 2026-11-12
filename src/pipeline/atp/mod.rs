@@ -116,7 +116,10 @@ pub fn import_atp(
             // out aren't in the parquet file; without it, they stay
             // missing.
             let counts = spider_counts::path(workdir);
-            let counts_missing = !counts.exists() || is_stale(&counts)?;
+            // Counts from a version without dataset attributes count
+            // as missing.
+            let counts_missing =
+                !counts.exists() || is_stale(&counts)? || !spider_counts::is_current(&counts)?;
             if !counts_missing || zip_modified.is_none() {
                 if counts_missing {
                     log::warn!("import_atp: no spider counts, and no zip to count from");
@@ -335,14 +338,18 @@ fn process_geojson<T: Read>(
         let mut json = first_line?;
         json.push_str("]}");
         let parsed = json.parse::<geojson::FeatureCollection>()?;
-        if let Some(spider) = parsed
+        let attrs = parsed
             .foreign_members
             .as_ref()
-            .and_then(|m| m.get("dataset_attributes"))
+            .and_then(|m| m.get("dataset_attributes"));
+        if let Some(spider) = attrs
             .and_then(|a| a.get("@spider"))
             .and_then(|s| s.as_str())
         {
             counts.spider = spider.to_string();
+        }
+        if let Some(attrs) = attrs {
+            counts.dataset_attributes = spider_counts::attribute_pairs(attrs);
         }
         if !is_usable_for_osm(&parsed) {
             // Ignore FeatureCollections that can't be conflated with OSM
@@ -968,9 +975,23 @@ mod tests {
         let licensed = file(r#""license:wikidata":"Q20007257""#);
         let c = process_geojson(Cursor::new(licensed), "output/x.geojson", None, None)?;
         assert_eq!((c.features, c.not_for_osm, c.written()), (3, 3, 0));
+        // Kept even for a spider whose features we leave out, since
+        // the license says why.
+        assert_eq!(
+            c.dataset_attributes,
+            vec![
+                ("@spider".to_string(), "s".to_string()),
+                ("license:wikidata".to_string(), "Q20007257".to_string()),
+                (
+                    "spider:collection_time".to_string(),
+                    "2026-11-01T00:00:00".to_string()
+                ),
+            ]
+        );
 
         let c = process_geojson(Cursor::new(""), "output/crashed.geojson", None, None)?;
         assert_eq!((c.spider.as_str(), c.features), ("crashed", 0));
+        assert!(c.dataset_attributes.is_empty());
         Ok(())
     }
 

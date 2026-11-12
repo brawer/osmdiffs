@@ -229,6 +229,36 @@ fn assert_spider_stats(path: &Path) -> Result<()> {
     // Small spiders move all their features for chance pairs.
     assert_eq!(numbers("chance_sampled"), [1, 0, 1, 3, 1, 2]);
 
+    // The dataset attributes of each spider's FeatureCollection; none
+    // for the crashed spider, whose file is empty.
+    let attributes = column("dataset_attributes");
+    let attributes = attributes
+        .as_any()
+        .downcast_ref::<arrow::array::MapArray>()
+        .unwrap();
+    let attribute = |row: usize, key: &str| -> Option<String> {
+        let entries = attributes.value(row);
+        let keys = entries.column(0).as_any().downcast_ref::<StringArray>()?;
+        let values = entries.column(1).as_any().downcast_ref::<StringArray>()?;
+        (0..keys.len())
+            .find(|&i| keys.value(i) == key)
+            .map(|i| values.value(i).to_string())
+    };
+    assert_eq!(attributes.value(1).len(), 0);
+    assert_eq!(attribute(0, "@spider").as_deref(), Some("denner_ch"));
+    assert_eq!(
+        attribute(0, "spider:lineage").as_deref(),
+        Some("S_ATP_BRANDS")
+    );
+    assert_eq!(
+        attribute(5, "license").as_deref(),
+        Some("Creative Commons Zero")
+    );
+    assert_eq!(
+        attribute(5, "attribution:name:en").as_deref(),
+        Some("City of Winterthur")
+    );
+
     let offset = column("offset_east_m");
     let offset = offset
         .as_any()

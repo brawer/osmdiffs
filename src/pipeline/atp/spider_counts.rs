@@ -13,7 +13,12 @@ use super::run_stats::SpiderRunStats;
 /// Filename, within `workdir`, of the counts that `import_atp` writes.
 const FILENAME: &str = "alltheplaces.spider-counts.tsv";
 
-const HEADER: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum";
+const HEADER: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum\tdataset_attributes";
+
+/// The header before the file had `dataset_attributes`; [read] still
+/// reads such files, with no attributes, and [is_current] tells
+/// `import_atp` to count again where it can.
+const OLD_HEADER: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum";
 
 /// Path of the counts that `import_atp` writes in `workdir`.
 pub(in crate::pipeline) fn path(workdir: &Path) -> PathBuf {
@@ -44,6 +49,12 @@ pub(in crate::pipeline) struct SpiderCounts {
     /// look, as in tests without OSM data. The other two are converted
     /// to WGS-84.
     pub datum: String,
+
+    /// The `dataset_attributes` of the spider's FeatureCollection, such
+    /// as `license` or `attribution:name`, sorted by key. Values that
+    /// aren't JSON strings are kept as JSON text. Empty for a spider
+    /// that crashed, since its file is empty.
+    pub dataset_attributes: Vec<(String, String)>,
 }
 
 impl SpiderCounts {
@@ -63,10 +74,22 @@ pub(super) fn write(counts: &mut [SpiderCounts], out: &Path) -> Result<()> {
     );
     writeln!(w, "{HEADER}")?;
     for c in counts.iter() {
+        // As a JSON object, which escapes any tabs and newlines.
+        let attrs: serde_json::Map<String, serde_json::Value> = c
+            .dataset_attributes
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}\t{}",
-            c.spider, c.features, c.not_for_osm, c.invalid, c.in_china, c.datum
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            c.spider,
+            c.features,
+            c.not_for_osm,
+            c.invalid,
+            c.in_china,
+            c.datum,
+            serde_json::Value::Object(attrs)
         )?;
     }
     w.into_inner()?.sync_all()?;
@@ -78,15 +101,25 @@ pub(super) fn write(counts: &mut [SpiderCounts], out: &Path) -> Result<()> {
 pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
     let file = std::fs::File::open(path).with_context(|| format!("could not open {path:?}"))?;
     let mut lines = BufReader::new(file).lines();
-    if lines.next().transpose()?.as_deref() != Some(HEADER) {
-        anyhow::bail!("{path:?} doesn't start with the expected header");
-    }
+    let num_cols = match lines.next().transpose()?.as_deref() {
+        Some(HEADER) => 7,
+        Some(OLD_HEADER) => 6,
+        _ => anyhow::bail!("{path:?} doesn't start with the expected header"),
+    };
     let mut counts = Vec::new();
     for line in lines {
         let line = line?;
         let cols: Vec<&str> = line.split('\t').collect();
-        let [spider, features, not_for_osm, invalid, in_china, datum] = cols[..] else {
+        if cols.len() != num_cols {
             anyhow::bail!("bad line in {path:?}: {line:?}");
+        }
+        let [spider, features, not_for_osm, invalid, in_china, datum] = cols[..6] else {
+            unreachable!("checked the number of columns");
+        };
+        let dataset_attributes = match cols.get(6) {
+            Some(json) => parse_attributes(json)
+                .with_context(|| format!("bad dataset_attributes in {path:?}: {line:?}"))?,
+            None => Vec::new(),
         };
         let num = |s: &str| -> Result<u64> {
             s.parse()
@@ -99,9 +132,48 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
             invalid: num(invalid)?,
             in_china: num(in_china)?,
             datum: datum.to_string(),
+            dataset_attributes,
         });
     }
     Ok(counts)
+}
+
+/// Whether the counts at `path` were written by this version, with the
+/// dataset attributes, rather than by an earlier one.
+pub(super) fn is_current(path: &Path) -> Result<bool> {
+    let file = std::fs::File::open(path).with_context(|| format!("could not open {path:?}"))?;
+    let first = BufReader::new(file).lines().next().transpose()?;
+    Ok(first.as_deref() == Some(HEADER))
+}
+
+/// The dataset attributes of a spider's FeatureCollection, as string
+/// key/value pairs sorted by key; see
+/// [SpiderCounts::dataset_attributes].
+pub(super) fn attribute_pairs(attrs: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(attrs) = attrs.as_object() else {
+        return Vec::new();
+    };
+    let mut pairs: Vec<(String, String)> = attrs
+        .iter()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(k, v)| {
+            let v = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            (k.clone(), v)
+        })
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+fn parse_attributes(json: &str) -> Result<Vec<(String, String)>> {
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    if !value.is_object() {
+        anyhow::bail!("not a JSON object");
+    }
+    Ok(attribute_pairs(&value))
 }
 
 /// Totals of `counts`, compared with what AllThePlaces says it wrote,
@@ -216,14 +288,57 @@ mod tests {
                 invalid: 1,
                 in_china: 4,
                 datum: "gcj02".into(),
+                dataset_attributes: vec![
+                    ("attribution:name".into(), "Zara\tSA\nLine 2".into()),
+                    ("license".into(), "Creative Commons Zero".into()),
+                ],
             },
             counts("crashed", 0),
         ];
         write(&mut written, &out)?;
         assert_eq!(written[0].spider, "crashed");
         assert_eq!(read(&out)?, written);
+        assert!(is_current(&out)?);
         assert_eq!(written[1].written(), 9);
         Ok(())
+    }
+
+    #[test]
+    fn test_read_old_header() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let out = path(dir.path());
+        std::fs::write(&out, format!("{OLD_HEADER}\nzara\t10\t0\t1\t4\tgcj02\n"))?;
+        let c = read(&out)?;
+        assert_eq!((c[0].features, c[0].datum.as_str()), (10, "gcj02"));
+        assert!(c[0].dataset_attributes.is_empty());
+        assert!(!is_current(&out)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_attribute_pairs() {
+        let attrs = serde_json::json!({
+            "license": "CC0",
+            "@spider": "x",
+            "nsi_id": 42,
+            "use:openstreetmap": true,
+            "gone": null,
+        });
+        let pairs = attribute_pairs(&attrs);
+        let pairs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("@spider", "x"),
+                ("license", "CC0"),
+                ("nsi_id", "42"),
+                ("use:openstreetmap", "true"),
+            ]
+        );
+        assert!(attribute_pairs(&serde_json::json!("x")).is_empty());
     }
 
     #[test]
