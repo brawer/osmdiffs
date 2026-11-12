@@ -42,6 +42,7 @@ invalid                  UINT64   nullable — left out: no usable geometry, or 
 no_matcher               UINT64   nullable — kept, but no matcher handles their kind
 in_china                 UINT64   nullable — features in mainland China
 datum                    UTF8     nullable — "wgs84", "gcj02" or "bd09", for in_china
+dataset_attributes       MAP<UTF8, UTF8> nullable — the spider's dataset attributes, such as its license
 rows                     UINT64   non-null — rows in conflated.parquet
 same                     UINT64   non-null — rows with match.relation = "same"
 located_in               UINT64   non-null — rows with match.relation = "located_in"
@@ -101,6 +102,22 @@ Chinese sources give coordinates in the GCJ-02 or BD-09 datum, which
 are hundreds of meters off. We find out which datum a spider uses by
 comparing its features with OpenStreetMap, and convert them to WGS-84
 before matching.
+
+### Dataset attributes
+
+`dataset_attributes` holds the `dataset_attributes` that AllThePlaces
+puts on the spider's GeoJSON FeatureCollection, such as `license`,
+`license:wikidata`, `attribution:name`, `use:openstreetmap` and
+`spider:lineage`; see AllThePlaces'
+[documentation](https://github.com/alltheplaces/alltheplaces/blob/master/docs/SPIDER_LINEAGE.md).
+They are there so that import documents and edits can cite the source,
+license and attribution of a feature without repeating them on every
+row of `conflated.parquet`: join on `atp.fetched.spider` there. The
+entries are sorted by key. A value that isn't a string in the GeoJSON,
+such as a number, is given as its JSON text. The map is empty for a
+spider whose file in the dump is empty, and null for one without a
+file. We keep the attributes of spiders whose features we leave out
+too, since their license says why.
 
 ### How they matched
 
@@ -213,6 +230,15 @@ SELECT spider, missing_in_osm, rows
 FROM 'spider-stats.parquet'
 ORDER BY missing_in_osm DESC
 LIMIT 10;
+```
+
+The license of each spider whose features we left out:
+
+```sql
+SELECT spider, not_for_osm, dataset_attributes['license'] AS license
+FROM 'spider-stats.parquet'
+WHERE not_for_osm > 0
+ORDER BY not_for_osm DESC;
 ```
 
 And the brands of one spider:

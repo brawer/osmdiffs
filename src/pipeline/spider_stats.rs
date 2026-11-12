@@ -25,8 +25,8 @@ use crate::utils::countries::{Country, country};
 use crate::utils::parquet::{get_binary, get_string, get_struct, get_tags, get_u64};
 use anyhow::{Context, Result};
 use arrow::array::{
-    Array, ArrayRef, Float32Array, Float32Builder, ListArray, ListBuilder, RecordBatch,
-    StringArray, StringBuilder, StructBuilder, UInt64Builder,
+    Array, ArrayRef, Float32Array, Float32Builder, ListArray, ListBuilder, MapBuilder,
+    MapFieldNames, RecordBatch, StringArray, StringBuilder, StructBuilder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use geo::Centroid;
@@ -564,6 +564,24 @@ fn histogram_field(name: &str) -> Field {
     )
 }
 
+/// `MAP<UTF8, UTF8>`, like the `tags` of `conflated.parquet`. The
+/// entries are sorted by key, but like there, the type doesn't say so,
+/// since `MapBuilder` can't.
+fn attributes_type() -> DataType {
+    DataType::Map(Arc::new(attributes_entries()), /* sorted */ false)
+}
+
+fn attributes_entries() -> Field {
+    Field::new(
+        "key_value",
+        DataType::Struct(Fields::from(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, false),
+        ])),
+        false,
+    )
+}
+
 fn list_of(fields: Fields) -> DataType {
     DataType::List(Arc::new(Field::new(
         "item",
@@ -583,6 +601,7 @@ pub(super) fn schema() -> Schema {
         Field::new("no_matcher", DataType::UInt64, true),
         Field::new("in_china", DataType::UInt64, true),
         Field::new("datum", DataType::Utf8, true),
+        Field::new("dataset_attributes", attributes_type(), true),
         u64_field("rows"),
         u64_field("same"),
         u64_field("located_in"),
@@ -643,6 +662,16 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
     let mut no_matcher = UInt64Builder::new();
     let mut in_china = UInt64Builder::new();
     let mut datum = StringBuilder::new();
+    let mut attributes = MapBuilder::new(
+        Some(MapFieldNames {
+            entry: "key_value".into(),
+            key: "key".into(),
+            value: "value".into(),
+        }),
+        StringBuilder::new(),
+        StringBuilder::new(),
+    )
+    .with_values_field(Arc::new(Field::new("value", DataType::Utf8, false)));
     let mut num_rows = UInt64Builder::new();
     let mut same = UInt64Builder::new();
     let mut located_in = UInt64Builder::new();
@@ -691,6 +720,16 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
                 .map(|c| c.datum.as_str())
                 .filter(|d| !d.is_empty()),
         );
+        match row.counts {
+            Some(c) => {
+                for (k, v) in &c.dataset_attributes {
+                    attributes.keys().append_value(k);
+                    attributes.values().append_value(v);
+                }
+                attributes.append(true)?;
+            }
+            None => attributes.append(false)?,
+        }
         num_rows.append_value(s.rows);
         same.append_value(s.same);
         located_in.append_value(s.located_in);
@@ -822,6 +861,7 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         Arc::new(no_matcher.finish()),
         Arc::new(in_china.finish()),
         Arc::new(datum.finish()),
+        Arc::new(attributes.finish()),
         Arc::new(num_rows.finish()),
         Arc::new(same.finish()),
         Arc::new(located_in.finish()),
@@ -922,6 +962,10 @@ mod tests {
             spider: "denner".into(),
             features: 3,
             invalid: 1,
+            dataset_attributes: vec![
+                ("@spider".into(), "denner".into()),
+                ("license".into(), "Creative Commons Zero".into()),
+            ],
             ..Default::default()
         };
         let empty = Spider::default();
@@ -972,6 +1016,15 @@ mod tests {
         assert!(u64s("no_matcher").is_null(1));
         assert!(u64s("atp_features").is_null(0));
         assert_eq!(u64s("missing_taken").value(1), 0);
+
+        let attributes = get_tags(&batch, "dataset_attributes", 0)?;
+        assert_eq!(attributes, counts.dataset_attributes);
+        assert!(
+            batch
+                .column_by_name("dataset_attributes")
+                .unwrap()
+                .is_null(1)
+        );
 
         let brands = batch.column_by_name("brands").unwrap();
         let brands = brands.as_any().downcast_ref::<ListArray>().unwrap();
