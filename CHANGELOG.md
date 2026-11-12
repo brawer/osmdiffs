@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.8.14](https://github.com/brawer/osmdiffs/compare/v0.8.13...v0.8.14) (2026-11-12)
+
+
+### 🆕 Enhancements
+
+* **atp:** Count what happens to each spider's features ([#927](https://github.com/brawer/osmdiffs/issues/927)) ([9e97d97](https://github.com/brawer/osmdiffs/commit/9e97d97cf4cd8ff53ee6768df01cbb0a5ac8e3fa))
+* **conflate:** add matcher diagnostics to the spider stats ([#937](https://github.com/brawer/osmdiffs/issues/937)) ([bfff083](https://github.com/brawer/osmdiffs/commit/bfff0835ba5ce5ae15d78b08e5145d4d47d2ce37))
+* **conflate:** log memory on the sub-step done lines ([#938](https://github.com/brawer/osmdiffs/issues/938)) ([95d065d](https://github.com/brawer/osmdiffs/commit/95d065d37f63aa8e18f77d6d892049883c9965fa)), closes [#932](https://github.com/brawer/osmdiffs/issues/932)
+* **osm:** Store each feature's country in the OSM index ([#934](https://github.com/brawer/osmdiffs/issues/934)) ([567e197](https://github.com/brawer/osmdiffs/commit/567e197d0a8b3566c9ef5517cd783a7ef61d4f52))
+* **pipeline:** write and publish spider-stats.parquet ([#936](https://github.com/brawer/osmdiffs/issues/936)) ([1975d7a](https://github.com/brawer/osmdiffs/commit/1975d7ae13c444eeb84101762f8642e5db18da06))
+* **spider-stats:** keep ATP's dataset attributes per spider ([#940](https://github.com/brawer/osmdiffs/issues/940)) ([21e71ea](https://github.com/brawer/osmdiffs/commit/21e71eaedd4b0c18e2be979abc81cb27500b9a05))
+* **wikidata:** Count OSM features and names per brand ([#928](https://github.com/brawer/osmdiffs/issues/928)) ([9289cb8](https://github.com/brawer/osmdiffs/commit/9289cb85969ee459239feb030ca7deab9131fad8))
+
+
+### 🐞 Bug Fixes
+
+* **conflate:** treat stores inside their brand's OSM host as departments ([#939](https://github.com/brawer/osmdiffs/issues/939)) ([27db852](https://github.com/brawer/osmdiffs/commit/27db8522735e3952be6dbecd38b1a0291c3c9626))
+* **edits:** Compare opening hours as weekly schedules ([#926](https://github.com/brawer/osmdiffs/issues/926)) ([88932dc](https://github.com/brawer/osmdiffs/commit/88932dc95b4219a4b49bd196dff5d8fd5551c11c))
+* **edits:** Compare tag values as the matchers do ([#925](https://github.com/brawer/osmdiffs/issues/925)) ([c634ce2](https://github.com/brawer/osmdiffs/commit/c634ce2d09398ef506c9bd2a7d9afb7ea1660355))
+* **tiles:** Keep every point at z13–15 in conflated.pmtiles ([#916](https://github.com/brawer/osmdiffs/issues/916)) ([fc40356](https://github.com/brawer/osmdiffs/commit/fc40356a6cfdba3a95cece06239ca384c18402d8))
+* **tiles:** Keep every point at z13–15 in conflated.pmtiles ([#918](https://github.com/brawer/osmdiffs/issues/918)) ([fc40356](https://github.com/brawer/osmdiffs/commit/fc40356a6cfdba3a95cece06239ca384c18402d8))
+
+
+### 📚 Documentation
+
+* **atp:** Record unclear datum votes and their deletion candidates ([#919](https://github.com/brawer/osmdiffs/issues/919)) ([4811882](https://github.com/brawer/osmdiffs/commit/4811882d5d9b7dbbae3f2dfb0cb5ef8b45f5099a))
+* **conflate:** Record production memory of local deletion coverage ([#915](https://github.com/brawer/osmdiffs/issues/915)) ([a444640](https://github.com/brawer/osmdiffs/commit/a444640441f1bf8865021b068dd8b07049982f9b))
+
+
+### 🚧 Maintenance
+
+* **ci:** Bump amannn/action-semantic-pull-request from 6.1.1 to 6.1.2 ([#922](https://github.com/brawer/osmdiffs/issues/922)) ([f44e0bf](https://github.com/brawer/osmdiffs/commit/f44e0bf37852934639d1941c000efe1ab43f702c))
+* **ci:** Bump docker/login-action from 4.7.0 to 4.8.0 ([#923](https://github.com/brawer/osmdiffs/issues/923)) ([1416fdf](https://github.com/brawer/osmdiffs/commit/1416fdf2416c63796038651b817640f03019b2f0))
+* **ci:** Bump taiki-e/install-action from 2.89.1 to 2.90.3 ([#921](https://github.com/brawer/osmdiffs/issues/921)) ([4fd2500](https://github.com/brawer/osmdiffs/commit/4fd2500c844681e0088e006e2656b7b83c9f1720))
+* **ci:** Bump the codeql group across 1 directory with 3 updates ([#920](https://github.com/brawer/osmdiffs/issues/920)) ([aa50455](https://github.com/brawer/osmdiffs/commit/aa5045590e43329ac446162dfb8247068623f544))
+
 ## [0.8.13](https://github.com/brawer/osmdiffs/compare/v0.8.12...v0.8.13) (2026-11-09)
 
 
