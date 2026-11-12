@@ -356,8 +356,8 @@ fn produce_rows(
             let mut rejected = Vec::new();
             // A department-category feature that isn't known to be in a
             // host yet may still be inside an OSM store of its brand, so
-            // its candidates are kept until all have been seen; see
-            // [enclosing_host].
+            // its candidates are held and scored only once all have been
+            // seen, when the host is known; see [enclosing_host].
             let maybe_enclosed = match host {
                 None => department_brands(atp),
                 Some(_) => None,
