@@ -523,6 +523,18 @@ fn log_snapshot(name: &str, phase: &str, elapsed_seconds: Option<f64>) {
     }
 }
 
+/// Whether a memoized step can reuse its `outputs` as they are: they
+/// all exist, and none is older than any of its `inputs`. A step that
+/// reused its outputs whenever they merely existed would keep serving
+/// results built from older inputs on a kept workdir, after an earlier
+/// step was rebuilt from newer ones (brawer/osmdiffs#935).
+pub(crate) fn is_current(outputs: &[&Path], inputs: &[&Path]) -> Result<bool> {
+    if !outputs.iter().all(|path| path.exists()) {
+        return Ok(false);
+    }
+    Ok(earliest_modified(outputs)? >= last_modified(inputs)?)
+}
+
 /// Returns the highest (most recent) last modification time among all paths.
 /// If any path does not exist or cannot be accessed, an error is returned.
 fn last_modified(paths: &[&Path]) -> Result<SystemTime> {
@@ -569,8 +581,33 @@ fn modified(path: &Path) -> Result<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{ops::Add, time::Duration};
+    use std::{
+        ops::{Add, Sub},
+        time::Duration,
+    };
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_is_current() -> Result<()> {
+        let input = NamedTempFile::new()?;
+        let out_a = NamedTempFile::new()?;
+        let out_b = NamedTempFile::new()?;
+        let t0 = SystemTime::now();
+        input.as_file().set_modified(t0)?;
+        out_a.as_file().set_modified(t0.add(Duration::new(1, 0)))?;
+        out_b.as_file().set_modified(t0.add(Duration::new(2, 0)))?;
+        let outputs = [out_a.path(), out_b.path()];
+        assert!(is_current(&outputs, &[input.path()])?);
+
+        // One output older than the input is enough to rebuild.
+        out_a.as_file().set_modified(t0.sub(Duration::new(1, 0)))?;
+        assert!(!is_current(&outputs, &[input.path()])?);
+
+        // So is a missing output.
+        let missing = Path::new("/no/such/file");
+        assert!(!is_current(&[out_b.path(), missing], &[input.path()])?);
+        Ok(())
+    }
 
     #[test]
     fn test_last_modified() -> Result<()> {

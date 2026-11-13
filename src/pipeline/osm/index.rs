@@ -42,7 +42,20 @@ pub fn build_index<'a>(
     workdir: &Path,
     out: &Path,
 ) -> Result<OsmFeatureIndex<'a>> {
-    if OsmFeatureIndex::exists(out) {
+    // Built from the assembly, which `import_osm` builds again from a
+    // newer planet: an index that merely exists might come from an
+    // older one, and its tag ids would then not match the new string
+    // pool.
+    let strings = super::assemble::strings_path(workdir);
+    let inputs = [
+        strings.as_path(),
+        assembly.nodes.path(),
+        assembly.ways.path(),
+        assembly.leaf_relations.path(),
+        assembly.super_relations.path(),
+    ];
+    let inverted = OsmFeatureIndex::inverted_index_path(out);
+    if OsmFeatureIndex::exists(out) && crate::pipeline::is_current(&[out, &inverted], &inputs)? {
         log::info!("skipping OsmFeatureIndex build, already found {:?}", out);
         return OsmFeatureIndex::open(out);
     }

@@ -1,6 +1,8 @@
 use anyhow::{Context, Ok, Result};
 use assert_cmd::{Command, cargo_bin};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use tempfile::TempDir;
 
 /// Sets up a workdir with the fixture inputs symlinked in (so the
@@ -367,6 +369,97 @@ fn test_workdir_run_id_guard() -> Result<()> {
         .failure()
         .stderr(predicates::str::contains("run-A"));
 
+    Ok(())
+}
+
+/// Modification times of the files a pipeline run built in `workdir`,
+/// leaving out its inputs (symlinks to the fixtures, and the copied
+/// planet) and what gets written again on every run: the log, and the
+/// local publish artifacts.
+fn built_files(workdir: &Path) -> Result<BTreeMap<String, SystemTime>> {
+    let mut files = BTreeMap::new();
+    for entry in std::fs::read_dir(workdir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let metadata = entry.path().symlink_metadata()?;
+        if !metadata.is_file()
+            || name == "planet-latest.osm.pbf"
+            || name == "pipeline.log"
+            || name == "datapackage.json"
+            || name.ends_with(".cdx.json")
+        {
+            continue;
+        }
+        files.insert(name, metadata.modified()?);
+    }
+    Ok(files)
+}
+
+fn rerun_pipeline(workdir: &Path) {
+    Command::new(cargo_bin!("osmdiffs"))
+        .arg("run")
+        .arg("--workdir")
+        .arg(workdir)
+        .assert()
+        .success();
+}
+
+/// brawer/osmdiffs#935: on a kept workdir, a run with a newer OSM
+/// planet (and the same ATP run) rebuilds everything that depends on
+/// OSM -- since `import_atp` converts Chinese positions using OSM, that
+/// is `alltheplaces.parquet` and every step after it -- rather than
+/// reusing outputs built from the old planet. And a run where neither
+/// changed reuses everything.
+#[test]
+fn test_kept_workdir_rebuilds_after_newer_osm() -> Result<()> {
+    let workdir = run_pipeline_on_fixtures(&[])?;
+    let first = built_files(workdir.path())?;
+    for name in [
+        "osm-features.index",
+        "alltheplaces.parquet",
+        "alltheplaces.brand-domains.tsv",
+        "osmviews-ranks",
+        "wikidata-ids",
+        "qrank-quantiles",
+        "conflated.parquet",
+        "matched.jsonl",
+        "conflated.pmtiles",
+        "spider-stats.parquet",
+        "shops.jsonl",
+        "diffed-places.pmtiles",
+    ] {
+        assert!(first.contains_key(name), "{name} was not produced");
+    }
+
+    // Neither input changed: nothing is built again.
+    rerun_pipeline(workdir.path());
+    assert_eq!(built_files(workdir.path())?, first);
+
+    // A newer planet: a copy, written just now, in place of the symlink
+    // (whose target is older than everything built from it).
+    let planet = workdir.path().join("planet-latest.osm.pbf");
+    let fixture = std::fs::canonicalize(&planet)?;
+    std::fs::remove_file(&planet)?;
+    std::fs::copy(&fixture, &planet)?;
+    rerun_pipeline(workdir.path());
+    let rebuilt = built_files(workdir.path())?;
+    assert_eq!(
+        rebuilt.keys().collect::<Vec<_>>(),
+        first.keys().collect::<Vec<_>>()
+    );
+    let stale: Vec<&String> = first
+        .iter()
+        .filter(|(name, modified)| rebuilt[*name] <= **modified)
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "not rebuilt after a newer planet: {stale:?}"
+    );
+
+    // And then, with nothing changed again, everything is reused.
+    rerun_pipeline(workdir.path());
+    assert_eq!(built_files(workdir.path())?, rebuilt);
     Ok(())
 }
 
