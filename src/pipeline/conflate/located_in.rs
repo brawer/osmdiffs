@@ -66,6 +66,33 @@ const HOST_CATEGORIES: &[&str] = &[
     "shop=wholesale",
 ];
 
+/// Main categories that an OSM feature must have to be the host of an
+/// ATP feature whose `located_in` names it, but whose
+/// `located_in:wikidata` doesn't: [HOST_CATEGORIES], plus other stores
+/// that the `located_in` spiders put businesses in. Without this, a
+/// Timpson in "Tesco" was `located_in` "Tesco Customer Toilets" or
+/// "Waitrose car park"; see
+/// [brawer/osmdiffs#929](https://github.com/brawer/osmdiffs/issues/929).
+const NAMED_HOST_CATEGORIES: &[&str] = &[
+    "shop=supermarket",
+    "shop=hypermarket",
+    "shop=department_store",
+    "shop=furniture",
+    "shop=wholesale",
+    "shop=convenience",
+    "shop=kiosk",
+    "shop=mall",
+    "shop=variety_store",
+    "shop=general",
+    "shop=pet",
+    "shop=stationery",
+    "shop=doityourself",
+    "shop=hardware",
+    "shop=chemist",
+    "shop=electronics",
+    "amenity=fuel",
+];
+
 /// A department and its host must be at most this far apart. Spiders
 /// often give a department the position of the store's entrance, and
 /// the store its center, so large stores need more than a few meters.
@@ -120,7 +147,9 @@ impl Host {
         }
     }
 
-    /// Whether the OSM feature with `tags` is the host. For the ATP
+    /// Whether the OSM feature with `tags` is the host. A host found
+    /// by name, not by `located_in:wikidata`, must be a store of a
+    /// [NAMED_HOST_CATEGORIES] category. For the ATP
     /// feature itself, this must be false, or it might match its own
     /// host; see [Host::excludes].
     pub(super) fn is_host<'a>(
@@ -144,6 +173,9 @@ impl Host {
                 let Some(name) = name else {
                     return false;
                 };
+                if !main_category(tags.clone()).is_some_and(|c| is_named_host_category(&c)) {
+                    return false;
+                }
                 tags.filter(|(k, _)| *k == "brand" || *k == "name")
                     .any(|(_, v)| same_business_name(&normalize_name(v), name))
             }
@@ -169,6 +201,20 @@ impl Host {
             Host::LocatedIn { .. } => self.is_host(tags),
         }
     }
+}
+
+/// Whether `category` is in [NAMED_HOST_CATEGORIES]. A category with
+/// several `;`-separated values, such as `shop=supermarket;fuel`, is
+/// if any of its values is.
+fn is_named_host_category(category: &str) -> bool {
+    let Some((key, values)) = category.split_once('=') else {
+        return false;
+    };
+    values.split(';').any(|v| {
+        NAMED_HOST_CATEGORIES
+            .iter()
+            .any(|c| c.split_once('=') == Some((key, v.trim())))
+    })
 }
 
 /// Whether two normalized names are the same, or one is the other
@@ -392,6 +438,65 @@ mod tests {
         assert!(merchant.is_host([("shop", "supermarket"), ("name", "REWE")].into_iter()));
         assert!(!merchant.is_host([("shop", "supermarket"), ("name", "REWE City")].into_iter()));
         assert!(!merchant.is_host([("shop", "supermarket"), ("name", "Rewel")].into_iter()));
+    }
+
+    #[test]
+    fn test_host_by_name_must_be_store() {
+        // https://github.com/brawer/osmdiffs/issues/929
+        let tesco = Host::LocatedIn {
+            ids: vec![],
+            name: Some("tesco".into()),
+        };
+        let is_host = |tags: &[(&'static str, &'static str)]| tesco.is_host(tags.iter().copied());
+        assert!(is_host(&[("shop", "supermarket"), ("name", "Tesco")]));
+        assert!(is_host(&[
+            ("shop", "convenience"),
+            ("name", "Tesco Express")
+        ]));
+        assert!(is_host(&[("amenity", "fuel"), ("name", "Tesco")]));
+        assert!(is_host(&[("shop", "supermarket;fuel"), ("name", "Tesco")]));
+        assert!(!is_host(&[
+            ("amenity", "toilets"),
+            ("name", "Tesco Customer Toilets")
+        ]));
+        assert!(!is_host(&[("amenity", "parking"), ("name", "Tesco")]));
+        assert!(!is_host(&[
+            ("amenity", "charging_station"),
+            ("name", "Tesco Extra - Gatwick")
+        ]));
+        assert!(!is_host(&[
+            ("amenity", "fast_food"),
+            ("name", "Tesco Café")
+        ]));
+        assert!(!is_host(&[("shop", "butcher"), ("name", "Tesco")]));
+        assert!(!is_host(&[("building", "retail"), ("name", "Tesco")]));
+        assert!(!is_host(&[
+            ("shop", "no"),
+            ("amenity", "parking"),
+            ("name", "Tesco")
+        ]));
+        assert!(!tesco.excludes([("amenity", "parking"), ("name", "Tesco")].into_iter()));
+
+        // A `located_in:wikidata` host may be of any category.
+        let by_id = Host::LocatedIn {
+            ids: vec![7],
+            name: Some("tesco".into()),
+        };
+        assert!(by_id.is_host([("amenity", "parking"), ("brand:wikidata", "Q7")].into_iter()));
+        assert!(!by_id.is_host([("amenity", "parking"), ("name", "Tesco")].into_iter()));
+        assert!(by_id.is_host([("shop", "supermarket"), ("name", "Tesco")].into_iter()));
+    }
+
+    #[test]
+    fn test_named_host_categories() {
+        for c in HOST_CATEGORIES {
+            assert!(NAMED_HOST_CATEGORIES.contains(c), "{c}");
+        }
+        assert!(is_named_host_category("shop=supermarket"));
+        assert!(is_named_host_category("shop=car_repair;convenience"));
+        assert!(!is_named_host_category("amenity=parking"));
+        assert!(!is_named_host_category("amenity=supermarket"));
+        assert!(!is_named_host_category("shop"));
     }
 
     #[test]

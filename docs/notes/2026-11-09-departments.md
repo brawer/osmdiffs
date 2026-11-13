@@ -67,13 +67,25 @@ in `src/pipeline/conflate/mod.rs`.
    for a department, the OSM feature of the host's category and brand;
    for `located_in`, a feature with the `located_in:wikidata` brand,
    or without any `brand:wikidata` but with a matching `brand` or
-   `name`. `match.evidence.rule` is `department` or `located_in`.
+   `name` and a store category, such as supermarket, convenience
+   store, mall or fuel station (`NAMED_HOST_CATEGORIES`).
+   `match.evidence.rule` is `department` or `located_in`.
 
 Names in `located_in` often include the merchant, such as "REWE Ahmed"
 or "EDEKA Brehm", while OSM calls the store "REWE". So a name matches
 if it is the other name followed by more words. Matching names
 exactly, the first version found 83 hosts for ATP features in Berlin;
 with this rule, 121.
+
+At first, a host found by name could be of any category. In the
+planet run of 2026-11-10, 189 of the 16,653 `located_in` rows had a
+host that was clearly no store, such as "Tesco Customer Toilets"
+(`amenity=toilets`) or "Waitrose car park" (`amenity=parking`) for a
+Timpson; see [#929](https://github.com/brawer/osmdiffs/issues/929).
+48 of the car parks had exactly the store's name, so a stricter name
+rule wouldn't have helped. Now such a host must be a store. A host
+found by `located_in:wikidata` may still be of any category, since a
+brand's Wikidata ID rarely sits on a car park.
 
 ## Alternatives considered
 
