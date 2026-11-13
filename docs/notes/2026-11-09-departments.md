@@ -63,12 +63,14 @@ in `src/pipeline/conflate/mod.rs`.
 3. **Match its own feature.** Matching otherwise runs as before, so a
    pharmacy matches the OSM pharmacy of its brand if there is one.
 4. **Point to the host.** If nothing matched, the row gets
-   `match.relation = located_in` and the nearest host within 150 m:
+   `match.relation = located_in` and the nearest host within 300 m:
    for a department, the OSM feature of the host's category and brand;
    for `located_in`, a feature with the `located_in:wikidata` brand,
-   or without any `brand:wikidata` but with a matching `brand` or
-   `name` and a store category, such as supermarket, convenience
-   store, mall or fuel station (`NAMED_HOST_CATEGORIES`).
+   or one with a matching `brand` or `name` and a store category,
+   such as supermarket, convenience store, mall, fuel station or
+   pharmacy (`NAMED_HOST_CATEGORIES`). Never a feature of the ATP
+   feature's own main category. (Until #933, the radius was 150 m, and
+   a store with another `brand:wikidata` was no host; see below.)
    `match.evidence.rule` is `department` or `located_in`.
 
 Names in `located_in` often include the merchant, such as "REWE Ahmed"
@@ -172,6 +174,77 @@ In OSMDiffs' `conflated.parquet` of 2026-11-02, 7,587 ATP features
 matched their host's OSM feature instead of their own, such as 1,294
 Publix pharmacies, and 15,500 of the 19,958 ATP features with
 `located_in` were unmatched. Those are the rows this change affects.
+
+## Hosts not found (2026-11-13)
+
+In the planet run of 2026-11-10 (v0.8.13), 3,830 ATP features with
+`located_in` found no host within 150 m and stayed `missing_in_osm`
+([#933](https://github.com/brawer/osmdiffs/issues/933)). To find out
+why, we re-implemented the host rules (with the #929 rule above) in
+Python and ran them on the ten spiders with the most such features.
+ATP was the run of 2026-10-31. OSM was openstreetmap.fr extracts of
+2026-11-13 for Denmark, Austria, South East England, South Australia,
+Victoria, California, Colorado, Île-de-France and Lombardia. We
+looked 1 km around each feature without a host. Four causes stood
+out:
+
+1. **ATP and OSM disagree on the host's Wikidata ID.** For 126 of
+   the 187 `starbucks_us` features without a host, a supermarket
+   named "Safeway" stood within 150 m. ATP gives Safeway Canada
+   (`Q17111901`) for all of its 626 US Safeway locations, while OSM
+   and NSI use Safeway USA (`Q1508234`). Timpson is `located_in`
+   Tesco (`Q487494`), but OSM tags many of the stores Tesco Express
+   (`Q98456772`), which NSI keeps as its own brand. Because the OSM
+   store had a `brand:wikidata`, the name was never compared.
+2. **The host is mapped as a pharmacy.** For 183 of the 329 `fedex`
+   features without a host, the host was a Walgreens tagged
+   `amenity=pharmacy`, which wasn't a named-host category.
+3. **The host is more than 150 m away.** Large stores have their OSM
+   centroid far from the spot that ATP gives. In a sample of 50 per
+   spider, 16 of 23 far hosts of `sushi_daily` lay within 300 m, 11
+   of 13 for `starbucks_us`, and 13 of 25 for `timpson_group`. The
+   far hosts of `eathappy` had a median of 417 m. The ones we looked
+   at were the right chain at a geocoded address, or another chain.
+4. **`located_in` isn't a name that OSM uses.** `dao_dk` gives the
+   merchant ("Brugsen Hornum", which OSM calls "Dagli'Brugsen").
+   `sushi_daily` sometimes gives "Deliveroo", or "Finiper" for Iper.
+   `sees_candies` gives mall names that OSM often doesn't have, and
+   `shell_au` puts OTR shops in "Shell" at stations that OSM brands
+   OTR. These features are right to stay `missing_in_osm`.
+
+So now:
+
+- A store found by name is a host even if its `brand:wikidata`
+  differs from `located_in:wikidata`. It must still be of a named-host
+  category, so the #929 car parks stay out. We considered keeping a
+  list of equivalent Wikidata IDs, but it would need upkeep for each
+  brand family, such as Tesco and Tesco Express, or Aldi Süd and Aldi
+  Suisse. The name already says what the ID would.
+- `amenity=pharmacy` is a named-host category.
+- The host may be up to 300 m away, for departments too. The nearest
+  host still wins, so a second branch farther away doesn't matter.
+- A feature of the ATP feature's own main category is never its host.
+  `tesco_gb` sets `located_in` Tesco on its own pharmacies and fuel
+  stations, which must still match their OSM features, and not be
+  kept off them as their host.
+
+On the same extracts, the features without a host went from 1,757 to
+1,226:
+
+| spider | without host, before | after |
+|---|---:|---:|
+| starbucks_us | 187 | 20 |
+| fedex | 329 | 143 |
+| timpson_group | 187 | 104 |
+| sushi_daily | 110 | 76 |
+| eathappy | 180 | 141 |
+| dao_dk | 624 | 613 |
+| sees_candies | 64 | 59 |
+| shell_au | 58 | 52 |
+| cinnabon_us | 14 | 13 |
+
+The script, the counts and a sample of 50 features per spider are in
+the project's `located-in-hosts` folder, not in this repository.
 
 ## Not yet
 

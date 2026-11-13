@@ -69,10 +69,12 @@ const HOST_CATEGORIES: &[&str] = &[
 /// Main categories that an OSM feature must have to be the host of an
 /// ATP feature whose `located_in` names it, but whose
 /// `located_in:wikidata` doesn't: [HOST_CATEGORIES], plus other stores
-/// that the `located_in` spiders put businesses in. Without this, a
-/// Timpson in "Tesco" was `located_in` "Tesco Customer Toilets" or
-/// "Waitrose car park"; see
-/// [brawer/osmdiffs#929](https://github.com/brawer/osmdiffs/issues/929).
+/// that the `located_in` spiders put businesses in, such as the
+/// Walgreens pharmacies that `fedex` puts its counters in. Without
+/// this, a Timpson in "Tesco" was `located_in` "Tesco Customer
+/// Toilets" or "Waitrose car park"; see
+/// [brawer/osmdiffs#929](https://github.com/brawer/osmdiffs/issues/929)
+/// and [brawer/osmdiffs#933](https://github.com/brawer/osmdiffs/issues/933).
 const NAMED_HOST_CATEGORIES: &[&str] = &[
     "shop=supermarket",
     "shop=hypermarket",
@@ -91,6 +93,7 @@ const NAMED_HOST_CATEGORIES: &[&str] = &[
     "shop=chemist",
     "shop=electronics",
     "amenity=fuel",
+    "amenity=pharmacy",
 ];
 
 /// A department and its host must be at most this far apart. Spiders
@@ -98,8 +101,15 @@ const NAMED_HOST_CATEGORIES: &[&str] = &[
 /// the store its center, so large stores need more than a few meters.
 pub(super) const DEPARTMENT_METERS: f64 = 75.0;
 
-/// How far from the ATP feature we look for its host in OSM.
-pub(super) const HOST_SEARCH_METERS: f64 = 150.0;
+/// How far from the ATP feature we look for its host in OSM. Hosts
+/// are often large stores whose OSM centroid is far from the spot that
+/// ATP gives for the business inside; at 150 m, about a third of the
+/// Timpson, Sushi Daily and Starbucks features without a host had one
+/// between 150 and 300 m away; see
+/// [brawer/osmdiffs#933](https://github.com/brawer/osmdiffs/issues/933).
+/// The nearest host wins, so another branch farther away doesn't
+/// matter.
+pub(super) const HOST_SEARCH_METERS: f64 = 300.0;
 
 /// S2 level for grouping features in [find_departments], about 1 km.
 const GROUP_LEVEL: u64 = 13;
@@ -116,10 +126,15 @@ pub(super) enum Host {
         category: &'static str,
         own: &'static str,
     },
-    /// A feature with one of these `brand:wikidata` IDs, or without
-    /// `brand:wikidata` but with a `brand` or `name` like this
-    /// normalized name; see [same_business_name].
-    LocatedIn { ids: Vec<u64>, name: Option<String> },
+    /// A feature with one of these `brand:wikidata` IDs, or a store
+    /// with a `brand` or `name` like this normalized name; see
+    /// [same_business_name]. Never a feature of main category `own`,
+    /// the category of the ATP feature itself.
+    LocatedIn {
+        ids: Vec<u64>,
+        name: Option<String>,
+        own: Option<String>,
+    },
 }
 
 impl Host {
@@ -149,7 +164,12 @@ impl Host {
 
     /// Whether the OSM feature with `tags` is the host. A host found
     /// by name, not by `located_in:wikidata`, must be a store of a
-    /// [NAMED_HOST_CATEGORIES] category. For the ATP
+    /// [NAMED_HOST_CATEGORIES] category. It may have another
+    /// `brand:wikidata`: ATP and OSM often disagree on the ID, such as
+    /// for a Tesco Express (`Q98456772`) in which ATP has a Timpson
+    /// `located_in:wikidata` Tesco (`Q487494`). A feature of the ATP
+    /// feature's own category is never its host, so a Tesco pharmacy
+    /// `located_in` Tesco may still match the OSM "Tesco Pharmacy". For the ATP
     /// feature itself, this must be false, or it might match its own
     /// host; see [Host::excludes].
     pub(super) fn is_host<'a>(
@@ -163,12 +183,12 @@ impl Host {
                 main_category(tags.clone()).is_some_and(|c| c == *category)
                     && brand_ids(tags).any(|id| brands.contains(&id))
             }
-            Host::LocatedIn { ids, name } => {
+            Host::LocatedIn { ids, name, own } => {
+                if own.is_some() && main_category(tags.clone()) == *own {
+                    return false;
+                }
                 if brand_ids(tags.clone()).any(|id| ids.contains(&id)) {
                     return true;
-                }
-                if !ids.is_empty() && brand_ids(tags.clone()).next().is_some() {
-                    return false;
                 }
                 let Some(name) = name else {
                     return false;
@@ -250,7 +270,8 @@ pub(super) fn located_in_tag(place: &Place) -> Option<Host> {
     let name = tag("located_in")
         .map(normalize_name)
         .filter(|n| !n.is_empty());
-    (!ids.is_empty() || name.is_some()).then_some(Host::LocatedIn { ids, name })
+    let own = main_category(place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    (!ids.is_empty() || name.is_some()).then_some(Host::LocatedIn { ids, name, own })
 }
 
 /// The departments among the ATP features in `reader`, by their
@@ -408,6 +429,7 @@ mod tests {
         let target = Host::LocatedIn {
             ids: vec![1046951],
             name: Some("target".into()),
+            own: Some("amenity=cafe".into()),
         };
         assert!(
             target.is_host(
@@ -415,10 +437,22 @@ mod tests {
             )
         );
         assert!(target.is_host([("shop", "department_store"), ("name", "Target")].into_iter()));
+        // A store by name, even with another `brand:wikidata`; see
+        // https://github.com/brawer/osmdiffs/issues/933.
+        assert!(
+            target.is_host(
+                [
+                    ("shop", "department_store"),
+                    ("name", "Target"),
+                    ("brand:wikidata", "Q2")
+                ]
+                .into_iter()
+            )
+        );
         assert!(
             !target.is_host(
                 [
-                    ("shop", "department_store"),
+                    ("amenity", "parking"),
                     ("name", "Target"),
                     ("brand:wikidata", "Q2")
                 ]
@@ -428,12 +462,14 @@ mod tests {
         let by_name = Host::LocatedIn {
             ids: vec![],
             name: Some("pingo doce".into()),
+            own: Some("amenity=cafe".into()),
         };
         assert!(by_name.is_host([("shop", "supermarket"), ("name", "Pingo  Doce")].into_iter()));
         assert_eq!(by_name.rule(), "located_in");
         let merchant = Host::LocatedIn {
             ids: vec![],
             name: Some("rewe ahmed".into()),
+            own: Some("amenity=cafe".into()),
         };
         assert!(merchant.is_host([("shop", "supermarket"), ("name", "REWE")].into_iter()));
         assert!(!merchant.is_host([("shop", "supermarket"), ("name", "REWE City")].into_iter()));
@@ -446,6 +482,7 @@ mod tests {
         let tesco = Host::LocatedIn {
             ids: vec![],
             name: Some("tesco".into()),
+            own: Some("shop=keys".into()),
         };
         let is_host = |tags: &[(&'static str, &'static str)]| tesco.is_host(tags.iter().copied());
         assert!(is_host(&[("shop", "supermarket"), ("name", "Tesco")]));
@@ -481,10 +518,115 @@ mod tests {
         let by_id = Host::LocatedIn {
             ids: vec![7],
             name: Some("tesco".into()),
+            own: Some("shop=keys".into()),
         };
         assert!(by_id.is_host([("amenity", "parking"), ("brand:wikidata", "Q7")].into_iter()));
         assert!(!by_id.is_host([("amenity", "parking"), ("name", "Tesco")].into_iter()));
         assert!(by_id.is_host([("shop", "supermarket"), ("name", "Tesco")].into_iter()));
+    }
+
+    #[test]
+    fn test_host_with_other_brand_id() {
+        // https://github.com/brawer/osmdiffs/issues/933
+        let tesco = Host::LocatedIn {
+            ids: vec![487494],
+            name: Some("tesco".into()),
+            own: Some("shop=keys".into()),
+        };
+        let is_host = |tags: &[(&'static str, &'static str)]| tesco.is_host(tags.iter().copied());
+        assert!(is_host(&[
+            ("shop", "convenience"),
+            ("name", "Tesco Express"),
+            ("brand:wikidata", "Q98456772")
+        ]));
+        assert!(!is_host(&[
+            ("shop", "convenience"),
+            ("name", "Sainsbury's Local"),
+            ("brand:wikidata", "Q13218434")
+        ]));
+        assert!(!is_host(&[
+            ("amenity", "parking"),
+            ("name", "Tesco"),
+            ("brand:wikidata", "Q98456772")
+        ]));
+    }
+
+    #[test]
+    fn test_pharmacy_host() {
+        // `fedex` counters in Walgreens, which OSM maps as pharmacies.
+        let walgreens = Host::LocatedIn {
+            ids: vec![],
+            name: Some("walgreens".into()),
+            own: Some("shop=copyshop".into()),
+        };
+        assert!(
+            walgreens.is_host(
+                [
+                    ("amenity", "pharmacy"),
+                    ("name", "Walgreens"),
+                    ("brand:wikidata", "Q1591889")
+                ]
+                .into_iter()
+            )
+        );
+    }
+
+    #[test]
+    fn test_host_not_of_own_category() {
+        // `tesco_gb` sets `located_in` Tesco on its own pharmacies and
+        // fuel stations, which must still match their OSM features.
+        let tesco = Host::LocatedIn {
+            ids: vec![487494],
+            name: Some("tesco".into()),
+            own: Some("amenity=pharmacy".into()),
+        };
+        let pharmacy = [
+            ("amenity", "pharmacy"),
+            ("name", "Tesco Pharmacy"),
+            ("brand:wikidata", "Q487494"),
+        ];
+        assert!(!tesco.is_host(pharmacy.iter().copied()));
+        assert!(!tesco.excludes(pharmacy.iter().copied()));
+        let store = [("shop", "supermarket"), ("brand:wikidata", "Q487494")];
+        assert!(tesco.is_host(store.iter().copied()));
+        assert!(tesco.excludes(store.iter().copied()));
+        let no_category = Host::LocatedIn {
+            ids: vec![487494],
+            name: None,
+            own: None,
+        };
+        assert!(no_category.is_host(store.iter().copied()));
+    }
+
+    #[test]
+    fn test_located_in_tag() {
+        let coord = geo::Coord { x: -0.1, y: 51.5 };
+        let place = Place::new(
+            &coord,
+            "timpson_group".to_string(),
+            MatchMask::SHOP,
+            [
+                ("shop", "keys"),
+                ("located_in", "Tesco"),
+                ("located_in:wikidata", "Q487494"),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+            &geo::Point::from(coord).into(),
+            crate::utils::UtcTimestamp(
+                time::UtcDateTime::from_unix_timestamp(1_770_000_000).unwrap(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            located_in_tag(&place),
+            Some(Host::LocatedIn {
+                ids: vec![487494],
+                name: Some("tesco".into()),
+                own: Some("shop=keys".into()),
+            })
+        );
     }
 
     #[test]
