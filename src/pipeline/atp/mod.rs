@@ -862,6 +862,110 @@ mod tests {
         Ok(())
     }
 
+    /// A tiny OSM index with a single feature, for tests that only care
+    /// about its modification time.
+    fn build_osm(dir: &Path) -> Result<OsmFeatures<'static>> {
+        use crate::tables::{Feature, FeatureToIndex, OsmFeatureIndex, StringPool};
+        let strings_path = dir.join("strings");
+        let strings = ["amenity".to_string(), "cafe".to_string()];
+        let pool = StringPool::create(strings.into_iter(), dir, &strings_path)?;
+        let feature = FeatureToIndex {
+            centroid_s2_cell_id: 1,
+            feature: Some(Feature {
+                id: 1,
+                tags: vec![
+                    pool.lookup("amenity").unwrap() as u32,
+                    pool.lookup("cafe").unwrap() as u32,
+                ],
+                ..Default::default()
+            }),
+            match_mask: 1,
+            coverage_s2_cell_id: vec![1],
+        };
+        let index_path = dir.join("osm-features.index");
+        let index = OsmFeatureIndex::create(std::iter::once(feature), dir, &index_path)?;
+        Ok(OsmFeatures {
+            index,
+            strings: pool,
+        })
+    }
+
+    fn set_modified(path: &Path, time: std::time::SystemTime) -> Result<()> {
+        File::options().write(true).open(path)?.set_modified(time)?;
+        Ok(())
+    }
+
+    /// Regression test for brawer/osmdiffs#935: since the conversion of
+    /// Chinese GCJ-02 and BD-09 positions depends on OSM, `import_atp`
+    /// rebuilds `alltheplaces.parquet` (and its side files) when the OSM
+    /// index is newer, even though the ATP zip hasn't changed; and with
+    /// neither changed, it reuses the parquet file.
+    #[test]
+    fn test_import_atp_rebuilds_when_osm_is_newer() -> Result<()> {
+        use std::time::Duration;
+        let testdata = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data");
+        let workdir = tempfile::tempdir()?;
+        let osm_dir = tempfile::tempdir()?;
+        let zip = workdir.path().join(ATP_ZIP_FILENAME);
+        std::fs::copy(testdata.join(ATP_ZIP_FILENAME), &zip)?;
+        let input = Input {
+            path: zip.clone(),
+            metadata: read_cached_metadata(&testdata)?,
+        };
+        let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+        let osm = build_osm(osm_dir.path())?;
+        let osm_modified = osm.modified()?;
+
+        let parquet = import_atp(&input, Some(&osm), &progress, workdir.path())?;
+        let side_files: Vec<PathBuf> = nondescript::paths(workdir.path())
+            .into_iter()
+            .chain([
+                brand_domains_path(workdir.path()),
+                spider_counts::path(workdir.path()),
+            ])
+            .collect();
+
+        // A kept workdir from an earlier run, before OSM was imported
+        // again: the zip and everything built from it are older than
+        // the OSM index.
+        let zip_time = osm_modified - Duration::from_secs(7200);
+        let built_time = osm_modified - Duration::from_secs(3600);
+        set_modified(&zip, zip_time)?;
+        for path in std::iter::once(&parquet).chain(&side_files) {
+            set_modified(path, built_time)?;
+        }
+
+        assert_eq!(
+            import_atp(&input, Some(&osm), &progress, workdir.path())?,
+            parquet
+        );
+        let rebuilt = super::super::modified(&parquet)?;
+        assert!(rebuilt >= osm_modified, "parquet file should be rebuilt");
+        for path in &side_files {
+            assert!(
+                super::super::modified(path)? >= osm_modified,
+                "{} should be rebuilt",
+                path.display()
+            );
+        }
+
+        // Neither OSM nor ATP changed since: the parquet file and its
+        // side files are reused as they are.
+        let side_modified: Vec<_> = side_files
+            .iter()
+            .map(|path| super::super::modified(path))
+            .collect::<Result<_>>()?;
+        assert_eq!(
+            import_atp(&input, Some(&osm), &progress, workdir.path())?,
+            parquet
+        );
+        assert_eq!(super::super::modified(&parquet)?, rebuilt);
+        for (path, before) in side_files.iter().zip(side_modified) {
+            assert_eq!(super::super::modified(path)?, before, "{}", path.display());
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_parse_spider_collection_time() {
         let parse = |key, value| {
