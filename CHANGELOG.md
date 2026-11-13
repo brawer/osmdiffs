@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.15](https://github.com/brawer/osmdiffs/compare/v0.8.14...v0.8.15) (2026-11-13)
+
+
+### 🐞 Bug Fixes
+
+* **conflate:** find more hosts for ATP features with `located_in` ([#945](https://github.com/brawer/osmdiffs/issues/945)) ([0fdd7a3](https://github.com/brawer/osmdiffs/commit/0fdd7a32801e9583e4d6f169a12e4b8908f94ad4))
+* **conflate:** only accept stores as hosts found by `located_in` name ([#944](https://github.com/brawer/osmdiffs/issues/944)) ([24bfecc](https://github.com/brawer/osmdiffs/commit/24bfecc0777aa7f1fd55c1a04322ce67a9dc9fdc))
+* **pipeline:** rebuild later steps' outputs when their inputs are newer ([#943](https://github.com/brawer/osmdiffs/issues/943)) ([e7ea0b8](https://github.com/brawer/osmdiffs/commit/e7ea0b86501c1f778e2ab83b1abab0e7cdfb5a28)), closes [#935](https://github.com/brawer/osmdiffs/issues/935)
+
+
+### 🚧 Maintenance
+
+* cover import_atp rebuilding alltheplaces.parquet when OSM is newer ([#941](https://github.com/brawer/osmdiffs/issues/941)) ([45f9bcb](https://github.com/brawer/osmdiffs/commit/45f9bcb3531a37256ff022e6b09af91ccbc94de6)), closes [#935](https://github.com/brawer/osmdiffs/issues/935)
+
 ## [0.8.14](https://github.com/brawer/osmdiffs/compare/v0.8.13...v0.8.14) (2026-11-12)
 
 
