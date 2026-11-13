@@ -80,7 +80,8 @@ pub fn render_tiles(
     importance_attr: Option<&str>,
 ) -> Result<PathBuf> {
     let out_path = workdir.join(out_filename);
-    if out_path.exists() {
+    let inputs: Vec<&Path> = layers.iter().map(|layer| layer.path.as_path()).collect();
+    if super::is_current(&[&out_path], &inputs)? {
         return Ok(out_path);
     }
 
@@ -184,7 +185,8 @@ fn make_tippecanoe_command(
 /// something went wrong.
 pub fn join_tiles(inputs: &[PathBuf], workdir: &Path, out_filename: &str) -> Result<PathBuf> {
     let out_path = workdir.join(out_filename);
-    if out_path.exists() {
+    let input_paths: Vec<&Path> = inputs.iter().map(PathBuf::as_path).collect();
+    if super::is_current(&[&out_path], &input_paths)? {
         return Ok(out_path);
     }
 

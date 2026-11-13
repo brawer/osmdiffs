@@ -401,7 +401,11 @@ pub fn extract_conflated_layers(
         &layers.detail_matched,
         &layers.detail_unmatched,
     ];
-    if all_layers.iter().all(|layer| layer.path.exists()) {
+    let outputs: Vec<&Path> = all_layers
+        .iter()
+        .map(|layer| layer.path.as_path())
+        .collect();
+    if super::is_current(&outputs, &[conflated])? {
         return Ok(layers);
     }
 
@@ -621,15 +625,23 @@ mod tests {
     fn memoized_layers_carry_the_right_tippecanoe_layer_names() {
         // Exercises the real extract_conflated_layers/ConflatedLayers
         // construction, not just the constants in isolation: pre-create
-        // all four output files so the memoization check short-circuits
-        // before ever touching `conflated` (a path that doesn't exist),
-        // then confirm each overview layer and its detail counterpart
+        // all four output files, newer than a placeholder `conflated`
+        // that isn't a parquet file at all, so the memoization check
+        // short-circuits before ever reading it, then confirm each overview layer and its detail counterpart
         // carry the identical tippecanoe layer name -- the whole reason
         // MATCHED_LAYER_NAME / UNMATCHED_LAYER_NAME exist: if a future
         // edit ever let a pair drift apart, tile-join wouldn't error, it
         // would just silently produce two half-zoom-range layers instead
         // of one continuous one.
         let workdir = TempDir::new().expect("tempdir");
+        let conflated = workdir.path().join("conflated.parquet");
+        std::fs::write(&conflated, b"").expect("write placeholder");
+        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        File::options()
+            .write(true)
+            .open(&conflated)
+            .and_then(|f| f.set_modified(earlier))
+            .expect("backdate placeholder");
         for name in [
             "matched.jsonl",
             "unmatched.jsonl",
@@ -639,12 +651,8 @@ mod tests {
             std::fs::write(workdir.path().join(name), b"").expect("write placeholder");
         }
 
-        let layers = extract_conflated_layers(
-            Path::new("/no/such/conflated.parquet"),
-            &hidden_progress(),
-            workdir.path(),
-        )
-        .expect("memoized path should not touch `conflated` at all");
+        let layers = extract_conflated_layers(&conflated, &hidden_progress(), workdir.path())
+            .expect("memoized path should not read `conflated` at all");
 
         assert_eq!(layers.overview_matched.name, layers.detail_matched.name);
         assert_eq!(layers.detail_matched.name, MATCHED_LAYER_NAME);

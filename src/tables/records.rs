@@ -62,6 +62,11 @@ impl RecordReader {
         })
     }
 
+    /// The path of this spool file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// The number of records in this spool file.
     pub fn len(&self) -> usize {
         self.count as usize

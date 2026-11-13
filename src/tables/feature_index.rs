@@ -194,7 +194,7 @@ struct Pass2Item {
 
 impl<'a> OsmFeatureIndex<'a> {
     /// Path of the inverted-index file that accompanies `out`/`path`.
-    fn inverted_index_path(path: &Path) -> PathBuf {
+    pub(crate) fn inverted_index_path(path: &Path) -> PathBuf {
         let mut p = PathBuf::from(path);
         p.add_extension("inverted");
         p

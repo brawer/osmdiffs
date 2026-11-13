@@ -138,7 +138,8 @@ pub fn suggest_edits(
     assert!(workdir.exists());
 
     let layers = EditWriter::make_layers(workdir);
-    if layers.iter().all(|layer| layer.path.exists()) {
+    let outputs: Vec<&Path> = layers.iter().map(|layer| layer.path.as_path()).collect();
+    if super::is_current(&outputs, &[conflated])? {
         return Ok(layers);
     }
 
