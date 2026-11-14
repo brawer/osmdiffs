@@ -138,6 +138,8 @@ struct RowInfo {
     offset: Option<(f32, f32)>,
     /// Hash of the ATP geometry, to find features at the same position.
     position: Option<u64>,
+    /// The centroid of the ATP geometry, as longitude and latitude.
+    location: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -168,6 +170,7 @@ struct Brand {
     /// counts features of the same kinds only.
     categories: HashSet<String>,
     offsets: Vec<(f32, f32)>,
+    locations: Vec<(f64, f64)>,
 }
 
 /// What we count for one spider from `conflated.parquet`.
@@ -186,6 +189,7 @@ struct Spider {
     osm_refs: HashMap<u64, u64>,
     offsets: Vec<(f32, f32)>,
     positions: HashMap<u64, u64>,
+    locations: Vec<(f64, f64)>,
     /// By country and Wikidata ID; 0 for features without one.
     brands: HashMap<(Option<Country>, u64), Brand>,
 }
@@ -232,6 +236,9 @@ impl Spider {
         if let Some(p) = row.position {
             *self.positions.entry(p).or_default() += 1;
         }
+        if let Some(l) = row.location {
+            self.locations.push(l);
+        }
         let ids = if row.wikidata.is_empty() {
             vec![0]
         } else {
@@ -253,6 +260,9 @@ impl Spider {
             }
             if let Some(offset) = row.offset {
                 brand.offsets.push(offset);
+            }
+            if let Some(l) = row.location {
+                brand.locations.push(l);
             }
         }
     }
@@ -293,6 +303,89 @@ fn median_offset(offsets: &[(f32, f32)]) -> Option<(f32, f32)> {
         median(offsets.iter().map(|o| o.0).collect()),
         median(offsets.iter().map(|o| o.1).collect()),
     ))
+}
+
+/// A box in degrees of longitude and latitude, in the GeoParquet
+/// `bbox` convention: `xmin > xmax` for one that crosses the
+/// antimeridian.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct BBox {
+    xmin: f32,
+    ymin: f32,
+    xmax: f32,
+    ymax: f32,
+}
+
+/// [trimmed_bbox] may leave out one in this many locations as
+/// outliers, such as a feature that a spider put on Null Island.
+const BBOX_TRIM: usize = 50;
+
+/// The smallest box that holds all but one in [BBOX_TRIM] of
+/// `locations` along each axis, or `None` if there are none. Along
+/// longitude, the box may cross the antimeridian, if that makes it
+/// narrower. The box is rounded outward to `f32`, so it holds the
+/// locations it covers.
+fn trimmed_bbox(locations: &[(f64, f64)]) -> Option<BBox> {
+    if locations.is_empty() {
+        return None;
+    }
+    let keep = locations.len() - locations.len() / BBOX_TRIM;
+    let sorted = |f: fn(&(f64, f64)) -> f64| {
+        let mut v: Vec<f64> = locations.iter().map(f).collect();
+        v.sort_unstable_by(f64::total_cmp);
+        v
+    };
+    let (xmin, xmax) = shortest_arc(&sorted(|l| l.0), keep);
+    let (ymin, ymax) = shortest_interval(&sorted(|l| l.1), keep);
+    Some(BBox {
+        xmin: round_down(xmin),
+        ymin: round_down(ymin),
+        xmax: round_up(xmax),
+        ymax: round_up(ymax),
+    })
+}
+
+/// The narrowest interval that holds `keep` of the `sorted` values;
+/// the first one, if several are as narrow.
+fn shortest_interval(sorted: &[f64], keep: usize) -> (f64, f64) {
+    (0..=sorted.len() - keep)
+        .map(|i| (sorted[i], sorted[i + keep - 1]))
+        .min_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))
+        .expect("keep <= sorted.len()")
+}
+
+/// Like [shortest_interval] for `sorted` longitudes, which may wrap
+/// around the antimeridian: then the start is greater than the end. An
+/// arc that doesn't wrap wins over an equally narrow one that does.
+fn shortest_arc(sorted: &[f64], keep: usize) -> (f64, f64) {
+    let n = sorted.len();
+    (0..n)
+        .map(|i| {
+            let j = i + keep - 1;
+            if j < n {
+                (sorted[j] - sorted[i], (sorted[i], sorted[j]))
+            } else {
+                (
+                    sorted[j - n] + 360.0 - sorted[i],
+                    (sorted[i], sorted[j - n]),
+                )
+            }
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .expect("keep >= 1")
+        .1
+}
+
+/// The greatest `f32` that is no greater than `v`.
+fn round_down(v: f64) -> f32 {
+    let f = v as f32;
+    if f64::from(f) > v { f.next_down() } else { f }
+}
+
+/// The least `f32` that is no less than `v`.
+fn round_up(v: f64) -> f32 {
+    let f = v as f32;
+    if f64::from(f) < v { f.next_up() } else { f }
 }
 
 #[derive(Debug, Default)]
@@ -380,6 +473,7 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
     let atp_tag_refs = || atp_tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
     let spider = get_string(get_struct(atp, "fetched")?, "spider", row)?;
     let geometry = get_binary(batch, "atp_geometry", row)?;
+    let location = wkb_centroid(&geometry);
     let position = {
         let mut hasher = std::hash::DefaultHasher::new();
         geometry.hash(&mut hasher);
@@ -421,7 +515,7 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
         relation,
         rule,
         distance_m,
-        country: wkb_country(&geometry),
+        country: location.and_then(|(x, y)| country(x, y)),
         wikidata: wikidata_ids(atp_tag_refs()),
         category: main_category(atp_tag_refs()),
         tags,
@@ -431,6 +525,7 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
         osm_ref,
         offset,
         position: Some(position),
+        location,
     })
 }
 
@@ -456,10 +551,16 @@ fn wikidata_ids<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<u64> 
     ids
 }
 
+/// The centroid of a WKB geometry, as longitude and latitude.
+fn wkb_centroid(wkb: &[u8]) -> Option<(f64, f64)> {
+    let c = read_wkb(wkb).ok()?.to_geometry().centroid()?;
+    Some((c.x(), c.y()))
+}
+
 /// The country at the centroid of a WKB geometry.
 fn wkb_country(wkb: &[u8]) -> Option<Country> {
-    let c = read_wkb(wkb).ok()?.to_geometry().centroid()?;
-    country(c.x(), c.y())
+    let (x, y) = wkb_centroid(wkb)?;
+    country(x, y)
 }
 
 fn string_or_null(
@@ -536,7 +637,26 @@ fn brand_fields() -> Fields {
         Field::new("deletion_candidates", DataType::UInt64, true),
         Field::new("offset_east_m", DataType::Float32, true),
         Field::new("offset_north_m", DataType::Float32, true),
+        bbox_field(),
     ])
+}
+
+/// Named like the `bbox` covering column of GeoParquet 1.1.
+fn bbox_field() -> Field {
+    let fields = ["xmin", "ymin", "xmax", "ymax"]
+        .map(|name| Field::new(name, DataType::Float32, false))
+        .to_vec();
+    Field::new("bbox", DataType::Struct(Fields::from(fields)), true)
+}
+
+fn append_bbox(b: &mut StructBuilder, bbox: Option<BBox>) {
+    let v = bbox.unwrap_or_default();
+    for (i, x) in [v.xmin, v.ymin, v.xmax, v.ymax].into_iter().enumerate() {
+        b.field_builder::<Float32Builder>(i)
+            .unwrap()
+            .append_value(x);
+    }
+    b.append(bbox.is_some());
 }
 
 fn tag_fields() -> Fields {
@@ -610,6 +730,7 @@ pub(super) fn schema() -> Schema {
         u64_field("shared_positions"),
         Field::new("offset_east_m", DataType::Float32, true),
         Field::new("offset_north_m", DataType::Float32, true),
+        bbox_field(),
         histogram_field("distance_m"),
         u64_field("missing_no_candidate"),
         u64_field("missing_rejected"),
@@ -680,6 +801,10 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
     let mut shared_positions = UInt64Builder::new();
     let mut offset_east = Float32Builder::new();
     let mut offset_north = Float32Builder::new();
+    let DataType::Struct(bbox_fields) = bbox_field().data_type().clone() else {
+        unreachable!("bbox is a struct");
+    };
+    let mut bbox = StructBuilder::from_fields(bbox_fields, rows.len());
     let histogram = || {
         ListBuilder::new(UInt64Builder::new()).with_field(Arc::new(Field::new(
             "item",
@@ -739,6 +864,7 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         let offset = median_offset(&s.offsets);
         offset_east.append_option(offset.map(|o| o.0));
         offset_north.append_option(offset.map(|o| o.1));
+        append_bbox(&mut bbox, trimmed_bbox(&s.locations));
         distance.values().append_slice(&s.distance_m);
         distance.append(true);
         let d = row
@@ -846,6 +972,10 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
             b.field_builder::<Float32Builder>(10)
                 .unwrap()
                 .append_option(offset.map(|o| o.1));
+            append_bbox(
+                b.field_builder::<StructBuilder>(11).unwrap(),
+                trimmed_bbox(&brand.locations),
+            );
             b.append(true);
         }
         brands.append(true);
@@ -870,6 +1000,7 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         Arc::new(shared_positions.finish()),
         Arc::new(offset_east.finish()),
         Arc::new(offset_north.finish()),
+        Arc::new(bbox.finish()),
         Arc::new(distance.finish()),
         Arc::new(no_candidate.finish()),
         Arc::new(rejected.finish()),
@@ -904,6 +1035,7 @@ mod tests {
             osm_ref: Some(osm_ref),
             offset: Some((distance_m, -1.0)),
             position: Some(osm_ref),
+            location: Some((8.5 + f64::from(distance_m) / 1024.0, 47.375)),
         }
     }
 
@@ -934,6 +1066,40 @@ mod tests {
         assert_eq!(s.brands[&(ch, 379911)].same, 4);
         assert_eq!(s.brands[&(None, 0)].missing_in_osm, 1);
         assert_eq!(Spider::default().opening_hours_top_share(), None);
+    }
+
+    #[test]
+    fn test_trimmed_bbox() {
+        assert_eq!(trimmed_bbox(&[]), None);
+        let bbox = |xmin, ymin, xmax, ymax| {
+            Some(BBox {
+                xmin,
+                ymin,
+                xmax,
+                ymax,
+            })
+        };
+        assert_eq!(
+            trimmed_bbox(&[(8.5, 47.375)]),
+            bbox(8.5, 47.375, 8.5, 47.375)
+        );
+        // Rounded outward to f32.
+        let b = trimmed_bbox(&[(0.1, -0.1), (0.3, 0.2)]).unwrap();
+        assert!(f64::from(b.xmin) <= 0.1 && f64::from(b.xmax) >= 0.3);
+        assert!(f64::from(b.ymin) <= -0.1 && f64::from(b.ymax) >= 0.2);
+        // Fiji spans the antimeridian, so its box wraps around.
+        assert_eq!(
+            trimmed_bbox(&[(178.0, -18.0), (-179.0, -16.0), (177.5, -17.5)]),
+            bbox(177.5, -18.0, -179.0, -16.0)
+        );
+        // With 50 features, one outlier on Null Island is left out.
+        let mut dutch: Vec<(f64, f64)> = (0..49)
+            .map(|i| (4.0 + f64::from(i) / 16.0, 52.0 + f64::from(i) / 128.0))
+            .collect();
+        dutch.push((0.0, 0.0));
+        assert_eq!(trimmed_bbox(&dutch), bbox(4.0, 52.0, 7.0, 52.375));
+        // With fewer features, none are left out.
+        assert_eq!(trimmed_bbox(&dutch[40..]), bbox(0.0, 0.0, 7.0, 52.375));
     }
 
     #[test]
@@ -1043,6 +1209,27 @@ mod tests {
         assert_eq!(field("osm_features"), 7);
         assert_eq!(field("deletion_candidates"), 2);
         assert_eq!(brands.value(1).len(), 0);
+
+        let bbox_of = |array: &dyn Array, row: usize| {
+            let b = array.as_any().downcast_ref::<StructArray>().unwrap();
+            (!b.is_null(row)).then(|| {
+                ["xmin", "ymin", "xmax", "ymax"].map(|name| {
+                    b.column_by_name(name)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .unwrap()
+                        .value(row)
+                })
+            })
+        };
+        // The fixture's feature lies at 8.5 + 3 / 1024 degrees east.
+        let x = 8.5 + 3.0 / 1024.0;
+        let bbox = batch.column_by_name("bbox").unwrap();
+        assert_eq!(bbox_of(bbox, 0), Some([x, 47.375, x, 47.375]));
+        assert_eq!(bbox_of(bbox, 1), None);
+        let brand_bbox = brand.column_by_name("bbox").unwrap();
+        assert_eq!(bbox_of(brand_bbox, 0), Some([x, 47.375, x, 47.375]));
         Ok(())
     }
 }

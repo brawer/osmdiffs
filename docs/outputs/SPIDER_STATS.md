@@ -51,6 +51,11 @@ shared_osm_features      UINT64   non-null — same rows whose OSM feature anoth
 shared_positions         UINT64   non-null — features at the same position as another feature of the spider
 offset_east_m            FLOAT    nullable — median of how far same rows lie east of their OSM feature
 offset_north_m           FLOAT    nullable — ... and north
+bbox                     STRUCT   nullable — where the spider's features are, see below
+  xmin                   FLOAT    non-null — west, in degrees of longitude
+  ymin                   FLOAT    non-null — south, in degrees of latitude
+  xmax                   FLOAT    non-null — east
+  ymax                   FLOAT    non-null — north
 distance_m               LIST<UINT64> non-null — histogram of match distances, see below
 missing_no_candidate     UINT64   non-null — missing_in_osm: no OSM feature of the kind close enough
 missing_rejected         UINT64   non-null — missing_in_osm: the matcher found no evidence for any
@@ -80,6 +85,7 @@ brands                   LIST<STRUCT> non-null
   deletion_candidates    UINT64   nullable — deletion candidates with this ID in this country
   offset_east_m          FLOAT    nullable — like offset_east_m above, for this brand and country
   offset_north_m         FLOAT    nullable
+  bbox                   STRUCT   nullable — like bbox above, for this brand and country
 ```
 
 ### What became of the features
@@ -153,6 +159,20 @@ the medians stay near zero, unless a spider shifts all its features
 the same way. For example, `c_and_a` once placed all its stores
 about 150 m west of where they are. The same medians per brand and
 country show a shift in only one country.
+
+`bbox` is a box around the spider's features, so that a map can zoom
+to where they are without reading any tiles. It is the box around the
+centroids of the AllThePlaces features of the spider's rows in
+`conflated.parquet`, in WGS-84 (after any conversion from GCJ-02 or
+BD-09), named like a GeoParquet 1.1 `bbox` covering. It is trimmed:
+along each axis, it may leave out up to one in 50 features, as long
+as that makes the box smaller, so that a few features in the wrong
+place, such as on Null Island, don't make it span the world. So don't
+use it to find outliers. Its corners are rounded outward to `FLOAT`.
+When `xmin` is greater than `xmax`, the box crosses the antimeridian
+and goes east from `xmin` past 180° to `xmax`; to fit a map to it,
+add 360 to `xmax`. It is null for a spider without rows. The `bbox`
+of a brand is the same, for the brand's features in that country.
 
 `opening_hours_top_share` is the share of the spider's features with
 `opening_hours` that have its most common value. Near 1 for a large
