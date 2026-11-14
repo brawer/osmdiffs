@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.16](https://github.com/brawer/osmdiffs/compare/v0.8.15...v0.8.16) (2026-11-14)
+
+
+### 🆕 Enhancements
+
+* add a never-dropped spider_cells layer to conflated.pmtiles ([#951](https://github.com/brawer/osmdiffs/issues/951)) ([dc36b16](https://github.com/brawer/osmdiffs/commit/dc36b16524d5f34c881c925c41212ea28f58f8db))
+* add a trimmed bounding box per spider and brand to spider-stats ([#950](https://github.com/brawer/osmdiffs/issues/950)) ([c5e2722](https://github.com/brawer/osmdiffs/commit/c5e27224acfadae0172192d9084df3246b6ddafd))
+* show deletion candidates in conflated.pmtiles ([#952](https://github.com/brawer/osmdiffs/issues/952)) ([8ff182d](https://github.com/brawer/osmdiffs/commit/8ff182d18f7b00d261eda63c26a4b460e2a53b5f))
+
+
+### 📚 Documentation
+
+* point remaining matching work at [#953](https://github.com/brawer/osmdiffs/issues/953) and [#954](https://github.com/brawer/osmdiffs/issues/954) ([#955](https://github.com/brawer/osmdiffs/issues/955)) ([8854bbc](https://github.com/brawer/osmdiffs/commit/8854bbc31ebd74ad5d8db827b8dd44034fe0aed7))
+* spell OSMDiffs without a space in README ([#947](https://github.com/brawer/osmdiffs/issues/947)) ([542057d](https://github.com/brawer/osmdiffs/commit/542057de0c31fe6ebcad640487f7231e0f751087))
+
 ## [0.8.15](https://github.com/brawer/osmdiffs/compare/v0.8.14...v0.8.15) (2026-11-13)
 
 
