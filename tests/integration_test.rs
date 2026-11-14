@@ -215,6 +215,28 @@ fn assert_spider_stats(path: &Path) -> Result<()> {
     // Two Winterthur features have no matcher, so no conflated row.
     assert_eq!(numbers("no_matcher"), [0, 0, 0, 0, 0, 2]);
 
+    // Every spider with conflated rows has a box around them, here all
+    // in Switzerland; the crashed spider has none.
+    let bbox = column("bbox");
+    let bbox = bbox.as_any().downcast_ref::<StructArray>().unwrap();
+    let coord = |name: &str, row: usize| {
+        bbox.column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float32Array>()
+            .unwrap()
+            .value(row)
+    };
+    for (row, &n) in numbers("rows").iter().enumerate() {
+        assert_eq!(bbox.is_null(row), n == 0, "bbox of {}", spiders[row]);
+        if n > 0 {
+            assert!((5.9..=10.5).contains(&coord("xmin", row)));
+            assert!(coord("xmin", row) <= coord("xmax", row));
+            assert!((45.8..=47.9).contains(&coord("ymin", row)));
+            assert!(coord("ymin", row) <= coord("ymax", row));
+        }
+    }
+
     // Why features are missing in OSM adds up to how many are.
     let missing = numbers("missing_in_osm");
     let (no_candidate, rejected, taken) = (
