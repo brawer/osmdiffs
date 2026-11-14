@@ -585,7 +585,7 @@ mod tests {
     fn test_blob_reader() -> Result<()> {
         let mut file = File::open(test_data_path("zugerland.osm.pbf"))?;
         let mut reader = BlobReader::open(&mut file)?;
-        assert_eq!(reader.blobs, &[(119, 16681), (16816, 15278), (32110, 8616)]);
+        assert_eq!(reader.blobs, &[(88, 16730), (16834, 15278), (32128, 8616)]);
         assert_eq!(
             reader.header().replication_timestamp,
             UtcDateTime::from_unix_timestamp(1769501462)? // 2026-01-27T08:11:02Z

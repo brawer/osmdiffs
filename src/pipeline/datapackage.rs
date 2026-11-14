@@ -148,7 +148,7 @@ mod tests {
             workdir.join(format!("{}.meta.json", pipeline::PLANET_PBF_FILENAME)),
             r#"{"replication_timestamp":"2026-09-01T00:00:02Z","source":null,
                 "writing_program":"osmx",
-                "sha256":"56e12b62871018c7a969c9924bcfb1bdce15676bee706156260f101db809b9e1"}"#,
+                "sha256":"c6d2ef441a79c401dab2399c5737e14f4c5b0d5f766e4b00d201870b0ff997bd"}"#,
         )
         .unwrap();
     }
