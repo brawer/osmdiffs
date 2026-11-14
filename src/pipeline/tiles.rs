@@ -24,6 +24,38 @@ pub enum ZoomRange {
     Bounded { min: u8, max: u8 },
 }
 
+/// Whether [`render_tiles`] may drop features to keep tiles small.
+pub enum Thinning<'a> {
+    /// `--drop-densest-as-needed`: thin out any tile that would be too
+    /// large. With an `importance_attr`, also show only the most
+    /// important features at coarse zooms; see [`importance_filter`].
+    DropDensest { importance_attr: Option<&'a str> },
+    /// `--no-feature-limit --no-tile-size-limit`: keep every feature,
+    /// however large a tile gets. Only for small inputs, such as
+    /// `conflated_tiles::ConflatedLayers::spider_cells`, whose whole
+    /// point is that nothing gets dropped. With a `zoom_attr`, show
+    /// each feature only at the zoom level in that property; see
+    /// [`zoom_filter`].
+    Never {
+        zoom_attr: Option<&'a str>,
+        max_zoom: u8,
+    },
+}
+
+/// A tippecanoe feature filter (`-j`) that shows each feature only at
+/// the zoom level in its property `attr`, for zooms up to `max_zoom`.
+fn zoom_filter(attr: &str, max_zoom: u8) -> String {
+    let mut any = vec![serde_json::json!("any")];
+    for zoom in 0..=max_zoom {
+        any.push(serde_json::json!([
+            "all",
+            ["==", "$zoom", zoom],
+            ["==", attr, zoom]
+        ]));
+    }
+    serde_json::json!({ "*": any }).to_string()
+}
+
 /// Share of features, by `importance` (see `pipeline::importance`),
 /// that tiles show at z0. Each zoom level above that shows four times
 /// as many (a tile splits into four, so features per tile stay about
@@ -77,7 +109,7 @@ pub fn render_tiles(
     workdir: &Path,
     out_filename: &str,
     zoom_range: ZoomRange,
-    importance_attr: Option<&str>,
+    thinning: Thinning,
 ) -> Result<PathBuf> {
     let out_path = workdir.join(out_filename);
     let inputs: Vec<&Path> = layers.iter().map(|layer| layer.path.as_path()).collect();
@@ -94,7 +126,7 @@ pub fn render_tiles(
 
     let progress_bar = make_progress_bar(progress, "tiles.render", 100, "percent");
 
-    let mut cmd = make_tippecanoe_command(layers, workdir, &tmp_path, zoom_range, importance_attr)?;
+    let mut cmd = make_tippecanoe_command(layers, workdir, &tmp_path, zoom_range, thinning)?;
     let mut child = cmd.stderr(Stdio::piped()).spawn()?;
     let stderr = child.stderr.take().expect("Failed to capture stderr");
     let stderr_reader = BufReader::new(stderr);
@@ -121,7 +153,7 @@ fn make_tippecanoe_command(
     workdir: &Path,
     out_path: &Path,
     zoom_range: ZoomRange,
-    importance_attr: Option<&str>,
+    thinning: Thinning,
 ) -> Result<Command> {
     let mut cmd = Command::new("tippecanoe");
     // Clear all environment variables, so we don't leak secrets to an untrusted subprocess.
@@ -151,10 +183,23 @@ fn make_tippecanoe_command(
     // `--drop-densest-as-needed` still thins out any tile that would
     // otherwise be too large.
     cmd.arg("-r").arg("1");
-    if let Some(attr) = importance_attr {
-        cmd.arg("-j").arg(importance_filter(attr));
+    match thinning {
+        Thinning::DropDensest { importance_attr } => {
+            if let Some(attr) = importance_attr {
+                cmd.arg("-j").arg(importance_filter(attr));
+            }
+            cmd.arg("--drop-densest-as-needed");
+        }
+        Thinning::Never {
+            zoom_attr,
+            max_zoom,
+        } => {
+            if let Some(attr) = zoom_attr {
+                cmd.arg("-j").arg(zoom_filter(attr, max_zoom));
+            }
+            cmd.arg("--no-feature-limit").arg("--no-tile-size-limit");
+        }
     }
-    cmd.arg("--drop-densest-as-needed");
     for layer in layers.iter() {
         // Suppress empty layers; Tippecanoe fails if any input file is empty.
         let metadata = std::fs::metadata(&layer.path)?;
@@ -211,7 +256,14 @@ pub fn join_tiles(inputs: &[PathBuf], workdir: &Path, out_filename: &str) -> Res
 fn make_tile_join_command(inputs: &[PathBuf], out_path: &Path) -> Command {
     let mut cmd = Command::new("tile-join");
     // Clear all environment variables, so we don't leak secrets to an untrusted subprocess.
-    cmd.env_clear().env("PATH", env!("PATH")).arg("--force");
+    // `--no-tile-size-limit`: tile-join would otherwise skip any
+    // joined tile over 500 KB. Each input keeps its own tiles small
+    // enough, but `conflated_tiles`' `spider_cells` layer comes on top
+    // of the overview, which already fills a tile at coarse zooms.
+    cmd.env_clear()
+        .env("PATH", env!("PATH"))
+        .arg("--force")
+        .arg("--no-tile-size-limit");
     for input in inputs {
         cmd.arg(input);
     }
@@ -278,7 +330,9 @@ mod tests {
             &PathBuf::from("test-workdir"),
             &PathBuf::from("test-output.pmtiles"),
             ZoomRange::Auto,
-            Some("@importance"),
+            Thinning::DropDensest {
+                importance_attr: Some("@importance"),
+            },
         )
         .expect("should not fail");
         let args: Vec<String> = cmd
@@ -301,8 +355,16 @@ mod tests {
         ];
         let workdir = PathBuf::from("test-workdir");
         let out = PathBuf::from("test-output.pmtiles");
-        let cmd = make_tippecanoe_command(&layers, &workdir, &out, ZoomRange::Auto, None)
-            .expect("should not fail");
+        let cmd = make_tippecanoe_command(
+            &layers,
+            &workdir,
+            &out,
+            ZoomRange::Auto,
+            Thinning::DropDensest {
+                importance_attr: None,
+            },
+        )
+        .expect("should not fail");
         assert_eq!(cmd.get_program(), "tippecanoe");
         let args: Vec<String> = cmd
             .get_args()
@@ -340,7 +402,9 @@ mod tests {
             &workdir,
             &out,
             ZoomRange::Bounded { min: 13, max: 16 },
-            None,
+            Thinning::DropDensest {
+                importance_attr: None,
+            },
         )
         .expect("should not fail");
         let args: Vec<String> = cmd
@@ -369,6 +433,45 @@ mod tests {
     }
 
     #[test]
+    fn test_make_tippecanoe_command_never_thin() {
+        let layers = [make_test_tile_layer("Shops", "diffed-shops.jsonl")];
+        let cmd = make_tippecanoe_command(
+            &layers,
+            &PathBuf::from("test-workdir"),
+            &PathBuf::from("test-output.pmtiles"),
+            ZoomRange::Bounded { min: 0, max: 8 },
+            Thinning::Never {
+                zoom_attr: Some("z"),
+                max_zoom: 8,
+            },
+        )
+        .expect("should not fail");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "--no-feature-limit"));
+        assert!(args.iter().any(|a| a == "--no-tile-size-limit"));
+        assert!(!args.iter().any(|a| a == "--drop-densest-as-needed"));
+        let j = args.iter().position(|a| a == "-j").expect("-j");
+        assert_eq!(args[j + 1], zoom_filter("z", 8));
+    }
+
+    #[test]
+    fn test_zoom_filter() {
+        let filter: serde_json::Value =
+            serde_json::from_str(&zoom_filter("z", 1)).expect("valid JSON");
+        assert_eq!(
+            filter,
+            serde_json::json!({"*": [
+                "any",
+                ["all", ["==", "$zoom", 0], ["==", "z", 0]],
+                ["all", ["==", "$zoom", 1], ["==", "z", 1]],
+            ]})
+        );
+    }
+
+    #[test]
     fn test_make_tile_join_command() {
         let inputs = [
             PathBuf::from("overview.pmtiles"),
@@ -385,6 +488,7 @@ mod tests {
             args,
             &[
                 "--force",
+                "--no-tile-size-limit",
                 "overview.pmtiles",
                 "detail.pmtiles",
                 "--output",
