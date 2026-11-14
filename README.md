@@ -1,4 +1,4 @@
-# OSM Diffs
+# OSMDiffs
 
 [![Coverage Status](https://coveralls.io/repos/github/brawer/osmdiffs/badge.svg?branch=main)](https://coveralls.io/github/brawer/osmdiffs?branch=main)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/brawer/osmdiffs/badge)](https://scorecard.dev/viewer/?uri=github.com/brawer/osmdiffs)
