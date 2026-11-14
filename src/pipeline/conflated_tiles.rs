@@ -36,6 +36,15 @@
 //!   the overview can't afford) and `fid`, the row's ordinal in
 //!   `conflated.parquet`.
 //!
+//! - the **spider cells** layer (`spider_cells`, z0 to
+//!   [`SPIDER_CELLS_MAX_ZOOM`]): for each spider and each cell of a grid
+//!   [`SPIDER_CELL_ZOOM_OFFSET`] zooms finer than the tile, one point
+//!   at the centroid of the spider's features in the cell, with their
+//!   counts. Built in its own tippecanoe pass that never drops anything,
+//!   so that a map filtered to one spider shows where all its features
+//!   are even at zooms where the overview is thinned out
+//!   ([#949](https://github.com/brawer/osmdiffs/issues/949)).
+//!
 //! Every feature carries `relation`, the row's `match.relation`. Only
 //! `same` rows go to the `matched` layers. A `located_in` row, such as
 //! a pharmacy inside a supermarket, goes to the `unmatched` layers,
@@ -133,6 +142,27 @@ pub(crate) const DETAIL_MAX_ZOOM: u8 = 16;
 /// silently dropped).
 pub(crate) const MIN_CONNECTOR_LENGTH_METERS: f64 = 5.0;
 
+/// The tippecanoe layer name of [`ConflatedLayers::spider_cells`].
+const SPIDER_CELLS_LAYER_NAME: &str = "spider_cells";
+
+/// Highest zoom level of the `spider_cells` layer: the highest zoom at
+/// which tippecanoe's `--drop-densest-as-needed` still thins out the
+/// overview somewhere on the planet. From the next zoom on, the overview
+/// shows every feature, so a map can switch back to it. Measured on the
+/// 2026-11-02 planet; see #949.
+pub(crate) const SPIDER_CELLS_MAX_ZOOM: u8 = 8;
+
+/// At zoom `z`, the `spider_cells` layer has one point per spider in
+/// each tile of zoom `z + SPIDER_CELL_ZOOM_OFFSET`, so at most 64 per
+/// spider in a tile.
+const SPIDER_CELL_ZOOM_OFFSET: u8 = 3;
+
+/// The property of a `spider_cells` feature that holds the one zoom
+/// level at which it is shown; see `tiles::Thinning::Never`. Not
+/// tippecanoe's per-feature `minzoom`/`maxzoom`: with tippecanoe v2.49,
+/// that kept one feature per tile on the planet.
+pub(crate) const SPIDER_CELL_ZOOM_ATTR: &str = "z";
+
 /// Every GeoJSON Lines layer [`extract_conflated_layers`] produces,
 /// grouped by which of `conflated.pmtiles`' two tippecanoe passes
 /// consumes them. Named fields, not a `Vec` some caller has to index
@@ -156,6 +186,11 @@ pub struct ConflatedLayers {
     /// `UNMATCHED_LAYER_NAME`, matching [`Self::overview_unmatched`],
     /// for the same `tile-join` reason.
     pub detail_unmatched: TileLayer,
+    /// Fed to its own pass (`ZoomRange::Bounded { min: 0, max:
+    /// SPIDER_CELLS_MAX_ZOOM }`, `tiles::Thinning::Never`, never
+    /// dropping anything): per spider
+    /// and grid cell, one point with counts; see [`SpiderCells`].
+    pub spider_cells: TileLayer,
 }
 
 /// One decoded row of `conflated.parquet`, kept whether or not it has
@@ -333,6 +368,107 @@ impl ConflatedTileRow {
     }
 }
 
+/// The `spider_cells` layer, accumulated row by row: for every spider,
+/// zoom level and grid cell, the counts and the sum of the positions of
+/// the spider's features there.
+#[derive(Default)]
+struct SpiderCells {
+    /// Spider names, indexed by the ids in `cells`' keys.
+    spiders: Vec<String>,
+    spider_ids: std::collections::HashMap<String, u32>,
+    /// By spider id, zoom, and the grid cell's x and y.
+    cells: std::collections::HashMap<(u32, u8, u32, u32), SpiderCell>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct SpiderCell {
+    n: u64,
+    same: u64,
+    missing_in_osm: u64,
+    located_in: u64,
+    sum_lon: f64,
+    sum_lat: f64,
+}
+
+impl SpiderCells {
+    /// Adds a feature of `spider` with `match.relation` `relation` at
+    /// `(lon, lat)` to its cell at every zoom.
+    fn add(&mut self, spider: &str, relation: &str, (lon, lat): (f64, f64)) {
+        let id = match self.spider_ids.get(spider) {
+            Some(&id) => id,
+            None => {
+                let id = self.spiders.len() as u32;
+                self.spiders.push(spider.to_string());
+                self.spider_ids.insert(spider.to_string(), id);
+                id
+            }
+        };
+        let finest = SPIDER_CELLS_MAX_ZOOM + SPIDER_CELL_ZOOM_OFFSET;
+        let (x, y) = tile_of(lon, lat, finest);
+        for zoom in 0..=SPIDER_CELLS_MAX_ZOOM {
+            let shift = SPIDER_CELLS_MAX_ZOOM - zoom;
+            let cell = self
+                .cells
+                .entry((id, zoom, x >> shift, y >> shift))
+                .or_default();
+            cell.n += 1;
+            match relation {
+                RELATION_SAME => cell.same += 1,
+                "missing_in_osm" => cell.missing_in_osm += 1,
+                "located_in" => cell.located_in += 1,
+                _ => {}
+            }
+            cell.sum_lon += lon;
+            cell.sum_lat += lat;
+        }
+    }
+
+    /// Writes one GeoJSON Lines feature per cell, sorted by spider,
+    /// zoom and cell, so that the output is reproducible. Each carries
+    /// its zoom as [`SPIDER_CELL_ZOOM_ATTR`], so that tippecanoe shows
+    /// it at that zoom only. Returns how many it wrote.
+    fn write(&self, out: &mut dyn Write) -> Result<u64> {
+        let mut keys: Vec<&(u32, u8, u32, u32)> = self.cells.keys().collect();
+        keys.sort_by_key(|&&(id, zoom, x, y)| (&self.spiders[id as usize], zoom, x, y));
+        for key in &keys {
+            let (id, zoom, _, _) = **key;
+            let cell = &self.cells[*key];
+            let round = |v: f64| (v * 1e7).round() / 1e7;
+            let n = cell.n as f64;
+            let point = geo::Geometry::Point(geo::point!(
+                x: round(cell.sum_lon / n),
+                y: round(cell.sum_lat / n)
+            ));
+            let mut properties = Map::new();
+            properties.insert(
+                "spider".to_string(),
+                Value::String(self.spiders[id as usize].clone()),
+            );
+            properties.insert("n".to_string(), Value::from(cell.n));
+            properties.insert("same".to_string(), Value::from(cell.same));
+            properties.insert(
+                "missing_in_osm".to_string(),
+                Value::from(cell.missing_in_osm),
+            );
+            properties.insert("located_in".to_string(), Value::from(cell.located_in));
+            properties.insert(SPIDER_CELL_ZOOM_ATTR.to_string(), Value::from(zoom));
+            out.write_all(geometry_to_geojson_line(&point, properties)?.as_bytes())?;
+        }
+        Ok(keys.len() as u64)
+    }
+}
+
+/// The x and y of the Web Mercator tile at `zoom` that holds
+/// `(lon, lat)`, clamped to the map at the poles and the antimeridian.
+fn tile_of(lon: f64, lat: f64, zoom: u8) -> (u32, u32) {
+    let n = f64::from(1u32 << zoom);
+    let lat = lat.clamp(-85.051_128_78, 85.051_128_78).to_radians();
+    let x = (lon + 180.0) / 360.0 * n;
+    let y = (1.0 - lat.tan().asinh() / std::f64::consts::PI) / 2.0 * n;
+    let clamp = |v: f64| (v.floor().max(0.0) as u32).min((1u32 << zoom) - 1);
+    (clamp(x), clamp(y))
+}
+
 /// Decodes WKB and rounds coordinates to 1e-7 degrees (about 1cm at
 /// the equator) -- same precision `SuggestedEdit::to_geojson` already
 /// applies to its own point, so we're not emitting fake sub-millimeter
@@ -394,12 +530,17 @@ pub fn extract_conflated_layers(
             name: String::from(UNMATCHED_LAYER_NAME),
             path: workdir.join("unmatched-detail.jsonl"),
         },
+        spider_cells: TileLayer {
+            name: String::from(SPIDER_CELLS_LAYER_NAME),
+            path: workdir.join("spider-cells.jsonl"),
+        },
     };
     let all_layers = [
         &layers.overview_matched,
         &layers.overview_unmatched,
         &layers.detail_matched,
         &layers.detail_unmatched,
+        &layers.spider_cells,
     ];
     let outputs: Vec<&Path> = all_layers
         .iter()
@@ -433,6 +574,7 @@ pub fn extract_conflated_layers(
     let (overview_unmatched_tmp, mut overview_unmatched_w) = open_tmp(&layers.overview_unmatched)?;
     let (detail_matched_tmp, mut detail_matched_w) = open_tmp(&layers.detail_matched)?;
     let (detail_unmatched_tmp, mut detail_unmatched_w) = open_tmp(&layers.detail_unmatched)?;
+    let (spider_cells_tmp, mut spider_cells_w) = open_tmp(&layers.spider_cells)?;
 
     let counts = extract_rows(
         conflated,
@@ -442,6 +584,7 @@ pub fn extract_conflated_layers(
             overview_unmatched: &mut overview_unmatched_w,
             detail_matched: &mut detail_matched_w,
             detail_unmatched: &mut detail_unmatched_w,
+            spider_cells: &mut spider_cells_w,
         },
     )?;
 
@@ -450,6 +593,7 @@ pub fn extract_conflated_layers(
         overview_unmatched_w,
         detail_matched_w,
         detail_unmatched_w,
+        spider_cells_w,
     ] {
         writer.flush()?;
     }
@@ -457,27 +601,30 @@ pub fn extract_conflated_layers(
     rename(&overview_unmatched_tmp, &layers.overview_unmatched.path)?;
     rename(&detail_matched_tmp, &layers.detail_matched.path)?;
     rename(&detail_unmatched_tmp, &layers.detail_unmatched.path)?;
+    rename(&spider_cells_tmp, &layers.spider_cells.path)?;
 
     progress_bar.finish_with_message(format!(
         "{num_rows} conflated features → {} matched / {} unmatched rows, \
-         {} matched-detail / {} unmatched-detail features",
+         {} matched-detail / {} unmatched-detail features, {} spider cells",
         counts.matched,
         counts.unmatched,
         counts.matched_detail_features,
-        counts.unmatched_detail_features
+        counts.unmatched_detail_features,
+        counts.spider_cells
     ));
 
     Ok(layers)
 }
 
-/// The four sinks [`extract_rows`] writes to, one per [`ConflatedLayers`]
-/// field -- a struct rather than four positional `&mut impl Write`
+/// The sinks [`extract_rows`] writes to, one per [`ConflatedLayers`]
+/// field -- a struct rather than positional `&mut impl Write`
 /// parameters so a call site can't transpose two of them.
 struct Writers<'a> {
     overview_matched: &'a mut dyn Write,
     overview_unmatched: &'a mut dyn Write,
     detail_matched: &'a mut dyn Write,
     detail_unmatched: &'a mut dyn Write,
+    spider_cells: &'a mut dyn Write,
 }
 
 #[derive(Default)]
@@ -486,6 +633,7 @@ struct RowCounts {
     unmatched: u64,
     matched_detail_features: u64,
     unmatched_detail_features: u64,
+    spider_cells: u64,
 }
 
 fn extract_rows(
@@ -495,6 +643,7 @@ fn extract_rows(
 ) -> Result<RowCounts> {
     let start = Instant::now();
     let mut counts = RowCounts::default();
+    let mut spider_cells = SpiderCells::default();
 
     let file = File::open(conflated)?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
@@ -513,7 +662,7 @@ fn extract_rows(
         // there's nothing to deduplicate or sort here, unlike edits.rs,
         // so no channels/external sort are needed, just an ordered
         // in-memory Vec per batch.
-        type RowResult = Option<(bool, String, Vec<String>)>;
+        type RowResult = Option<(ConflatedTileRow, Option<(f64, f64)>, String, Vec<String>)>;
         let rows: Vec<RowResult> = (0..batch.num_rows())
             .into_par_iter()
             .map(|row| -> Result<RowResult> {
@@ -526,17 +675,24 @@ fn extract_rows(
                     Some(osm) => tile_row.to_detail_geojson_lines(osm, fid)?,
                     None => vec![tile_row.to_unmatched_detail_geojson_line(fid)?],
                 };
-                Ok(Some((tile_row.is_matched(), overview_line, detail_lines)))
+                let location = read_wkb(&tile_row.atp_geometry_wkb)
+                    .ok()
+                    .and_then(|g| g.to_geometry().centroid())
+                    .map(|c| (c.x(), c.y()));
+                Ok(Some((tile_row, location, overview_line, detail_lines)))
             })
             .collect::<Result<Vec<_>>>()?;
         batch_offset += batch.num_rows() as u64;
 
         for entry in rows {
             progress_bar.inc(1);
-            let Some((matched, overview_line, detail_lines)) = entry else {
+            let Some((tile_row, location, overview_line, detail_lines)) = entry else {
                 continue;
             };
-            if matched {
+            if let Some(location) = location {
+                spider_cells.add(&tile_row.spider, &tile_row.relation, location);
+            }
+            if tile_row.is_matched() {
                 writers
                     .overview_matched
                     .write_all(overview_line.as_bytes())?;
@@ -558,8 +714,11 @@ fn extract_rows(
         }
     }
 
+    counts.spider_cells = spider_cells.write(writers.spider_cells)?;
+
     log::info!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
+        spider_cells = counts.spider_cells,
         matched = counts.matched,
         unmatched = counts.unmatched,
         matched_detail_features = counts.matched_detail_features,
@@ -647,6 +806,7 @@ mod tests {
             "unmatched.jsonl",
             "matched-detail.jsonl",
             "unmatched-detail.jsonl",
+            "spider-cells.jsonl",
         ] {
             std::fs::write(workdir.path().join(name), b"").expect("write placeholder");
         }
@@ -658,6 +818,75 @@ mod tests {
         assert_eq!(layers.detail_matched.name, MATCHED_LAYER_NAME);
         assert_eq!(layers.overview_unmatched.name, layers.detail_unmatched.name);
         assert_eq!(layers.detail_unmatched.name, UNMATCHED_LAYER_NAME);
+        assert_eq!(layers.spider_cells.name, SPIDER_CELLS_LAYER_NAME);
+    }
+
+    #[test]
+    fn tile_of_web_mercator() {
+        assert_eq!(tile_of(0.0, 0.0, 0), (0, 0));
+        assert_eq!(tile_of(8.5, 47.4, 1), (1, 0));
+        // Zürich, as on openstreetmap.org.
+        assert_eq!(tile_of(8.5417, 47.3769, 13), (4290, 2868));
+        // Clamped at the poles and the antimeridian.
+        assert_eq!(tile_of(180.0, -90.0, 3), (7, 7));
+        assert_eq!(tile_of(-180.0, 90.0, 3), (0, 0));
+    }
+
+    #[test]
+    fn spider_cells_one_point_per_spider_cell_and_zoom() {
+        let mut cells = SpiderCells::default();
+        // Two features in Zürich, one in Geneva, and one of another spider.
+        cells.add("acme", "same", (8.54, 47.37));
+        cells.add("acme", "missing_in_osm", (8.56, 47.39));
+        cells.add("acme", "located_in", (6.14, 46.20));
+        cells.add("other", "same", (8.54, 47.37));
+        let mut out = Vec::new();
+        let written = cells.write(&mut out).expect("write");
+        let features: Vec<Value> = String::from_utf8(out)
+            .expect("utf-8")
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("json"))
+            .collect();
+        assert_eq!(written, features.len() as u64);
+
+        let at = |spider: &str, zoom: u8| -> Vec<&Value> {
+            features
+                .iter()
+                .filter(|f| f["properties"]["spider"] == spider && f["properties"]["z"] == zoom)
+                .collect()
+        };
+        // At z0 the cells are z3 tiles, so all of Switzerland is one.
+        let z0 = at("acme", 0);
+        assert_eq!(z0.len(), 1);
+        let props = &z0[0]["properties"];
+        assert_eq!(
+            (
+                &props["n"],
+                &props["same"],
+                &props["missing_in_osm"],
+                &props["located_in"]
+            ),
+            (
+                &Value::from(3),
+                &Value::from(1),
+                &Value::from(1),
+                &Value::from(1)
+            )
+        );
+        // The centroid of the members, not the middle of the cell.
+        assert_eq!(
+            z0[0]["geometry"]["coordinates"],
+            Value::from(vec![7.7466667, 46.9866667])
+        );
+        // At the highest zoom, Zürich and Geneva are separate cells.
+        assert_eq!(at("acme", SPIDER_CELLS_MAX_ZOOM).len(), 2);
+        assert_eq!(at("other", 0).len(), 1);
+        // Sorted by spider, then zoom.
+        assert_eq!(features[0]["properties"]["spider"], "acme");
+        assert_eq!(features[0]["properties"]["z"], 0);
+        let last = features.last().expect("features");
+        assert_eq!(last["properties"]["spider"], "other");
+        assert_eq!(last["properties"]["z"], SPIDER_CELLS_MAX_ZOOM);
     }
 
     fn encode_point(lon: f64, lat: f64) -> Vec<u8> {

@@ -316,7 +316,9 @@ fn run_pipeline_steps(
                 min: 0,
                 max: conflated_tiles::DETAIL_MIN_ZOOM - 1,
             },
-            Some("importance"),
+            tiles::Thinning::DropDensest {
+                importance_attr: Some("importance"),
+            },
         )
     })?;
     let conflated_detail = run_step("render_conflated_detail", || {
@@ -332,12 +334,33 @@ fn run_pipeline_steps(
                 min: conflated_tiles::DETAIL_MIN_ZOOM,
                 max: conflated_tiles::DETAIL_MAX_ZOOM,
             },
-            None,
+            tiles::Thinning::DropDensest {
+                importance_attr: None,
+            },
+        )
+    })?;
+    // Per spider and grid cell, one point with counts, never dropped,
+    // so that a map filtered to one spider shows where it is at zooms
+    // where the overview is thinned out (#949).
+    let conflated_spider_cells = run_step("render_conflated_spider_cells", || {
+        tiles::render_tiles(
+            std::slice::from_ref(&conflated_layers.spider_cells),
+            progress,
+            workdir,
+            "conflated-spider-cells.pmtiles",
+            tiles::ZoomRange::Bounded {
+                min: 0,
+                max: conflated_tiles::SPIDER_CELLS_MAX_ZOOM,
+            },
+            tiles::Thinning::Never {
+                zoom_attr: Some(conflated_tiles::SPIDER_CELL_ZOOM_ATTR),
+                max_zoom: conflated_tiles::SPIDER_CELLS_MAX_ZOOM,
+            },
         )
     })?;
     let conflated_tiles_out = run_step("join_conflated_tiles", || {
         tiles::join_tiles(
-            &[conflated_overview, conflated_detail],
+            &[conflated_overview, conflated_detail, conflated_spider_cells],
             workdir,
             "conflated.pmtiles",
         )
@@ -363,7 +386,9 @@ fn run_pipeline_steps(
             workdir,
             "diffed-places.pmtiles",
             tiles::ZoomRange::Auto,
-            Some("@importance"),
+            tiles::Thinning::DropDensest {
+                importance_attr: Some("@importance"),
+            },
         )
     })?;
     published.push(run_step("upload_tiles", || {

@@ -830,6 +830,27 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     let overview_unmatched = read_features("unmatched.jsonl")?;
     let detail_matched = read_features("matched-detail.jsonl")?;
     let detail_unmatched = read_features("unmatched-detail.jsonl")?;
+
+    // The spider cells count every conflated row once at each zoom, so
+    // a map filtered to one spider can show all of it at coarse zooms.
+    let spider_cells = read_features("spider-cells.jsonl")?;
+    for zoom in 0..=8 {
+        let at_zoom = || {
+            spider_cells
+                .iter()
+                .filter(move |f| f["properties"]["z"] == zoom)
+        };
+        let sum = |key: &str| -> u64 {
+            at_zoom()
+                .map(|f| f["properties"][key].as_u64().expect(key))
+                .sum()
+        };
+        assert_eq!((sum("n"), sum("same"), sum("missing_in_osm")), (8, 3, 5));
+        // At z0, each of the five spiders with rows has one cell.
+        if zoom == 0 {
+            assert_eq!(at_zoom().count(), 5, "{spider_cells:#?}");
+        }
+    }
     assert_eq!(
         overview_matched.len(),
         3,

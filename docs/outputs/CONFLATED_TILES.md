@@ -33,6 +33,9 @@ Two layers, split by whether `conflate()` found an OpenStreetMap match:
 Every feature carries `relation`, the row's `match.relation`, so a
 style can tell `missing_in_osm` from `located_in`.
 
+A third layer, **`spider_cells`** (z0–8), summarizes where each
+spider's features are; see [below](#spider_cells-z08).
+
 Each is built as two PMTiles archives — a coarse **overview** (z0–12)
 and a fine **detail** (z13–16) — merged with `tile-join`, so what a
 row looks like depends on how far you're zoomed in (see below). A
@@ -108,6 +111,38 @@ how far you zoom in. Bounding the detail pass to a fixed zoom range
 side-steps that entirely — see
 [`docs/notes/2026-08-27-connector-line-zoom-runaway.md`](../notes/2026-08-27-connector-line-zoom-runaway.md)
 for the full investigation.
+
+### `spider_cells` (z0–8)
+
+The overview is thinned out at coarse zooms, the same way for all
+spiders, so a map filtered to one spider (with a filter on `spider`)
+shows only a few of its features there. `spider_cells` is for such a
+map. At zoom `z`, it has one point per spider in each cell of a grid
+of tiles at zoom `z + 3`, so at most 64 points of one spider in a tile.
+The point lies at the centroid of the spider's AllThePlaces features
+in the cell, not at the middle of the cell, so the points don't line
+up on a grid, and a spider whose features are shifted shows shifted.
+
+Properties:
+
+- `spider` — the spider.
+- `n` — the spider's features in the cell: rows of `conflated.parquet`
+  with an AllThePlaces side.
+- `same`, `missing_in_osm`, `located_in` — how many of them have each
+  `match.relation`. Together with `n`, enough to size a point and
+  colour it by its mix.
+- `z` — the zoom level the point is for. Each point is in the tiles of
+  that zoom only.
+
+This layer is built in its own tippecanoe pass that never drops a
+feature, and joined to the other two. It stops at z8 because that is
+the highest zoom at which `--drop-densest-as-needed` still thins out
+the overview somewhere; from z9 on, the overview has every feature.
+On the 2026-11-02 planet, the layer has 11,406 points at z0 and 1.2
+million at z8. It adds about 155 KB to the z0 tile (245 KB → 400 KB)
+and 30 MB to the archive. The largest joined tile is 634 KB, at z4,
+which is over tippecanoe's usual 500 KB limit, so `tile-join` runs
+with `--no-tile-size-limit`.
 
 ## Properties
 
