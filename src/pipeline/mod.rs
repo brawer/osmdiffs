@@ -308,6 +308,7 @@ fn run_pipeline_steps(
             &[
                 conflated_layers.overview_matched.clone(),
                 conflated_layers.overview_unmatched.clone(),
+                conflated_layers.overview_deletion_candidates.clone(),
             ],
             progress,
             workdir,
@@ -326,6 +327,7 @@ fn run_pipeline_steps(
             &[
                 conflated_layers.detail_matched.clone(),
                 conflated_layers.detail_unmatched.clone(),
+                conflated_layers.detail_deletion_candidates.clone(),
             ],
             progress,
             workdir,

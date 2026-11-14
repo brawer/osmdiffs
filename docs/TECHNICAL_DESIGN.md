@@ -231,8 +231,8 @@ graph TD
     CONFLATED --> UPLOAD_CONFLATED(upload_conflated) --> S3A[("public S3")]
 
     CONFLATED --> EXTRACT_CONFLATED_LAYERS(extract_conflated_layers)
-    EXTRACT_CONFLATED_LAYERS --> OVERVIEW_LAYERS["matched.jsonl,<br/>unmatched.jsonl<br/>(minimal, no tags)"]
-    EXTRACT_CONFLATED_LAYERS --> DETAIL_LAYERS["matched-detail.jsonl,<br/>unmatched-detail.jsonl<br/>(full tags)"]
+    EXTRACT_CONFLATED_LAYERS --> OVERVIEW_LAYERS["matched.jsonl,<br/>unmatched.jsonl,<br/>deletion-candidates.jsonl<br/>(minimal, no tags)"]
+    EXTRACT_CONFLATED_LAYERS --> DETAIL_LAYERS["matched-detail.jsonl,<br/>unmatched-detail.jsonl,<br/>deletion-candidates-detail.jsonl<br/>(full tags)"]
     OVERVIEW_LAYERS --> RENDER_CONFLATED_OVERVIEW("render_conflated_overview<br/>(tippecanoe, z0..12)") --> OVERVIEW_PMTILES[conflated-overview.pmtiles]
     DETAIL_LAYERS --> RENDER_CONFLATED_DETAIL("render_conflated_detail<br/>(tippecanoe, z13..16)") --> DETAIL_PMTILES[conflated-detail.pmtiles]
     OVERVIEW_PMTILES --> JOIN_CONFLATED_TILES(join_conflated_tiles/tile-join)
@@ -459,7 +459,7 @@ fetch away.
 - **`extract_conflated_layers`**
   ([`src/pipeline/conflated_tiles.rs`](../src/pipeline/conflated_tiles.rs))
   — scans every row of `conflated.parquet` (matched or not, unlike
-  `suggest_edits` below) exactly once, writing all four layers both of
+  `suggest_edits` below) exactly once, writing all the layers
   `conflated.pmtiles`' passes need:
   - the coarse **overview** `matched`/`unmatched` layers — one
     deliberately minimal feature per row: `spider`, `relation`,
@@ -488,6 +488,13 @@ fetch away.
     join on `osm:type`+`osm:id`; `unmatched` (which have no id —
     `conflated.parquet` carries none for the ATP side) on the nearest
     same-`spider` `part: "atp"` detail feature.
+  - the **`deletion_candidate`** layers — rows without an ATP side:
+    OSM features that nothing in ATP matched but that may be gone (see
+    `conflate::deletion`). The overview feature is the OSM shape with
+    `relation`, `rule` (the row's `match.evidence.rule`), `importance`
+    and `osm:type`/`osm:id`; the detail feature adds the full `osm:*`
+    tag set, `fid`, `part: "osm"` and `local_share`. They have no
+    `spider` and don't count towards `spider_cells`.
 
   Rows whose ATP↔OSM offset is below `MIN_CONNECTOR_LENGTH_METERS` (a
   documented constant, currently 5m) omit the connector — it would

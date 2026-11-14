@@ -5,7 +5,8 @@
 
 Visualizes [`conflated.parquet`](CONFLATED_PARQUET.md) itself — every
 [AllThePlaces](https://alltheplaces.xyz/) feature, matched to
-[OpenStreetMap](https://www.openstreetmap.org/) or not — so the
+[OpenStreetMap](https://www.openstreetmap.org/) or not, and the
+OpenStreetMap features that may be gone — so the
 *matching* step can be reviewed on its own, independent of whatever
 [`edits.pmtiles`](../TECHNICAL_DESIGN.md) separately proposes changing.
 It's a [PMTiles](https://protomaps.com/docs/pmtiles) archive, built with
@@ -21,7 +22,7 @@ notice. If you need something stable to build on, use
 
 ## Layers
 
-Two layers, split by whether `conflate()` found an OpenStreetMap match:
+Three layers, split by whether `conflate()` found an OpenStreetMap match:
 
 - **`matched`** — every `conflated.parquet` row whose
   [`match.relation`](CONFLATED_PARQUET.md#match) is `same`.
@@ -29,9 +30,21 @@ Two layers, split by whether `conflate()` found an OpenStreetMap match:
   includes `located_in` rows, such as a pharmacy inside a
   supermarket: the store is missing in OpenStreetMap, and its `osm`
   side is only the host it is in.
+- **`deletion_candidate`** — every row without an AllThePlaces side:
+  an OpenStreetMap feature that nothing in AllThePlaces matched, but
+  that may be gone, such as a shop of a brand that AllThePlaces covers
+  well nearby. These have not been checked by hand, so treat them as
+  leads for review, not as closures.
 
 Every feature carries `relation`, the row's `match.relation`, so a
-style can tell `missing_in_osm` from `located_in`.
+style can tell `missing_in_osm` from `located_in`. Features in
+`deletion_candidate` also carry `rule`, the row's
+[`match.evidence.rule`](CONFLATED_PARQUET.md#match), which says why it
+was flagged: `wikidata` or `name` for a brand, network or operator
+that AllThePlaces has in the same country, `swiss_transit_id` for a
+Swiss stop whose ID the register doesn't know, and
+`swiss_transit_stop` for a Swiss stop without IDs, far from any in the
+register.
 
 A third layer, **`spider_cells`** (z0–8), summarizes where each
 spider's features are; see [below](#spider_cells-z08).
@@ -57,8 +70,10 @@ against a full planet: full tags → ~370 features visible at z0; `+fid`
 → ~7k; overview as it stands → ~40k, a workable world map).
 
 Geometry is `osm_geometry` (the matched OpenStreetMap shape — point,
-line, or polygon) for `matched` rows, `atp_geometry` for `unmatched`.
-Properties: `spider`, `relation`, `importance`, and — rows with an
+line, or polygon) for `matched` and `deletion_candidate` rows,
+`atp_geometry` for `unmatched`. Properties: `spider` (not on
+`deletion_candidate`, which has no AllThePlaces side), `relation`,
+`importance`, `rule` (`deletion_candidate` only), and — rows with an
 OpenStreetMap feature only — `osm:type` / `osm:id`, which for a
 `located_in` row is the host.
 
@@ -70,8 +85,9 @@ times as many as the one before, since a tile splits into four, so a
 tile holds about as many features at every zoom. Where a tile would
 still be too large, tippecanoe's `--drop-densest-as-needed` thins it
 out further. To see a row's tags, click through to the detail layer
-(below): `matched` rows join on `osm:type`+`osm:id`, `unmatched` rows
-on nearest `part: "atp"` feature of the same `spider`.
+(below): `matched` and `deletion_candidate` rows join on
+`osm:type`+`osm:id`, `unmatched` rows on nearest `part: "atp"` feature
+of the same `spider`.
 
 ### z13–16: the detail
 
@@ -99,6 +115,9 @@ For the 2026-11-02 planet, the largest z13 tile then comes to about
   carries no stable id for the ATP side, so a viewer that clicked the
   (id-less) overview feature finds this one by taking the nearest
   `part: "atp"` feature of the same `spider` to the click.
+- A **`deletion_candidate`** row yields one feature: its OpenStreetMap
+  shape (`part: "osm"`), with the full `osm:*` tag set, `rule`, and —
+  for the `wikidata` and `name` rules — `local_share`.
 
 The matched split into separate `atp`/`osm`/`link` features exists
 because a single Mapbox Vector Tile feature can only be one geometry
@@ -152,14 +171,24 @@ with `--no-tile-size-limit`.
   cross-references `conflated.parquet`. Stable within a run only (both
   archives are always rebuilt together); not a cross-run identifier.
 - `spider` — which AllThePlaces spider produced this feature (its
-  `atp.fetched.spider` in `conflated.parquet`). On every feature.
+  `atp.fetched.spider` in `conflated.parquet`). On every feature except
+  those in `deletion_candidate`, which have no AllThePlaces side.
+- `rule` — the row's `match.evidence.rule`: why a feature in
+  `deletion_candidate` was flagged. In that layer only, on both
+  overview and detail features.
+- `local_share` — the row's `match.evidence.local_share`, rounded to
+  two decimals: for a deletion candidate by brand, the share of
+  OpenStreetMap features of that brand nearby that AllThePlaces
+  matched. On z13–16 `deletion_candidate` features only, and only for
+  the `wikidata` and `name` rules.
 - `matched` (`true` | `false`) — overview features only; the detail
   layer conveys the same thing through its layer name and `part`.
 - `importance` — the row's `importance` from `conflated.parquet`,
   rounded to two decimals. Overview features only.
 - `osm:type`, `osm:id` — the matched OpenStreetMap object. On the
-  `matched` overview feature (where they double as the join key to the
-  detail layer) and the z13–16 `osm`/`link` detail features.
+  `matched` and `deletion_candidate` overview features (where they
+  double as the join key to the detail layer) and the z13–16
+  `osm`/`link` detail features.
 - `osm:<tag>` for every tag in `osm.tags` — z13–16 `osm`/`link` detail
   features only.
 - `atp:<tag>` for every tag in `atp.tags` — z13–16 `atp`/`link` detail

@@ -527,7 +527,7 @@ mod tests {
                 "replication_timestamp": "2026-01-27T08:11:02Z",
                 "source": null,
                 "writing_program": "osmx",
-                "sha256": "56e12b62871018c7a969c9924bcfb1bdce15676bee706156260f101db809b9e1"
+                "sha256": "c6d2ef441a79c401dab2399c5737e14f4c5b0d5f766e4b00d201870b0ff997bd"
             }"#,
         )?;
         for name in ["qrank.meta.json", "osmviews.meta.json"] {
@@ -617,12 +617,12 @@ mod tests {
         assert_eq!(osm["hashes"][0]["alg"], "SHA-256");
         assert_eq!(
             osm["hashes"][0]["content"],
-            "56e12b62871018c7a969c9924bcfb1bdce15676bee706156260f101db809b9e1"
+            "c6d2ef441a79c401dab2399c5737e14f4c5b0d5f766e4b00d201870b0ff997bd"
         );
         assert_eq!(
             osm["purl"],
             "pkg:generic/openstreetmap/planet@2026-01-27T08:11:02Z?checksum=sha256:\
-             56e12b62871018c7a969c9924bcfb1bdce15676bee706156260f101db809b9e1"
+             c6d2ef441a79c401dab2399c5737e14f4c5b0d5f766e4b00d201870b0ff997bd"
         );
 
         let qrank = &components[2];

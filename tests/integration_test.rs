@@ -319,7 +319,14 @@ fn assert_spider_stats(path: &Path) -> Result<()> {
     assert_eq!(string_at("name"), "Denner");
     let osm_features = field("osm_features");
     let osm_features = osm_features.as_any().downcast_ref::<UInt64Array>().unwrap();
-    assert_eq!(osm_features.value(0), 1);
+    // The matched Denner and the second one, a deletion candidate.
+    assert_eq!(osm_features.value(0), 2);
+    let deletion_candidates = field("deletion_candidates");
+    let deletion_candidates = deletion_candidates
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    assert_eq!(deletion_candidates.value(0), 1);
     Ok(())
 }
 
@@ -526,6 +533,9 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
 
     let mut total_rows = 0;
     let mut matched = Vec::new();
+    // (osm id, match.relation, match.evidence.rule) of rows without an
+    // ATP side.
+    let mut deletion_candidates = Vec::new();
     for batch in reader {
         let batch: RecordBatch = batch?;
         total_rows += batch.num_rows();
@@ -561,11 +571,44 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
         for value in importance.values() {
             assert!((0.0..=1.0).contains(value), "importance {value}");
         }
+        let matching = batch
+            .column_by_name("match")
+            .context("missing 'match' column")?
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .context("'match' is not a struct")?;
+        let relations = matching
+            .column_by_name("relation")
+            .context("match has no 'relation' field")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("'relation' is not a string")?
+            .clone();
+        let rules = get_child_struct(matching, "evidence")?
+            .column_by_name("rule")
+            .context("evidence has no 'rule' field")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("'rule' is not a string")?
+            .clone();
         for row in 0..batch.num_rows() {
             if osm.is_null(row) {
                 continue;
             }
             let get = |name: &str| osm.column_by_name(name).context("missing field");
+            if atp.is_null(row) {
+                let id = get("id")?
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .context("'id' is not UInt64")?
+                    .value(row);
+                deletion_candidates.push((
+                    id,
+                    relations.value(row).to_string(),
+                    rules.value(row).to_string(),
+                ));
+                continue;
+            }
             let id = get("id")?
                 .as_any()
                 .downcast_ref::<UInt64Array>()
@@ -660,8 +703,18 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
     }
 
     assert_eq!(
-        total_rows, 8,
-        "expected 8 conflated rows (matched + unmatched)"
+        total_rows, 9,
+        "expected 9 conflated rows (matched + unmatched + deletion candidate)"
+    );
+    // A second Denner in OSM, about 1.6 km from the one that the Denner
+    // spider matched, that the spider doesn't list.
+    assert_eq!(
+        deletion_candidates,
+        vec![(
+            13426824598,
+            "deletion_candidate".to_string(),
+            "wikidata".to_string()
+        )]
     );
     assert_eq!(
         matched.len(),
@@ -807,12 +860,13 @@ fn assert_shops_jsonl(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Checks `extract_conflated_layers`'s four output layers against the
+/// Checks `extract_conflated_layers`'s output layers against the
 /// same fixture data `assert_conflated_parquet` checks: 3 matched + 5
-/// unmatched ATP features, two of them Winterthur benches that the
-/// Zugerland extract can't match (see `assert_conflated_parquet`'s own
-/// "expected 8 conflated rows" / "expected 3 ATP features matched"
-/// assertions above). The overview layers are deliberately minimal
+/// unmatched ATP features and one deletion candidate, a Denner in OSM
+/// that the Denner spider doesn't list. Two of the unmatched are
+/// Winterthur benches that the Zugerland extract can't match (see
+/// `assert_conflated_parquet`'s own "expected 9 conflated rows" /
+/// "expected 3 ATP features matched" assertions above). The overview layers are deliberately minimal
 /// (no tags); the detail layers carry the full tag set, keyed back to
 /// the overview by `fid`.
 fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
@@ -830,6 +884,31 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     let overview_unmatched = read_features("unmatched.jsonl")?;
     let detail_matched = read_features("matched-detail.jsonl")?;
     let detail_unmatched = read_features("unmatched-detail.jsonl")?;
+    // The second Denner, which the Denner spider doesn't list: the OSM
+    // node, with the rule that flagged it, at every zoom.
+    let overview_deletion = read_features("deletion-candidates.jsonl")?;
+    let detail_deletion = read_features("deletion-candidates-detail.jsonl")?;
+    assert_eq!(overview_deletion.len(), 1, "{overview_deletion:#?}");
+    assert_eq!(detail_deletion.len(), 1, "{detail_deletion:#?}");
+    for feature in overview_deletion.iter().chain(&detail_deletion) {
+        let props = &feature["properties"];
+        assert_eq!(feature["geometry"]["type"], "Point");
+        assert_eq!(props["relation"], "deletion_candidate");
+        assert_eq!(props["rule"], "wikidata");
+        assert_eq!(props["osm:type"], "node");
+        assert_eq!(props["osm:id"], 13426824598_u64);
+        assert!(props.get("spider").is_none(), "{feature}");
+    }
+    let overview = &overview_deletion[0]["properties"];
+    assert!(overview.get("osm:brand").is_none(), "{overview}");
+    assert!(overview.get("fid").is_none(), "{overview}");
+    assert!(overview["importance"].is_f64(), "{overview}");
+    let detail = &detail_deletion[0]["properties"];
+    assert_eq!(detail["part"], "osm");
+    assert_eq!(detail["osm:brand"], "Denner");
+    assert!(detail["fid"].is_u64(), "{detail}");
+    // One matched Denner and this one, within the radius.
+    assert_eq!(detail["local_share"], 0.5);
 
     // The spider cells count every conflated row once at each zoom, so
     // a map filtered to one spider can show all of it at coarse zooms.
