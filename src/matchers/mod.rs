@@ -469,7 +469,7 @@ pub fn create_matcher<'a>(
     } else if let Some(matcher) = infrastructure_matcher::InfrastructureMatcher::for_place(place) {
         Some(Box::new(matcher))
     } else {
-        // TODO: Implement matchers for street lamps, trees, etc.
+        // TODO: Implement matchers for trees (#954), street lamps, etc.
         None
     }
 }

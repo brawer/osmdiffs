@@ -148,8 +148,8 @@ pub struct PoiMatcher<'a> {
 }
 
 impl<'a> PoiMatcher<'a> {
-    // TODO: We should also look at names, by computing the token sort ratio,
-    // but we should do this in a way that works for CJK. So we need
+    // TODO(#953): We should also look at names, by computing the token sort
+    // ratio, but we should do this in a way that works for CJK. So we need
     // a decent segmenter that works for CJK languages. Maybe Lindera?
     pub fn for_place(
         place: &Place,
