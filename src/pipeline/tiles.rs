@@ -176,7 +176,7 @@ fn make_tippecanoe_command(
     // filter decides what coarse zooms show; without one, every zoom
     // shows every point. Tippecanoe's default rate of 2.5 (or any rate
     // above 1) drops a share of points at each zoom below the base
-    // zoom, which in the `conflated.pmtiles` detail pass (`-Z13 -z16`)
+    // zoom, which in the `conflated.pmtiles` detail pass (then `-Z13 -z16`)
     // hid a third of the points at z14, leaving `link` lines without
     // their host or ATP point
     // ([#916](https://github.com/brawer/osmdiffs/issues/916)).
@@ -401,7 +401,7 @@ mod tests {
             &layers,
             &workdir,
             &out,
-            ZoomRange::Bounded { min: 13, max: 16 },
+            ZoomRange::Bounded { min: 13, max: 14 },
             Thinning::DropDensest {
                 importance_attr: None,
             },
@@ -416,8 +416,8 @@ mod tests {
             "expected -Z13 in {args:?}"
         );
         assert!(
-            args.iter().any(|a| a == "-z16"),
-            "expected -z16 in {args:?}"
+            args.iter().any(|a| a == "-z14"),
+            "expected -z14 in {args:?}"
         );
         assert!(
             !args

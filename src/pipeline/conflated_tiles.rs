@@ -144,7 +144,14 @@ pub(crate) const DETAIL_MIN_ZOOM: u8 = 13;
 /// investigation note linked from #775). `MIN_CONNECTOR_LENGTH_METERS`
 /// below heads off most such cases at the source, but this ceiling is
 /// the hard backstop regardless.
-pub(crate) const DETAIL_MAX_ZOOM: u8 = 16;
+///
+/// z14 rather than deeper because, with every point kept at every
+/// detail zoom (`-r 1`, #916), deeper zooms would only repeat the same
+/// features in smaller tiles: z15 and z16 took 2.3 GB of the 4.1 GB
+/// 2026-11-02 planet archive. A z14 tile resolves positions to about
+/// 0.6 m at the equator, well below `MIN_CONNECTOR_LENGTH_METERS`,
+/// and map clients overzoom it beyond z14.
+pub(crate) const DETAIL_MAX_ZOOM: u8 = 14;
 
 /// Below this length, a connector line's endpoints are close enough
 /// that drawing a line between them adds no visual information to a
