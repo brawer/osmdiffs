@@ -761,11 +761,11 @@ until the full pipeline was proven out:
   [`notes/2026-11-06-hydrants-bookcases-bicycle-parking.md`](notes/2026-11-06-hydrants-bookcases-bicycle-parking.md)
   and
   [`notes/2026-11-06-waste-baskets-fountains-toilets.md`](notes/2026-11-06-waste-baskets-fountains-toilets.md)).
-  We’d like to extend this well beyond it: matching by name too, and
-  matching well beyond points of interest (a tree matcher
-  conflating municipal tree datasets against OSM by spatial distance
-  and species looks particularly tractable). See
-  [#708](https://github.com/brawer/osmdiffs/issues/708).
+  Still ahead: matching by name, including CJK names (see
+  [#953](https://github.com/brawer/osmdiffs/issues/953)), and
+  matching trees by distance and species (see
+  [#954](https://github.com/brawer/osmdiffs/issues/954)). Street lamps
+  and car parking have no matcher yet either.
 - There’s no per-row match-confidence signal yet. Low-zoom tiles
   select features by `importance` (see
   [#713](https://github.com/brawer/osmdiffs/issues/713)), but not by
