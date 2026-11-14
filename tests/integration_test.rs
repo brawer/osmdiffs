@@ -807,7 +807,7 @@ fn assert_shops_jsonl(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Checks `extract_conflated_layers`'s four output layers against the
+/// Checks `extract_conflated_layers`'s output layers against the
 /// same fixture data `assert_conflated_parquet` checks: 3 matched + 5
 /// unmatched ATP features, two of them Winterthur benches that the
 /// Zugerland extract can't match (see `assert_conflated_parquet`'s own
@@ -830,6 +830,10 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     let overview_unmatched = read_features("unmatched.jsonl")?;
     let detail_matched = read_features("matched-detail.jsonl")?;
     let detail_unmatched = read_features("unmatched-detail.jsonl")?;
+    // The fixture has no deletion candidates, but their layers are
+    // still written, so tippecanoe always finds its input files.
+    assert!(read_features("deletion-candidates.jsonl")?.is_empty());
+    assert!(read_features("deletion-candidates-detail.jsonl")?.is_empty());
 
     // The spider cells count every conflated row once at each zoom, so
     // a map filtered to one spider can show all of it at coarse zooms.
