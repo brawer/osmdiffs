@@ -176,9 +176,9 @@ fn make_tippecanoe_command(
     // filter decides what coarse zooms show; without one, every zoom
     // shows every point. Tippecanoe's default rate of 2.5 (or any rate
     // above 1) drops a share of points at each zoom below the base
-    // zoom, which in the `conflated.pmtiles` detail pass (then `-Z13 -z16`)
-    // hid a third of the points at z14, leaving `link` lines without
-    // their host or ATP point
+    // zoom. In the `conflated.pmtiles` detail pass, which then ran
+    // from z13 to z16, that hid a third of the points at z14, leaving
+    // `link` lines without their host or ATP point
     // ([#916](https://github.com/brawer/osmdiffs/issues/916)).
     // `--drop-densest-as-needed` still thins out any tile that would
     // otherwise be too large.
