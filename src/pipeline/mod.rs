@@ -82,14 +82,16 @@ pub fn run_pipeline(http_client: &reqwest::Client, workdir: &Path, raw_run_id: &
     if !workdir.exists() {
         std::fs::create_dir(workdir)?;
     }
-    logging::init(workdir)?;
+    // Created before the logger, which needs it to keep its stderr
+    // copy of each record from colliding with the progress bars.
+    let progress = indicatif::MultiProgress::new();
+    logging::init(workdir, &progress)?;
 
     // Before any step runs: pin this run's identity to the workdir, so a
     // restart can't quietly resume a workdir that belongs to a different
     // run. Returns early (nothing to upload) on a mismatch.
     reconcile_run_id(workdir, pipeline_run_id)?;
 
-    let progress = indicatif::MultiProgress::new();
     let result = run_pipeline_steps(http_client, workdir, pipeline_run_id, &progress);
 
     // Upload the log regardless of whether the run above succeeded --

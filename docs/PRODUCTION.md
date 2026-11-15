@@ -370,10 +370,13 @@ own):
   inside the container is `failed to lookup address information: Try
   again` at `fetch_inputs`, the first network access, about 20 seconds
   into the run.
-- On success, `osmdiffs` writes nothing to stdout or stderr: everything
-  goes to `pipeline.log`, uploaded to `INTERNAL_S3_*`. An empty `kubectl
-  logs` for a successful run is expected. On failure, the error appears
-  on stderr.
+- `osmdiffs` writes every `pipeline.log` record to stderr as well, live,
+  so `kubectl logs -f` follows a run as it happens; the file itself is
+  uploaded to `INTERNAL_S3_*` only at the end. That makes the container
+  log the only copy of a run that was killed before reaching the
+  upload (an OOM kill, a node going away). On failure, the final error
+  also appears on stderr, as a plain-text `Error: …` line after the
+  JSON records. Nothing is written to stdout.
 
 ## Serving the outputs (CDN)
 
