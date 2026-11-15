@@ -150,7 +150,8 @@ pub(crate) const DETAIL_MIN_ZOOM: u8 = 13;
 /// features in smaller tiles: z15 and z16 took 2.4 GB of the 4.45 GB
 /// 2026-11-09 planet archive. A z14 tile resolves positions to about
 /// 0.6 m at the equator, well below `MIN_CONNECTOR_LENGTH_METERS`,
-/// and map clients overzoom it beyond z14.
+/// and map clients overzoom it beyond z14. Measurements in
+/// `docs/notes/2026-11-15-detail-max-zoom.md`.
 pub(crate) const DETAIL_MAX_ZOOM: u8 = 14;
 
 /// Below this length, a connector line's endpoints are close enough
