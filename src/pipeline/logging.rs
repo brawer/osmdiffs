@@ -6,7 +6,7 @@
 //! every log record is appended as one JSON object per line to
 //! `<workdir>/pipeline.log`, rather than printed as free-form text. The
 //! same line is also written to stderr as it happens, so a run can be
-//! followed live (`kubectl logs -f`, `docker logs -f`, a terminal)
+//! followed live (`kubectl logs -f`, `podman logs -f`, a terminal)
 //! instead of only through the file uploaded to S3 at the very end. That
 //! makes the log machine-readable: a record's `target` says which module
 //! logged it, and its `message` can be grepped for or parsed without

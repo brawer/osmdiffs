@@ -19,7 +19,7 @@ Every record has:
 
 Each record is also written to stderr the moment it is logged, as the
 same JSON line, so a run can be followed live — `kubectl logs -f`,
-`docker logs -f`, or just the terminal — rather than only after the
+`podman logs -f`, or just the terminal — rather than only after the
 fact through the copy uploaded to S3 at the very end (see below). On an
 interactive terminal the log lines are interleaved cleanly with the
 progress bars; elsewhere there are no progress bars, only the log
