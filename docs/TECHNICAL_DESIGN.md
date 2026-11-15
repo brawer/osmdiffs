@@ -315,10 +315,17 @@ fetch away.
   (`fetch_inputs.osmviews`, about 560 MB). Both are discovered through
   their publisher's `datapackage.json` and checked against the SHA-256
   listed there ([`packaged.rs`](../src/pipeline/packaged.rs)). Each input is hashed (SHA-256) while it streams in,
-  and its provenance written to a `*.meta.json` sidecar. If any
-  download fails, the others are cancelled and the run aborts within
-  minutes; an interrupted planet download is resumed on the next
-  attempt. An input already in `--workdir` is reused rather than
+  and its provenance written to a `*.meta.json` sidecar. A broken or
+  stalled connection, or a 5xx/408/429 answer, is retried with
+  exponential backoff, and a download that broke off partway resumes
+  with an HTTP `Range` request guarded by `If-Range`, so it starts over
+  only if the file changed on the server in the meantime
+  ([`download.rs`](../src/pipeline/download.rs),
+  [#960](https://github.com/brawer/osmdiffs/issues/960)); every attempt
+  and failure is logged with its URL. A download gives up after five
+  failed attempts in a row without progress; then the other downloads
+  are cancelled and the run aborts, and the next run resumes from the
+  `.part` file left on disk. An input already in `--workdir` is reused rather than
   downloaded: when its sidecar is there along with either the raw file
   or the artifact built from it (`alltheplaces.parquet`,
   `osm-features.index`), so deleting the ~90 GB planet once its index

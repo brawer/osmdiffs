@@ -258,11 +258,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_failing_fetch_cancels_the_others() -> Result<()> {
-        // AllThePlaces fails right away...
+        // AllThePlaces fails right away, every time it's retried...
         let mut server = Server::new_async().await;
         let atp_history = server
             .mock("GET", "/history.json")
             .with_status(503)
+            .expect(super::super::download::MAX_ATTEMPTS as usize)
             .create_async()
             .await;
 
