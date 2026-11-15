@@ -50,7 +50,7 @@ A third layer, **`spider_cells`** (z0–8), summarizes where each
 spider's features are; see [below](#spider_cells-z08).
 
 Each is built as two PMTiles archives — a coarse **overview** (z0–12)
-and a fine **detail** (z13–16) — merged with `tile-join`, so what a
+and a fine **detail** (z13–14) — merged with `tile-join`, so what a
 row looks like depends on how far you're zoomed in (see below). A
 feature's coordinates are rounded to 1e-7 degrees (about 1 cm at the
 equator) before being written out — the same precision `edits.pmtiles`
@@ -89,14 +89,18 @@ out further. To see a row's tags, click through to the detail layer
 `osm:type`+`osm:id`, `unmatched` rows on nearest `part: "atp"` feature
 of the same `spider`.
 
-### z13–16: the detail
+### z13–14: the detail
 
 **Full-tag features**, where a tile covers a few km and the tag
-payload costs nothing. Every zoom from z13 to z16 shows every feature:
+payload costs nothing. Every zoom from z13 to z14 shows every feature:
 there is no random dot-dropping (`-r 1`), and only
 `--drop-densest-as-needed` would thin out a tile that gets too large.
 For the 2026-11-02 planet, the largest z13 tile then comes to about
 240 KB gzipped (estimated in #916), well below tippecanoe's 500 KB limit.
+The archive stops at z14: deeper zooms would only repeat the same
+features in smaller tiles, and a z14 tile still resolves positions to
+under a meter, so map clients such as MapLibre overzoom it instead
+(see [the note](../notes/2026-11-15-detail-max-zoom.md)).
 
 - A **`matched`** row yields up to three features:
   - the AllThePlaces point (`part: "atp"`),
@@ -166,7 +170,7 @@ with `--no-tile-size-limit`.
 ## Properties
 
 - `fid` — the row's ordinal in `conflated.parquet` for this pipeline
-  run. On **z13–16 detail features only** (not the overview — see
+  run. On **z13–14 detail features only** (not the overview — see
   above), where it groups a matched row's up-to-three features and
   cross-references `conflated.parquet`. Stable within a run only (both
   archives are always rebuilt together); not a cross-run identifier.
@@ -179,7 +183,7 @@ with `--no-tile-size-limit`.
 - `local_share` — the row's `match.evidence.local_share`, rounded to
   two decimals: for a deletion candidate by brand, the share of
   OpenStreetMap features of that brand nearby that AllThePlaces
-  matched. On z13–16 `deletion_candidate` features only, and only for
+  matched. On z13–14 `deletion_candidate` features only, and only for
   the `wikidata` and `name` rules.
 - `matched` (`true` | `false`) — overview features only; the detail
   layer conveys the same thing through its layer name and `part`.
@@ -187,13 +191,13 @@ with `--no-tile-size-limit`.
   rounded to two decimals. Overview features only.
 - `osm:type`, `osm:id` — the matched OpenStreetMap object. On the
   `matched` and `deletion_candidate` overview features (where they
-  double as the join key to the detail layer) and the z13–16
+  double as the join key to the detail layer) and the z13–14
   `osm`/`link` detail features.
-- `osm:<tag>` for every tag in `osm.tags` — z13–16 `osm`/`link` detail
+- `osm:<tag>` for every tag in `osm.tags` — z13–14 `osm`/`link` detail
   features only.
-- `atp:<tag>` for every tag in `atp.tags` — z13–16 `atp`/`link` detail
+- `atp:<tag>` for every tag in `atp.tags` — z13–14 `atp`/`link` detail
   features only.
-- `part` (`"atp"` | `"osm"` | `"link"`) — z13–16 detail features only,
+- `part` (`"atp"` | `"osm"` | `"link"`) — z13–14 detail features only,
   identifying which of the (up to) three a given feature is.
 
 On the `link` feature, tag properties are prefixed (`atp:name` vs.

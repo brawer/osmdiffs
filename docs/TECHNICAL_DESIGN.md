@@ -526,7 +526,7 @@ fetch away.
 - **`render_conflated_detail`**
   ([`src/pipeline/tiles.rs`](../src/pipeline/tiles.rs)) — tippecanoe
   again, over the `matched-detail.jsonl` / `unmatched-detail.jsonl`
-  layers, bounded to z13–16 this time
+  layers, bounded to z13–14 this time
   (`conflated_tiles::DETAIL_MIN_ZOOM`/`DETAIL_MAX_ZOOM`, two more
   documented constants), building `conflated-detail.pmtiles`.
   Deliberately *not* `-zg`/`--extend-zooms-if-still-dropping`: that
