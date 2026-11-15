@@ -1,9 +1,10 @@
 # Stopping the conflated.pmtiles detail at z14
 
 This note records why the `conflated.pmtiles` detail pass now stops
-at z14 instead of z16, and the measurements behind it. All numbers
-come from the 2026-11-02 planet run's
-`conflated-20261102-0e8c8fa5.pmtiles`.
+at z14 instead of z16, and the measurements behind it. The numbers
+come from two planet runs: `conflated-20261102-0e8c8fa5.pmtiles`,
+built before #918, and `conflated-20261109-5d446a7d.pmtiles`, built
+with osmdiffs 0.8.17, after #918.
 
 Showing H3 hexagons instead of thinned points at coarse zooms, which
 came up in the same discussion, is a separate proposal in
@@ -39,18 +40,33 @@ So z13 holds about 58% of the points, z14 69% and z15 83%, even in a
 small town where no tile is anywhere near the size limit. Only z16 is
 complete. From #918 on, every detail zoom holds every feature.
 
+### After #918
+
+The 2026-11-09 archive (4.45 GB), built with osmdiffs 0.8.17, holds the
+same number of AllThePlaces points at every detail zoom: 826 in central
+London, 3,379 in Zurich, 1,375 in Manhattan and 44 in Dubbo, in the
+same tiles as above. Its bytes per zoom:
+
+| Zooms | Tiles | Size | Share | Largest tile |
+|---|---:|---:|---:|---:|
+| z0–12 | 382,853 | 397 MB | 8.9% | 83 KB |
+| z13 | 363,199 | 750 MB | 16.9% | 243 KB |
+| z14 | 602,540 | 897 MB | 20.1% | 131 KB |
+| z15 | 964,184 | 1,085 MB | 24.4% | 60 KB |
+| z16 | 1,492,835 | 1,324 MB | 29.7% | 33 KB |
+
 ### Stopping at z14
 
 With every feature at every detail zoom, z15 and z16 only repeat z14 in
-smaller tiles. Scaling each zoom of the 2026-11-02 archive by its
-missing points gives an estimate for a build after #918:
+smaller tiles. Together they take 2.41 GB, so stopping at z14 should
+bring the 2026-11-09 archive from 4.45 GB to about 2.05 GB, a cut of
+54%. The z13 and z14 tiles shouldn't change, since nothing is dropped
+from them.
 
-| Detail range | z13 | z14 | z15 | z16 | Whole archive |
-|---|---:|---:|---:|---:|---:|
-| z13–16 | 1.07 GB | 1.15 GB | 1.22 GB | 1.28 GB | ≈ 5.1 GB |
-| z13–14 | 1.07 GB | 1.15 GB | — | — | ≈ 2.6 GB |
-
-These are estimates from four sampled areas, not a real build.
+An earlier estimate scaled each zoom of the 2026-11-02 archive by its
+missing points and predicted about 5.1 GB before and 2.6 GB after. It
+was too high: the points #918 added cost fewer bytes than the average,
+so z13 grew by 21%, not by the 72% the estimate assumed.
 
 Why z14 is enough:
 
@@ -63,8 +79,9 @@ Why z14 is enough:
 - **Lookups.** The app's fallback for shared links
   (osmdiffs-app#18) reads the deepest zoom from the header, so it
   follows the change on its own.
-- **Tile size.** The largest z13 tile is about 240 KB gzipped (#916),
-  and z14 tiles are smaller, well under tippecanoe's 500 KB limit.
+- **Tile size.** In the 2026-11-09 archive, the largest z13 tile is
+  243 KB and the largest z14 tile 131 KB, well under tippecanoe's
+  500 KB limit.
 
 `DETAIL_MAX_ZOOM` is therefore now 14.
 

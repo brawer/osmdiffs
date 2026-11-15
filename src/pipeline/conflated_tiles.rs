@@ -147,8 +147,8 @@ pub(crate) const DETAIL_MIN_ZOOM: u8 = 13;
 ///
 /// z14 rather than deeper because, with every point kept at every
 /// detail zoom (`-r 1`, #916), deeper zooms would only repeat the same
-/// features in smaller tiles: z15 and z16 took 2.3 GB of the 4.1 GB
-/// 2026-11-02 planet archive. A z14 tile resolves positions to about
+/// features in smaller tiles: z15 and z16 took 2.4 GB of the 4.45 GB
+/// 2026-11-09 planet archive. A z14 tile resolves positions to about
 /// 0.6 m at the equator, well below `MIN_CONNECTOR_LENGTH_METERS`,
 /// and map clients overzoom it beyond z14.
 pub(crate) const DETAIL_MAX_ZOOM: u8 = 14;
