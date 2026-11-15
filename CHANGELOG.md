@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.17](https://github.com/brawer/osmdiffs/compare/v0.8.16...v0.8.17) (2026-11-15)
+
+
+### 🆕 Enhancements
+
+* mirror pipeline.log records to stderr ([#958](https://github.com/brawer/osmdiffs/issues/958)) ([800250f](https://github.com/brawer/osmdiffs/commit/800250fa0c1528ed3e40dacc15cbb1cf1a6c752f))
+
+
+### 🐞 Bug Fixes
+
+* retry and resume input downloads after connection resets ([#961](https://github.com/brawer/osmdiffs/issues/961)) ([a859c8c](https://github.com/brawer/osmdiffs/commit/a859c8c1e6b51db785b9e9f3d973f06870b6f816))
+
 ## [0.8.16](https://github.com/brawer/osmdiffs/compare/v0.8.15...v0.8.16) (2026-11-14)
 
 
