@@ -1,9 +1,13 @@
-//! Structured logging to a file in the working directory.
+//! Structured logging to a file in the working directory, mirrored live
+//! to stderr.
 //!
 //! [`init`] wires up the `log` crate's global logger (the same facade
 //! already used via `log::info!` etc. elsewhere in this crate) so that
 //! every log record is appended as one JSON object per line to
-//! `<workdir>/pipeline.log`, rather than printed as free-form text. That
+//! `<workdir>/pipeline.log`, rather than printed as free-form text. The
+//! same line is also written to stderr as it happens, so a run can be
+//! followed live (`kubectl logs -f`, `podman logs -f`, a terminal)
+//! instead of only through the file uploaded to S3 at the very end. That
 //! makes the log machine-readable: a record's `target` says which module
 //! logged it, and its `message` can be grepped for or parsed without
 //! worrying about how a human-oriented formatter might wrap or color it.
@@ -26,15 +30,35 @@
 //! RUST_LOG still controls the level as usual, default `info`.
 
 use anyhow::{Context, Result};
-use std::{fs::OpenOptions, io::Write, path::Path, thread};
+use indicatif::MultiProgress;
+use std::{
+    fs::OpenOptions,
+    io::{self, Write},
+    path::Path,
+    thread,
+};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const LOG_FILE_NAME: &str = "pipeline.log";
 
 /// Initializes the process-wide logger to append structured (JSON-lines)
-/// records to `<workdir>/pipeline.log`. Must be called once, as early as
-/// possible during pipeline startup, before any `log::*!` call.
-pub fn init(workdir: &Path) -> Result<()> {
+/// records to `<workdir>/pipeline.log`, and to write each record to
+/// stderr as well. Must be called once, as early as possible during
+/// pipeline startup, before any `log::*!` call.
+///
+/// `progress` is the run's progress-bar group: its bars also draw to
+/// stderr, so each stderr write is wrapped in [`MultiProgress::suspend`]
+/// to keep a log line from being drawn over (or into) a bar on a
+/// terminal.
+pub fn init(workdir: &Path, progress: &MultiProgress) -> Result<()> {
+    init_with_console(workdir, Box::new(ProgressAwareStderr(progress.clone())))
+}
+
+/// Does the actual work for [`init`], with the console side passed in,
+/// so the test can capture what would have gone to stderr instead of
+/// spamming `cargo test`'s output (which only captures `print!`-family
+/// macros, not direct writes to [`io::stderr`]).
+fn init_with_console(workdir: &Path, console: Box<dyn Write + Send>) -> Result<()> {
     let log_path = workdir.join(LOG_FILE_NAME);
     let file = OpenOptions::new()
         .create(true)
@@ -44,7 +68,7 @@ pub fn init(workdir: &Path) -> Result<()> {
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(format_json)
-        .target(env_logger::Target::Pipe(Box::new(file)))
+        .target(env_logger::Target::Pipe(Box::new(Tee { file, console })))
         .init();
 
     // available_parallelism() is what every internal thread pool
@@ -63,6 +87,51 @@ pub fn init(workdir: &Path) -> Result<()> {
         "pipeline starting up"
     );
     Ok(())
+}
+
+/// Writes every log record to both `pipeline.log` and the console.
+///
+/// The file is the record of truth (it's what gets uploaded), so a
+/// failed file write is reported back to `env_logger`; a failed console
+/// write (stderr closed, a broken pipe) is ignored, so it can never stop
+/// records from reaching the file.
+struct Tee<F: Write> {
+    file: F,
+    console: Box<dyn Write + Send>,
+}
+
+impl<F: Write> Write for Tee<F> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.file.write_all(buf)?;
+        let _ = self.console.write_all(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let _ = self.console.flush();
+        self.file.flush()
+    }
+}
+
+/// Stderr, written with the run's progress bars temporarily cleared
+/// (see [`init`]). On a non-terminal stderr -- the usual case in
+/// production -- indicatif draws no bars, and `suspend` just runs the
+/// write.
+struct ProgressAwareStderr(MultiProgress);
+
+impl Write for ProgressAwareStderr {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.suspend(|| {
+            let mut stderr = io::stderr().lock();
+            stderr.write_all(buf)?;
+            stderr.flush()
+        })?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::stderr().flush()
+    }
 }
 
 /// An [`env_logger::Builder::format`] callback that renders a [`log::Record`]
@@ -181,7 +250,8 @@ mod tests {
     #[test]
     fn test_init_writes_structured_startup_record() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        init(dir.path())?;
+        let console = SharedBuf::default();
+        init_with_console(dir.path(), Box::new(console.clone()))?;
         log::warn!("something worth noting: {}", "relation/12345");
         log::info!(
             step = "import_atp",
@@ -245,6 +315,61 @@ mod tests {
             "an absent Option field should serialize as an explicit null, \
              not be silently dropped: {optional}"
         );
+
+        // Every line of ours that reached the file also reached the
+        // console, byte for byte. (Other tests' records can land in
+        // either one between our reads, so compare our own lines only.)
+        let console = String::from_utf8(console.0.lock().unwrap().clone())?;
+        for message in ["structured fields test", "optional field test"] {
+            let line = contents
+                .lines()
+                .find(|l| l.contains(message))
+                .with_context(|| format!("{message:?} missing from the file"))?;
+            assert!(
+                console.lines().any(|l| l == line),
+                "{message:?} should be mirrored to the console as {line:?}, got: {console:?}"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// An in-memory console for [`init_with_console`], readable after
+    /// the logger has taken ownership of its clone.
+    #[derive(Clone, Default)]
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A console that fails every write must not keep records from
+    /// reaching the file.
+    #[test]
+    fn test_tee_ignores_console_errors() -> Result<()> {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let mut tee = Tee {
+            file: Vec::new(),
+            console: Box::new(Broken),
+        };
+        tee.write_all(b"one\n")?;
+        tee.write_all(b"two\n")?;
+        tee.flush()?;
+        assert_eq!(tee.file, b"one\ntwo\n");
 
         Ok(())
     }

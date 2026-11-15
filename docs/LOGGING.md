@@ -17,6 +17,15 @@ Every record has:
   snapshot. Omitted entirely on records that don’t have any, so plain
   log lines stay plain.
 
+Each record is also written to stderr the moment it is logged, as the
+same JSON line, so a run can be followed live — `kubectl logs -f`,
+`podman logs -f`, or just the terminal — rather than only after the
+fact through the copy uploaded to S3 at the very end (see below). On an
+interactive terminal the log lines are interleaved cleanly with the
+progress bars; elsewhere there are no progress bars, only the log
+lines. A failure writing to stderr never stops a record from reaching
+`pipeline.log`.
+
 See [`src/pipeline/logging.rs`](../src/pipeline/logging.rs) for the
 implementation, and
 [`src/pipeline/mod.rs`](../src/pipeline/mod.rs)’s `log_snapshot` for an
