@@ -100,7 +100,7 @@ For the 2026-11-02 planet, the largest z13 tile then comes to about
 The archive stops at z14: deeper zooms would only repeat the same
 features in smaller tiles, and a z14 tile still resolves positions to
 under a meter, so map clients such as MapLibre overzoom it instead
-(see [the note](../notes/2026-11-15-coarse-zooms-hexagons.md)).
+(see [the note](../notes/2026-11-15-detail-max-zoom.md)).
 
 - A **`matched`** row yields up to three features:
   - the AllThePlaces point (`part: "atp"`),
