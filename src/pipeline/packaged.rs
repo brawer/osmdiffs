@@ -3,18 +3,14 @@
 //! that the package's `datapackage.json` lists for it. QRank and
 //! OSMViews both publish their builds this way.
 
-use crate::make_download_bar;
+use crate::pipeline::download;
 use crate::pipeline::inputs::Input;
-use crate::utils::to_hex;
 use anyhow::{Context, Ok, Result, anyhow, bail};
-use aws_lc_rs::digest::{Context as DigestContext, SHA256};
-use futures_util::StreamExt;
 use indicatif::MultiProgress;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
-use tokio::{fs::File, io::AsyncWriteExt};
 
 /// Which resource of which data package to fetch, and where to put it.
 pub(crate) struct PackagedResource {
@@ -30,7 +26,8 @@ pub(crate) struct PackagedResource {
     /// Progress bar label.
     pub label: &'static str,
 
-    /// Upper bound on the whole download.
+    /// Upper bound on each download attempt (see
+    /// [`download::download_file`]).
     pub timeout: Duration,
 }
 
@@ -92,8 +89,21 @@ pub(crate) async fn fetch_packaged(
     let mut metadata = fetch_datapackage(client, datapackage_url, resource.name).await?;
     let mut tmp_path = out_path.clone();
     tmp_path.add_extension("tmp");
-    let (sha256, bytes) = download(client, progress, resource, &metadata.url, &tmp_path).await?;
+    let download::Downloaded { sha256, bytes } = download::download_file(
+        client,
+        progress,
+        &download::FileDownload {
+            url: &metadata.url,
+            part_path: &tmp_path,
+            label: resource.label,
+            hash_label: resource.label,
+            timeout: Some(resource.timeout),
+        },
+    )
+    .await?;
     if sha256 != metadata.sha256 {
+        // Not worth resuming: start from scratch next time.
+        let _ = tokio::fs::remove_file(&tmp_path).await;
         bail!(
             "SHA-256 of {} is {sha256}, but {datapackage_url} says {}",
             metadata.url,
@@ -117,16 +127,8 @@ async fn fetch_datapackage(
     datapackage_url: &str,
     name: &str,
 ) -> Result<PackagedMetadata> {
-    let package: serde_json::Value = client
-        .get(datapackage_url)
-        .timeout(Duration::from_secs(60))
-        .send()
-        .await
-        .with_context(|| format!("Failed to GET {datapackage_url}"))?
-        .error_for_status()
-        .with_context(|| format!("Server returned error for {datapackage_url}"))?
-        .json()
-        .await
+    let body = download::get_bytes(client, datapackage_url, Duration::from_secs(60)).await?;
+    let package: serde_json::Value = serde_json::from_slice(&body)
         .with_context(|| format!("Failed to parse {datapackage_url}"))?;
     parse_datapackage(&package, datapackage_url, name)
 }
@@ -179,46 +181,6 @@ fn resolve(datapackage_url: &str, path: &str) -> String {
         Some((base, _)) => format!("{base}/{path}"),
         None => path.to_string(),
     }
-}
-
-/// Streams `url` to `dest`, returning its SHA-256 (lowercase hex) and
-/// size.
-async fn download(
-    client: &Client,
-    progress: &MultiProgress,
-    resource: &PackagedResource,
-    url: &str,
-    dest: &Path,
-) -> Result<(String, u64)> {
-    let mut file = File::create(dest)
-        .await
-        .with_context(|| format!("Failed to create file {}", dest.display()))?;
-    let response = client
-        .get(url)
-        .timeout(resource.timeout)
-        .send()
-        .await
-        .with_context(|| format!("Failed to GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("Server returned error for {url}"))?;
-    let bar = make_download_bar(progress, resource.label, response.content_length());
-    let mut stream = response.bytes_stream();
-    let mut hasher = DigestContext::new(&SHA256);
-    let mut bytes = 0u64;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("Error reading chunk from response stream")?;
-        hasher.update(&chunk);
-        file.write_all(&chunk)
-            .await
-            .context("Failed to write chunk to disk")?;
-        bytes += chunk.len() as u64;
-        bar.inc(chunk.len() as u64);
-    }
-    file.flush()
-        .await
-        .with_context(|| format!("Failed to flush {}", dest.display()))?;
-    bar.finish();
-    Ok((to_hex(hasher.finish().as_ref()), bytes))
 }
 
 async fn write_meta_json(metadata: &PackagedMetadata, dest: &Path) -> Result<()> {

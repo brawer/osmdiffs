@@ -35,6 +35,7 @@ mod brand_totals;
 mod conflate;
 mod conflated_tiles;
 mod datapackage;
+mod download;
 mod edits;
 mod importance;
 mod inputs;

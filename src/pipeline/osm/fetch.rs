@@ -1,14 +1,8 @@
-use crate::make_download_bar;
+use crate::pipeline::download;
 use crate::pipeline::inputs::Input;
-use crate::utils::to_hex;
-use anyhow::{Context, Ok, Result, anyhow};
-use aws_lc_rs::digest::{Context as DigestContext, SHA256};
-use futures_util::StreamExt;
+use anyhow::{Context, Ok, Result};
 use indicatif::MultiProgress;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 
 use super::OsmMetadata;
 
@@ -19,14 +13,6 @@ use super::OsmMetadata;
 /// redirect transparently.
 pub(crate) const OSM_PLANET_URL: &str =
     "https://planet.openstreetmap.org/pbf/planet-latest.osm.pbf";
-
-/// How long a single chunk read is allowed to sit with no data arriving
-/// before this gives up and lets the caller retry (via `fetch_planet`'s
-/// resume support) -- not a deadline on the whole, multi-hour transfer,
-/// which is why this isn't just `RequestBuilder::timeout()` (that caps
-/// the entire request/response cycle, header-to-last-byte, and would
-/// guarantee failure for a file this size).
-const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Makes the OpenStreetMap planet available as a local input in
 /// `workdir`, downloading it from `url` only if nothing in `workdir` can
@@ -43,7 +29,8 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 ///    was built: only the metadata is returned, and the returned path
 ///    does not exist. `import_osm` then reuses the index.
 /// 4. Otherwise: downloaded (resuming a `.part` file left over from an
-///    interrupted attempt, if any), hashed while streaming.
+///    interrupted attempt, if any, and retrying when the connection
+///    breaks, see [`crate::pipeline::download`]), hashed while streaming.
 ///
 /// Async, with all blocking file work in `spawn_blocking`, so it can run
 /// concurrently with the other input fetches (see `pipeline::inputs`).
@@ -115,17 +102,18 @@ fn cached_planet(
 /// than standing up a separate BitTorrent client with its own,
 /// differently-configured HTTP stack for tracker/webseed access.
 ///
-/// Resumable: downloads into `pbf_path` with a `.part` suffix, and
-/// picks up from wherever that file left off via an HTTP `Range`
-/// request if one already exists on disk (e.g. after a restarted
-/// pipeline run) -- S3 advertises `Accept-Ranges: bytes` for this file.
-/// Equally, dropping this future mid-download (e.g. because another
-/// input's fetch failed, see `pipeline::inputs`) just leaves a `.part`
-/// file for the next attempt to resume.
+/// Resumable: downloads into `pbf_path` with a `.part` suffix, which
+/// [`download::download_file`] resumes with HTTP `Range` requests after
+/// a broken connection, or in a later run (S3 advertises
+/// `Accept-Ranges: bytes` for this file). Equally, dropping this future
+/// mid-download (e.g. because another input's fetch failed, see
+/// `pipeline::inputs`) just leaves a `.part` file for the next attempt
+/// to resume.
 ///
 /// Returns the SHA-256 of the whole file, as lowercase hex, computed
 /// while streaming rather than in a second read pass over ~90GB; on a
-/// resumed download, the already-downloaded prefix is hashed first.
+/// download resumed from an earlier run, the already-downloaded prefix
+/// is hashed first.
 async fn download_osm_planet(
     url: &str,
     http_client: &reqwest::Client,
@@ -133,70 +121,19 @@ async fn download_osm_planet(
     pbf_path: &Path,
 ) -> Result<String> {
     let part_path = pbf_path.with_extension("pbf.part");
-    let resume_from = tokio::fs::metadata(&part_path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-    let mut request = http_client.get(url);
-    if resume_from > 0 {
-        request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
-    }
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("Failed to GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("Server returned error for {url}"))?;
-
-    // A server that doesn't support (or ignores) the Range request
-    // sends the whole file back from byte 0 instead of a 206 -- the
-    // status code is the one reliable way to tell "here's the rest"
-    // from "here's everything, again" apart.
-    let (mut file, already_have, mut hasher) =
-        if resume_from > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-            let hasher = {
-                let (part_path, progress) = (part_path.clone(), progress.clone());
-                tokio::task::spawn_blocking(move || hash_prefix(&part_path, resume_from, &progress))
-                    .await??
-            };
-            let file = tokio::fs::OpenOptions::new()
-                .append(true)
-                .open(&part_path)
-                .await
-                .with_context(|| format!("Failed to open {}", part_path.display()))?;
-            (file, resume_from, hasher)
-        } else {
-            let file = tokio::fs::File::create(&part_path)
-                .await
-                .with_context(|| format!("Failed to create file {}", part_path.display()))?;
-            (file, 0, DigestContext::new(&SHA256))
-        };
-
-    let total = response.content_length().map(|len| len + already_have);
-    let bar = make_download_bar(progress, "osm.fetch     ", total);
-    bar.set_position(already_have);
-
-    let mut stream = response.bytes_stream();
-    loop {
-        let next = tokio::time::timeout(STALL_TIMEOUT, stream.next())
-            .await
-            .map_err(|_| anyhow!("no data received for {STALL_TIMEOUT:?}, giving up"))?;
-        let Some(chunk) = next else {
-            break;
-        };
-        let chunk = chunk.context("Error reading chunk from response stream")?;
-        hasher.update(&chunk);
-        file.write_all(&chunk)
-            .await
-            .context("Failed to write chunk to disk")?;
-        bar.inc(chunk.len() as u64);
-    }
-    file.flush()
-        .await
-        .with_context(|| format!("Failed to flush {}", part_path.display()))?;
-    bar.finish();
-
+    let downloaded = download::download_file(
+        http_client,
+        progress,
+        &download::FileDownload {
+            url,
+            part_path: &part_path,
+            label: "osm.fetch     ",
+            hash_label: "osm.hash      ",
+            // The planet takes hours; only stalls are timed out.
+            timeout: None,
+        },
+    )
+    .await?;
     tokio::fs::rename(&part_path, pbf_path)
         .await
         .with_context(|| {
@@ -206,39 +143,7 @@ async fn download_osm_planet(
                 pbf_path.display()
             )
         })?;
-
-    Ok(to_hex(hasher.finish().as_ref()))
-}
-
-/// SHA-256 state after hashing the first `len` bytes of `path` -- the
-/// already-downloaded prefix of a resumed download, so
-/// [`download_osm_planet`] can carry on hashing the rest as it streams
-/// in. Blocking.
-fn hash_prefix(path: &Path, len: u64, progress: &MultiProgress) -> Result<DigestContext> {
-    let file = std::fs::File::open(path).with_context(|| format!("could not open `{path:?}`"))?;
-    let mut reader = file.take(len);
-    let bar = make_download_bar(progress, "osm.hash      ", Some(len));
-    let mut hasher = DigestContext::new(&SHA256);
-    let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8 MiB
-    let mut total: u64 = 0;
-    loop {
-        let n = reader
-            .read(&mut buf)
-            .with_context(|| format!("could not read `{path:?}`"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        total += n as u64;
-        bar.inc(n as u64);
-    }
-    bar.finish();
-    if total != len {
-        return Err(anyhow!(
-            "`{path:?}` shrank while resuming its download: expected {len} bytes, read {total}"
-        ));
-    }
-    Ok(hasher)
+    Ok(downloaded.sha256)
 }
 
 #[cfg(test)]
@@ -375,16 +280,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_planet_resumes_and_hashes_whole_file() -> Result<()> {
-        // A `.part` file left over from an interrupted download is
-        // resumed with a Range request; the hash must still cover the
-        // whole file, not just the bytes fetched this time.
+        // A `.part` file left over from an interrupted download, with
+        // the sidecar that identifies its version, is resumed with a
+        // Range request; the hash must still cover the whole file, not
+        // just the bytes fetched this time.
         let fixture = std::fs::read(test_data_path("zugerland.osm.pbf"))?;
         let split = fixture.len() / 3;
         let mut server = Server::new_async().await;
         let mock = server
             .mock("GET", "/planet.osm.pbf")
             .match_header("range", format!("bytes={split}-").as_str())
+            .match_header("if-range", "\"planet-v1\"")
             .with_status(206)
+            .with_header(
+                "content-range",
+                &format!("bytes {split}-{}/{}", fixture.len() - 1, fixture.len()),
+            )
+            .with_header("etag", "\"planet-v1\"")
             .with_body(&fixture[split..])
             .create_async()
             .await;
@@ -392,6 +304,12 @@ mod tests {
         std::fs::write(
             workdir.path().join("planet-latest.osm.pbf.part"),
             &fixture[..split],
+        )?;
+        std::fs::write(
+            workdir
+                .path()
+                .join("planet-latest.osm.pbf.part.validators.json"),
+            r#"{"etag": "\"planet-v1\""}"#,
         )?;
 
         let url = format!("{}/planet.osm.pbf", server.url());
@@ -401,6 +319,12 @@ mod tests {
         assert_eq!(std::fs::read(&input.path)?, fixture);
         let expected_sha256 = crate::utils::hash_file(&input.path, &hidden_progress(), "", false)?;
         assert_eq!(input.metadata.sha256, Some(expected_sha256.sha256));
+        assert!(
+            !workdir
+                .path()
+                .join("planet-latest.osm.pbf.part.validators.json")
+                .exists()
+        );
         Ok(())
     }
 }

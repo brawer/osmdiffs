@@ -17,7 +17,7 @@ const PROGRESS_BAR_STYLE: &str =
 
 const DOWNLOAD_BAR_STYLE: &str = "{prefix} [{elapsed_precise}] {bar:42.blue} {bytes_per_sec} {eta}";
 
-const SPINNER_STYLE: &str = "{prefix} [{elapsed_precise}] {spinner:blue} {msg} {bytes_per_sec}";
+const SPINNER_STYLE: &str = "{prefix} [{elapsed_precise}] {spinner:.blue} {msg} {bytes_per_sec}";
 
 fn make_progress_bar(
     progress: &MultiProgress,

@@ -1,9 +1,6 @@
-use crate::make_download_bar;
+use crate::pipeline::download;
 use crate::pipeline::inputs::Input;
-use crate::utils::to_hex;
 use anyhow::{Context, Ok, Result, anyhow};
-use aws_lc_rs::digest::{Context as DigestContext, SHA256};
-use futures_util::StreamExt;
 use indicatif::MultiProgress;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -141,14 +138,7 @@ async fn fetch_stats(metadata: &AtpMetadata, client: &Client, workdir: &Path) ->
         ));
     };
     let fetch = async {
-        let body = client
-            .get(url)
-            .timeout(Duration::from_secs(120))
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let body = download::get_bytes(client, url, Duration::from_secs(120)).await?;
         // Checked before writing, so a broken file never lands in the
         // workdir, where it would be reused.
         super::run_stats::parse(&body)?;
@@ -209,46 +199,21 @@ async fn download_atp(
     dest: &Path,
     meta_json_dest: &Path,
 ) -> Result<AtpMetadata> {
-    let mut file = File::create(dest)
-        .await
-        .with_context(|| format!("Failed to create file {}", dest.display()))?;
-
     let mut metadata = fetch_latest_run(client, url).await?;
-    let response = client
-        .get(&metadata.output_url)
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await
-        .with_context(|| format!("Failed to GET {}", metadata.output_url))?
-        .error_for_status()
-        .with_context(|| format!("Server returned error for {}", metadata.output_url))?;
-    let content_length = response.content_length();
-    let mut stream = response.bytes_stream();
-    let bar = make_download_bar(progress, "atp.fetch     ", content_length);
-    // SHA-256 of the downloaded bytes, via aws-lc-rs -- the same crypto
-    // library this crate already uses for TLS (see build_client() in
-    // main.rs) -- rather than a second, separate hashing implementation.
-    // Note: this build links aws-lc-sys (the general-purpose backend),
-    // not aws-lc-fips-sys, so this isn't running through AWS-LC's
-    // FIPS 140-3-validated module (see scripts/sbom/pipeline.jq's CBOM
-    // entry for that module's own certification) -- just the same
-    // non-FIPS-mode library, for one less dependency, not for FIPS
-    // compliance.
-    let mut hasher = DigestContext::new(&SHA256);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("Error reading chunk from response stream")?;
-        hasher.update(&chunk);
-        file.write_all(&chunk)
-            .await
-            .context("Failed to write chunk to disk")?;
-        bar.inc(chunk.len() as u64);
-    }
-    file.flush()
-        .await
-        .with_context(|| format!("Failed to flush {}", dest.display()))?;
-    metadata.sha256 = Some(to_hex(hasher.finish().as_ref()));
+    let downloaded = download::download_file(
+        client,
+        progress,
+        &download::FileDownload {
+            url: &metadata.output_url,
+            part_path: dest,
+            label: "atp.fetch     ",
+            hash_label: "atp.hash      ",
+            timeout: Some(Duration::from_secs(120)),
+        },
+    )
+    .await?;
+    metadata.sha256 = Some(downloaded.sha256);
     write_meta_json(&metadata, meta_json_dest).await?;
-    bar.finish();
     Ok(metadata)
 }
 
@@ -259,15 +224,9 @@ async fn download_atp(
 /// every entry rather than assuming `history.json` lists them in any
 /// particular order.
 async fn fetch_latest_run(client: &Client, history_url: &str) -> Result<AtpMetadata> {
-    let response = client
-        .get(history_url)
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await
-        .with_context(|| format!("Failed to GET {history_url}"))?
-        .error_for_status()
-        .with_context(|| format!("Server returned error for {history_url}"))?;
-    let json: serde_json::Value = response.json().await?;
+    let body = download::get_bytes(client, history_url, Duration::from_secs(120)).await?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).with_context(|| format!("Failed to parse {history_url}"))?;
     let entries = json
         .as_array()
         .ok_or_else(|| anyhow!("{} did not return a JSON array", history_url))?;
@@ -783,21 +742,5 @@ mod tests {
             .no_proxy()
             .build()
             .expect("failed to build test client")
-    }
-
-    #[test]
-    fn test_sha256_matches_nist_test_vector() {
-        // Exercises the exact same aws_lc_rs::digest call path
-        // download_atp() uses (DigestContext::new(&SHA256), .update(),
-        // .finish(), to_hex()), against SHA-256's standard "abc" test
-        // vector.
-        let mut hasher = DigestContext::new(&SHA256);
-        hasher.update(b"abc");
-        // Expected SHA-256("abc"), as per
-        // https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Standards-and-Guidelines/documents/examples/SHA256.pdf
-        assert_eq!(
-            to_hex(hasher.finish().as_ref()),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
     }
 }
