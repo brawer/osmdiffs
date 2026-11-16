@@ -36,10 +36,20 @@ pub enum Thinning<'a> {
     /// point is that nothing gets dropped. With a `zoom_attr`, show
     /// each feature only at the zoom level in that property; see
     /// [`zoom_filter`].
+    /// With `shared_borders`, `--detect-shared-borders`, so that
+    /// simplifying polygons that tile the plane, such as the hexagons
+    /// of `conflated_hex`, leaves no gaps between them.
     Never {
         zoom_attr: Option<&'a str>,
         max_zoom: u8,
+        shared_borders: bool,
     },
+    /// `--no-feature-limit --no-tile-size-limit`, and show each feature
+    /// from the zoom level in its property `zoom_attr` on, for zooms up
+    /// to `max_zoom`; see [`from_zoom_filter`]. For inputs that already
+    /// decide which features each zoom shows, such as the overview of
+    /// `conflated.pmtiles` (see `conflated_hex`).
+    FromZoom { zoom_attr: &'a str, max_zoom: u8 },
 }
 
 /// A tippecanoe feature filter (`-j`) that shows each feature only at
@@ -51,6 +61,20 @@ fn zoom_filter(attr: &str, max_zoom: u8) -> String {
             "all",
             ["==", "$zoom", zoom],
             ["==", attr, zoom]
+        ]));
+    }
+    serde_json::json!({ "*": any }).to_string()
+}
+
+/// A tippecanoe feature filter (`-j`) that shows each feature from the
+/// zoom level in its property `attr` on, for zooms up to `max_zoom`.
+fn from_zoom_filter(attr: &str, max_zoom: u8) -> String {
+    let mut any = vec![serde_json::json!("any")];
+    for zoom in 0..=max_zoom {
+        any.push(serde_json::json!([
+            "all",
+            ["==", "$zoom", zoom],
+            ["<=", attr, zoom]
         ]));
     }
     serde_json::json!({ "*": any }).to_string()
@@ -193,10 +217,21 @@ fn make_tippecanoe_command(
         Thinning::Never {
             zoom_attr,
             max_zoom,
+            shared_borders,
         } => {
             if let Some(attr) = zoom_attr {
                 cmd.arg("-j").arg(zoom_filter(attr, max_zoom));
             }
+            if shared_borders {
+                cmd.arg("--detect-shared-borders");
+            }
+            cmd.arg("--no-feature-limit").arg("--no-tile-size-limit");
+        }
+        Thinning::FromZoom {
+            zoom_attr,
+            max_zoom,
+        } => {
+            cmd.arg("-j").arg(from_zoom_filter(zoom_attr, max_zoom));
             cmd.arg("--no-feature-limit").arg("--no-tile-size-limit");
         }
     }
@@ -443,6 +478,7 @@ mod tests {
             Thinning::Never {
                 zoom_attr: Some("z"),
                 max_zoom: 8,
+                shared_borders: true,
             },
         )
         .expect("should not fail");
@@ -455,6 +491,47 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--drop-densest-as-needed"));
         let j = args.iter().position(|a| a == "-j").expect("-j");
         assert_eq!(args[j + 1], zoom_filter("z", 8));
+        assert!(args.iter().any(|a| a == "--detect-shared-borders"));
+    }
+
+    #[test]
+    fn test_make_tippecanoe_command_from_zoom() {
+        let layers = [make_test_tile_layer("matched", "diffed-shops.jsonl")];
+        let cmd = make_tippecanoe_command(
+            &layers,
+            &PathBuf::from("test-workdir"),
+            &PathBuf::from("test-output.pmtiles"),
+            ZoomRange::Bounded { min: 0, max: 12 },
+            Thinning::FromZoom {
+                zoom_attr: "pz",
+                max_zoom: 12,
+            },
+        )
+        .expect("should not fail");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "--no-feature-limit"));
+        assert!(args.iter().any(|a| a == "--no-tile-size-limit"));
+        assert!(!args.iter().any(|a| a == "--drop-densest-as-needed"));
+        assert!(!args.iter().any(|a| a == "--detect-shared-borders"));
+        let j = args.iter().position(|a| a == "-j").expect("-j");
+        assert_eq!(args[j + 1], from_zoom_filter("pz", 12));
+    }
+
+    #[test]
+    fn test_from_zoom_filter() {
+        let filter: serde_json::Value =
+            serde_json::from_str(&from_zoom_filter("pz", 1)).expect("valid JSON");
+        assert_eq!(
+            filter,
+            serde_json::json!({"*": [
+                "any",
+                ["all", ["==", "$zoom", 0], ["<=", "pz", 0]],
+                ["all", ["==", "$zoom", 1], ["<=", "pz", 1]],
+            ]})
+        );
     }
 
     #[test]

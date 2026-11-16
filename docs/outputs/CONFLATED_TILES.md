@@ -46,8 +46,11 @@ Swiss stop whose ID the register doesn't know, and
 `swiss_transit_stop` for a Swiss stop without IDs, far from any in the
 register.
 
-A third layer, **`spider_cells`** (z0–8), summarizes where each
-spider's features are; see [below](#spider_cells-z08).
+At coarse zooms, the **`hex`** and **`spider_hex`** layers (z0–12)
+count the features that aren't shown yet, in hexagons; see
+[below](#hex-and-spider_hex-z012). A further layer, **`spider_cells`**
+(z0–8), summarizes where each spider's features are; see
+[below](#spider_cells-z08).
 
 Each is built as two PMTiles archives — a coarse **overview** (z0–12)
 and a fine **detail** (z13–14) — merged with `tile-join`, so what a
@@ -73,18 +76,24 @@ Geometry is `osm_geometry` (the matched OpenStreetMap shape — point,
 line, or polygon) for `matched` and `deletion_candidate` rows,
 `atp_geometry` for `unmatched`. Properties: `spider` (not on
 `deletion_candidate`, which has no AllThePlaces side), `relation`,
-`importance`, `rule` (`deletion_candidate` only), and — rows with an
-OpenStreetMap feature only — `osm:type` / `osm:id`, which for a
-`located_in` row is the host.
+`importance`, `pz`, `rule` (`deletion_candidate` only), and — rows
+with an OpenStreetMap feature only — `osm:type` / `osm:id`, which for
+a `located_in` row is the host.
 
-Coarse zooms show the most important rows, by their
-[`importance`](CONFLATED_PARQUET.md#importance): the top 1% at z0
-(`importance >= 0.99`), 4% at z1 (`>= 0.96`), 16% at z2 (`>= 0.84`),
-64% at z3 (`>= 0.36`), and every row from z4 on. Each zoom shows four
-times as many as the one before, since a tile splits into four, so a
-tile holds about as many features at every zoom. Where a tile would
-still be too large, tippecanoe's `--drop-densest-as-needed` thins it
-out further. To see a row's tags, click through to the detail layer
+Coarse zooms don't thin out features; they show a feature either as
+itself or counted in a hexagon of the `hex` layer
+([#957](https://github.com/brawer/osmdiffs/issues/957)). `pz` is the
+feature's **point zoom**, the lowest zoom at which it is shown as
+itself; from there on, it is in every tile. A feature gets shown at
+zoom `z` once its H3 cell at that zoom's resolution (see
+[below](#hex-and-spider_hex-z012)) holds at most 50 features, so
+each part of the map switches from hexagons to points as soon as it
+has room. Since many sparse cells can add up in one coarse tile, a tile
+shows at most 2,000 points; where more would qualify, the most
+important by their [`importance`](CONFLATED_PARQUET.md#importance) win,
+and the rest wait for a finer zoom. A feature that would only become a
+point at z13 is left out of the overview, since the detail layers show
+it there. To see a row's tags, click through to the detail layer
 (below): `matched` and `deletion_candidate` rows join on
 `osm:type`+`osm:id`, `unmatched` rows on nearest `part: "atp"` feature
 of the same `spider`.
@@ -135,11 +144,64 @@ side-steps that entirely — see
 [`docs/notes/2026-08-27-connector-line-zoom-runaway.md`](../notes/2026-08-27-connector-line-zoom-runaway.md)
 for the full investigation.
 
+### `hex` and `spider_hex` (z0–12)
+
+⚠️ **These layers are internal to
+[osmdiffs-app](https://github.com/brawer/osmdiffs-app).** Their
+counts per cell look like data to build on, but they aren't a format
+we promise to keep: we may change or drop them, or any of their
+properties, at any time and without notice. For counts you can rely
+on, aggregate [`conflated.parquet`](CONFLATED_PARQUET.md) yourself.
+
+At zoom `z`, `hex` has one polygon per [H3](https://h3geo.org/) cell
+that holds overview features not yet shown at `z` (those whose `pz` is
+higher). The resolution steps with the zoom, so that hexagons stay
+about the same size on screen, and zooming in looks like cells
+splitting into their children:
+
+| Zoom | H3 resolution |
+|---|---|
+| z0 | 1 |
+| z1–2 | 2 |
+| z3–4 | 3 |
+| z5–6 | 4 |
+| z7–8 | 5 |
+| z9–10 | 6 |
+| z11–12 | 7 |
+
+A feature's cell at a resolution is the parent of its res 7 cell, not
+the cell its position falls in at that resolution, so that cells nest
+exactly: H3 children don't tile their parent. Its position is a point
+on the surface of the geometry the overview draws. A cell crossing
+the antimeridian is split in two; cells around the poles, which Web
+Mercator can't show, are left out.
+
+`spider_hex` is the same per spider, for a map filtered to one spider:
+there, a spider's points show where the overview shows them, and its
+hexagons count the rest of its features.
+
+Properties:
+
+- `h3` — the cell's H3 index, as a hex string.
+- `spider` — `spider_hex` only: the spider.
+- `n` — the features in the cell not yet shown at this zoom.
+- `same`, `missing_in_osm`, `located_in` — how many of them have each
+  `match.relation`.
+- `deletion_candidate` — `hex` only: how many of them are deletion
+  candidates.
+- `z` — the zoom level the hexagon is for. Each hexagon is in the
+  tiles of that zoom only.
+
+Both layers are built in their own tippecanoe pass that never drops a
+feature, with `--detect-shared-borders` so that simplifying the
+outlines leaves no gaps between neighbouring cells.
+
 ### `spider_cells` (z0–8)
 
-The overview is thinned out at coarse zooms, the same way for all
-spiders, so a map filtered to one spider (with a filter on `spider`)
-shows only a few of its features there. `spider_cells` is for such a
+The overview shows only some features at coarse zooms, the same way
+for all spiders, so a map filtered to one spider (with a filter on
+`spider`) shows only a few of its features there. `spider_hex`
+(above) is meant to replace this layer once osmdiffs-app uses it. `spider_cells` is for such a
 map. At zoom `z`, it has one point per spider in each cell of a grid
 of tiles at zoom `z + 3`, so at most 64 points of one spider in a tile.
 The point lies at the centroid of the spider's AllThePlaces features
@@ -158,9 +220,9 @@ Properties:
   that zoom only.
 
 This layer is built in its own tippecanoe pass that never drops a
-feature, and joined to the other two. It stops at z8 because that is
-the highest zoom at which `--drop-densest-as-needed` still thins out
-the overview somewhere; from z9 on, the overview has every feature.
+feature, and joined to the others. It stops at z8 because that was
+the highest zoom at which `--drop-densest-as-needed` thinned out the
+overview somewhere, before the overview switched to hexagons.
 On the 2026-11-02 planet, the layer has 11,406 points at z0 and 1.2
 million at z8. It adds about 155 KB to the z0 tile (245 KB → 400 KB)
 and 30 MB to the archive. The largest joined tile is 634 KB, at z4,
@@ -189,6 +251,8 @@ with `--no-tile-size-limit`.
   layer conveys the same thing through its layer name and `part`.
 - `importance` — the row's `importance` from `conflated.parquet`,
   rounded to two decimals. Overview features only.
+- `pz` — the zoom from which an overview feature is shown; see
+  [the overview](#z012-the-overview). Overview features only.
 - `osm:type`, `osm:id` — the matched OpenStreetMap object. On the
   `matched` and `deletion_candidate` overview features (where they
   double as the join key to the detail layer) and the z13–14

@@ -33,6 +33,7 @@ pub(crate) const EXTERNAL_SORT_CHUNK_BYTES: usize = 512 * 1024 * 1024;
 mod atp;
 mod brand_totals;
 mod conflate;
+mod conflated_hex;
 mod conflated_tiles;
 mod datapackage;
 mod download;
@@ -320,8 +321,12 @@ fn run_pipeline_steps(
                 min: 0,
                 max: conflated_tiles::DETAIL_MIN_ZOOM - 1,
             },
-            tiles::Thinning::DropDensest {
-                importance_attr: Some("importance"),
+            // Each overview feature already knows the zoom it is shown
+            // from, and where it isn't shown yet, the hexagons below
+            // count it (#957).
+            tiles::Thinning::FromZoom {
+                zoom_attr: conflated_hex::POINT_ZOOM_ATTR,
+                max_zoom: conflated_hex::HEX_MAX_ZOOM,
             },
         )
     })?;
@@ -360,12 +365,49 @@ fn run_pipeline_steps(
             tiles::Thinning::Never {
                 zoom_attr: Some(conflated_tiles::SPIDER_CELL_ZOOM_ATTR),
                 max_zoom: conflated_tiles::SPIDER_CELLS_MAX_ZOOM,
+                shared_borders: false,
             },
         )
     })?;
+    // Per zoom and H3 cell, overall and per spider, one hexagon with
+    // the counts of the features that the overview doesn't show yet,
+    // never dropped (#957). Skipped if there are none, as for a small
+    // extract, since tippecanoe fails without any input.
+    let conflated_hex = run_step("render_conflated_hex", || {
+        let hex_layers = [&conflated_layers.hex, &conflated_layers.spider_hex];
+        let mut has_hex = false;
+        for layer in hex_layers {
+            has_hex |= std::fs::metadata(&layer.path)?.len() > 0;
+        }
+        if !has_hex {
+            return Ok(None);
+        }
+        tiles::render_tiles(
+            &[
+                conflated_layers.hex.clone(),
+                conflated_layers.spider_hex.clone(),
+            ],
+            progress,
+            workdir,
+            "conflated-hex.pmtiles",
+            tiles::ZoomRange::Bounded {
+                min: 0,
+                max: conflated_hex::HEX_MAX_ZOOM,
+            },
+            tiles::Thinning::Never {
+                zoom_attr: Some(conflated_hex::HEX_ZOOM_ATTR),
+                max_zoom: conflated_hex::HEX_MAX_ZOOM,
+                shared_borders: true,
+            },
+        )
+        .map(Some)
+    })?;
     let conflated_tiles_out = run_step("join_conflated_tiles", || {
         tiles::join_tiles(
-            &[conflated_overview, conflated_detail, conflated_spider_cells],
+            &[conflated_overview, conflated_detail, conflated_spider_cells]
+                .into_iter()
+                .chain(conflated_hex)
+                .collect::<Vec<_>>(),
             workdir,
             "conflated.pmtiles",
         )

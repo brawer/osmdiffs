@@ -910,6 +910,19 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     // One matched Denner and this one, within the radius.
     assert_eq!(detail["local_share"], 0.5);
 
+    // With so few features, every cell has room, so the overview shows
+    // each of them from z0 on, and no hexagon is needed.
+    for feature in overview_matched
+        .iter()
+        .chain(&overview_unmatched)
+        .chain(&overview_deletion)
+    {
+        assert_eq!(feature["properties"]["pz"], 0, "{feature}");
+    }
+    assert_eq!(overview_matched.len() + overview_unmatched.len(), 8);
+    assert!(read_features("hex.jsonl")?.is_empty());
+    assert!(read_features("spider-hex.jsonl")?.is_empty());
+
     // The spider cells count every conflated row once at each zoom, so
     // a map filtered to one spider can show all of it at coarse zooms.
     let spider_cells = read_features("spider-cells.jsonl")?;

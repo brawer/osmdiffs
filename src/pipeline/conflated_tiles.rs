@@ -45,6 +45,12 @@
 //!   are even at zooms where the overview is thinned out
 //!   ([#949](https://github.com/brawer/osmdiffs/issues/949)).
 //!
+//! - the **hexagon** layers (`hex` and `spider_hex`, z0 to
+//!   `conflated_hex::HEX_MAX_ZOOM`): at coarse zooms, the overview
+//!   shows a feature only from its point zoom on, and before that
+//!   counts it in an H3 hexagon, overall and per spider; see
+//!   `conflated_hex` ([#957](https://github.com/brawer/osmdiffs/issues/957)).
+//!
 //! - the **deletion candidate** layers (`deletion_candidate`, overview
 //!   and detail): OSM features that nothing in AllThePlaces matched but
 //!   that may be gone (see `conflate::deletion`), drawn as their OSM
@@ -71,19 +77,20 @@
 //! [#775](https://github.com/brawer/osmdiffs/issues/775) for
 //! the full design discussion.
 
+use super::conflated_hex::{self, Kind, OverviewFeature};
 use super::tiles::round_importance;
 use crate::utils::parquet::{get_binary, get_f32, get_string, get_struct, get_tags, get_u64};
 use crate::{TileLayer, make_progress_bar};
 use anyhow::{Context, Result};
 use arrow::array::{Array, RecordBatch, StructArray};
-use geo::{Centroid, Distance, Haversine, MapCoordsInPlace};
+use geo::{Centroid, Distance, Haversine, InteriorPoint, MapCoordsInPlace};
 use geo_traits::to_geo::ToGeoGeometry;
 use indicatif::{MultiProgress, ProgressBar};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rayon::prelude::*;
 use serde_json::{Map, Value};
 use std::fs::{File, rename};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use wkb::reader::read_wkb;
@@ -171,10 +178,11 @@ pub(crate) const MIN_CONNECTOR_LENGTH_METERS: f64 = 5.0;
 const SPIDER_CELLS_LAYER_NAME: &str = "spider_cells";
 
 /// Highest zoom level of the `spider_cells` layer: the highest zoom at
-/// which tippecanoe's `--drop-densest-as-needed` still thins out the
-/// overview somewhere on the planet. From the next zoom on, the overview
-/// shows every feature, so a map can switch back to it. Measured on the
-/// 2026-11-02 planet; see #949.
+/// which tippecanoe's `--drop-densest-as-needed` still thinned out the
+/// overview somewhere on the planet, measured on the 2026-11-02 planet
+/// (#949). Since the overview switched to hexagons (#957), the
+/// `spider_hex` layer covers every overview zoom, and is meant to
+/// replace this one.
 pub(crate) const SPIDER_CELLS_MAX_ZOOM: u8 = 8;
 
 /// At zoom `z`, the `spider_cells` layer has one point per spider in
@@ -224,6 +232,14 @@ pub struct ConflatedLayers {
     /// dropping anything): per spider
     /// and grid cell, one point with counts; see [`SpiderCells`].
     pub spider_cells: TileLayer,
+    /// Fed to its own pass (`ZoomRange::Bounded { min: 0, max:
+    /// conflated_hex::HEX_MAX_ZOOM }`, `tiles::Thinning::Never`)
+    /// together with [`Self::spider_hex`]: per zoom and H3 cell, one
+    /// polygon with the counts of the features there that the overview
+    /// doesn't show yet; see `conflated_hex`.
+    pub hex: TileLayer,
+    /// The same as [`Self::hex`], per spider.
+    pub spider_hex: TileLayer,
 }
 
 /// One decoded row of `conflated.parquet`, kept whether or not it has
@@ -280,6 +296,15 @@ impl ConflatedTileRow {
         self.osm.is_some() && self.relation == RELATION_SAME
     }
 
+    /// The geometry the overview draws: the OSM shape for a matched
+    /// row, the ATP point otherwise.
+    fn overview_geometry_wkb(&self) -> &[u8] {
+        match &self.osm {
+            Some(osm) if self.is_matched() => &osm.osm_geometry_wkb,
+            _ => &self.atp_geometry_wkb,
+        }
+    }
+
     /// The coarse overview layer's representation: one deliberately
     /// minimal feature per row. Geometry is the actual OSM shape when
     /// matched (what a reviewer is meant to review -- point/line/
@@ -297,15 +322,11 @@ impl ConflatedTileRow {
     /// [`Self::to_unmatched_detail_geojson_line`]).
     ///
     /// Also carries the row's `importance`, rounded to two decimals so
-    /// that it costs the tile at most 101 distinct values, which the
-    /// overview's tippecanoe filter uses to show the most important
-    /// places at low zooms (see `tiles::importance_filter`).
+    /// that it costs the tile at most 101 distinct values, for styling.
+    /// Its point zoom, `conflated_hex::POINT_ZOOM_ATTR`, gets added
+    /// once the whole scan is done.
     fn to_overview_geojson_line(&self) -> Result<String> {
-        let geometry_wkb: &[u8] = match &self.osm {
-            Some(osm) if self.is_matched() => &osm.osm_geometry_wkb,
-            _ => &self.atp_geometry_wkb,
-        };
-        let geometry = decode_and_round(geometry_wkb)?;
+        let geometry = decode_and_round(self.overview_geometry_wkb())?;
 
         let mut properties: Map<String, Value> = Map::new();
         properties.insert("spider".to_string(), Value::String(self.spider.clone()));
@@ -564,7 +585,7 @@ impl SpiderCells {
 
 /// The x and y of the Web Mercator tile at `zoom` that holds
 /// `(lon, lat)`, clamped to the map at the poles and the antimeridian.
-fn tile_of(lon: f64, lat: f64, zoom: u8) -> (u32, u32) {
+pub(crate) fn tile_of(lon: f64, lat: f64, zoom: u8) -> (u32, u32) {
     let n = f64::from(1u32 << zoom);
     let lat = lat.clamp(-85.051_128_78, 85.051_128_78).to_radians();
     let x = (lon + 180.0) / 360.0 * n;
@@ -646,6 +667,14 @@ pub fn extract_conflated_layers(
             name: String::from(SPIDER_CELLS_LAYER_NAME),
             path: workdir.join("spider-cells.jsonl"),
         },
+        hex: TileLayer {
+            name: String::from(conflated_hex::HEX_LAYER_NAME),
+            path: workdir.join("hex.jsonl"),
+        },
+        spider_hex: TileLayer {
+            name: String::from(conflated_hex::SPIDER_HEX_LAYER_NAME),
+            path: workdir.join("spider-hex.jsonl"),
+        },
     };
     let all_layers = [
         &layers.overview_matched,
@@ -655,6 +684,8 @@ pub fn extract_conflated_layers(
         &layers.overview_deletion_candidates,
         &layers.detail_deletion_candidates,
         &layers.spider_cells,
+        &layers.hex,
+        &layers.spider_hex,
     ];
     let outputs: Vec<&Path> = all_layers
         .iter()
@@ -684,17 +715,26 @@ pub fn extract_conflated_layers(
         let writer = BufWriter::with_capacity(32768, File::create(&tmp)?);
         Ok((tmp, writer))
     };
-    let (overview_matched_tmp, mut overview_matched_w) = open_tmp(&layers.overview_matched)?;
-    let (overview_unmatched_tmp, mut overview_unmatched_w) = open_tmp(&layers.overview_unmatched)?;
+    // The overview layers first go to `.raw.tmp` files, since their
+    // features only learn their point zoom once the whole scan is done;
+    // see `conflated_hex`.
+    let open_raw = |layer: &TileLayer| -> Result<(PathBuf, BufWriter<File>)> {
+        let mut tmp = PathBuf::from(&layer.path);
+        tmp.add_extension("raw.tmp");
+        let writer = BufWriter::with_capacity(32768, File::create(&tmp)?);
+        Ok((tmp, writer))
+    };
+    let (overview_matched_raw, mut overview_matched_w) = open_raw(&layers.overview_matched)?;
+    let (overview_unmatched_raw, mut overview_unmatched_w) = open_raw(&layers.overview_unmatched)?;
     let (detail_matched_tmp, mut detail_matched_w) = open_tmp(&layers.detail_matched)?;
     let (detail_unmatched_tmp, mut detail_unmatched_w) = open_tmp(&layers.detail_unmatched)?;
-    let (overview_deletion_tmp, mut overview_deletion_w) =
-        open_tmp(&layers.overview_deletion_candidates)?;
+    let (overview_deletion_raw, mut overview_deletion_w) =
+        open_raw(&layers.overview_deletion_candidates)?;
     let (detail_deletion_tmp, mut detail_deletion_w) =
         open_tmp(&layers.detail_deletion_candidates)?;
     let (spider_cells_tmp, mut spider_cells_w) = open_tmp(&layers.spider_cells)?;
 
-    let counts = extract_rows(
+    let (counts, overview) = extract_rows(
         conflated,
         &progress_bar,
         Writers {
@@ -719,33 +759,159 @@ pub fn extract_conflated_layers(
     ] {
         writer.flush()?;
     }
-    rename(&overview_matched_tmp, &layers.overview_matched.path)?;
-    rename(&overview_unmatched_tmp, &layers.overview_unmatched.path)?;
+
+    let start = Instant::now();
+    let features: Vec<OverviewFeature> = overview.features.iter().map(|(_, f)| f.clone()).collect();
+    let point_zooms = conflated_hex::point_zooms(
+        &features,
+        conflated_hex::MAX_FEATURES_PER_CELL,
+        conflated_hex::MAX_POINTS_PER_TILE,
+    );
+    let (hex_tmp, mut hex_w) = open_tmp(&layers.hex)?;
+    let (spider_hex_tmp, mut spider_hex_w) = open_tmp(&layers.spider_hex)?;
+    let hex_stats = conflated_hex::write_hex_cells(
+        &features,
+        &point_zooms,
+        &overview.spiders,
+        &mut hex_w,
+        &mut spider_hex_w,
+    )?;
+    hex_w.flush()?;
+    spider_hex_w.flush()?;
+    drop(features);
+    let mut overview_kept = 0;
+    for (layer, raw, path) in [
+        (
+            OverviewLayer::Matched,
+            &overview_matched_raw,
+            &layers.overview_matched.path,
+        ),
+        (
+            OverviewLayer::Unmatched,
+            &overview_unmatched_raw,
+            &layers.overview_unmatched.path,
+        ),
+        (
+            OverviewLayer::DeletionCandidates,
+            &overview_deletion_raw,
+            &layers.overview_deletion_candidates.path,
+        ),
+    ] {
+        let zooms = overview
+            .features
+            .iter()
+            .zip(&point_zooms)
+            .filter(|((l, _), _)| *l == layer)
+            .map(|(_, &z)| z);
+        let mut tmp = PathBuf::from(path);
+        tmp.add_extension("tmp");
+        overview_kept += add_point_zooms(raw, &tmp, zooms)?;
+        std::fs::remove_file(raw)?;
+        rename(&tmp, path)?;
+    }
+    log::info!(
+        elapsed_seconds = start.elapsed().as_secs_f64(),
+        overview_features = point_zooms.len(),
+        overview_kept = overview_kept,
+        hex = hex_stats.hex,
+        spider_hex = hex_stats.spider_hex;
+        "extract_conflated_layers: hexagons done"
+    );
+
     rename(&detail_matched_tmp, &layers.detail_matched.path)?;
     rename(&detail_unmatched_tmp, &layers.detail_unmatched.path)?;
-    rename(
-        &overview_deletion_tmp,
-        &layers.overview_deletion_candidates.path,
-    )?;
     rename(
         &detail_deletion_tmp,
         &layers.detail_deletion_candidates.path,
     )?;
     rename(&spider_cells_tmp, &layers.spider_cells.path)?;
+    rename(&hex_tmp, &layers.hex.path)?;
+    rename(&spider_hex_tmp, &layers.spider_hex.path)?;
 
     progress_bar.finish_with_message(format!(
         "{num_rows} conflated features → {} matched / {} unmatched / \
          {} deletion candidate rows, {} matched-detail / {} unmatched-detail \
-         features, {} spider cells",
+         features, {} spider cells, {} hexagons, {} spider hexagons",
         counts.matched,
         counts.unmatched,
         counts.deletion_candidates,
         counts.matched_detail_features,
         counts.unmatched_detail_features,
-        counts.spider_cells
+        counts.spider_cells,
+        hex_stats.hex,
+        hex_stats.spider_hex
     ));
 
     Ok(layers)
+}
+
+/// Which overview layer an [`OverviewFeature`] went to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverviewLayer {
+    Matched,
+    Unmatched,
+    DeletionCandidates,
+}
+
+/// Every overview feature, in the order [`extract_rows`] wrote them,
+/// and the spider names their `spider` indexes.
+#[derive(Default)]
+struct Overview {
+    features: Vec<(OverviewLayer, OverviewFeature)>,
+    spiders: Vec<String>,
+    spider_ids: std::collections::HashMap<String, u32>,
+}
+
+impl Overview {
+    fn spider_id(&mut self, spider: &str) -> u32 {
+        if let Some(&id) = self.spider_ids.get(spider) {
+            return id;
+        }
+        let id = self.spiders.len() as u32;
+        self.spiders.push(spider.to_string());
+        self.spider_ids.insert(spider.to_string(), id);
+        id
+    }
+}
+
+/// Copies the GeoJSON Lines at `raw` to `out`, adding to each feature
+/// its point zoom from `zooms` as [`conflated_hex::POINT_ZOOM_ATTR`].
+/// Leaves out features that are hidden at every overview zoom, since
+/// tippecanoe would never show them. Returns how many it kept.
+fn add_point_zooms(raw: &Path, out: &Path, zooms: impl Iterator<Item = u8>) -> Result<u64> {
+    let reader = BufReader::with_capacity(32768, File::open(raw)?);
+    let mut writer = BufWriter::with_capacity(32768, File::create(out)?);
+    let mut zooms = zooms;
+    let mut kept = 0;
+    for line in reader.lines() {
+        let line = line?;
+        let zoom = zooms
+            .next()
+            .context("more overview features than point zooms")?;
+        if zoom > conflated_hex::HEX_MAX_ZOOM {
+            continue;
+        }
+        let mut feature: Value = serde_json::from_str(&line)?;
+        feature["properties"][conflated_hex::POINT_ZOOM_ATTR] = Value::from(zoom);
+        writeln!(writer, "{feature}")?;
+        kept += 1;
+    }
+    anyhow::ensure!(
+        zooms.next().is_none(),
+        "fewer overview features than point zooms"
+    );
+    writer.flush()?;
+    Ok(kept)
+}
+
+/// Where the overview shows the feature in `wkb`: a point on its
+/// surface, as for the measurements in #957.
+fn overview_position(wkb: &[u8]) -> Option<(f64, f64)> {
+    read_wkb(wkb)
+        .ok()?
+        .to_geometry()
+        .interior_point()
+        .map(|p| (p.x(), p.y()))
 }
 
 /// The sinks [`extract_rows`] writes to, one per [`ConflatedLayers`]
@@ -775,9 +941,10 @@ fn extract_rows(
     conflated: &Path,
     progress_bar: &ProgressBar,
     writers: Writers,
-) -> Result<RowCounts> {
+) -> Result<(RowCounts, Overview)> {
     let start = Instant::now();
     let mut counts = RowCounts::default();
+    let mut overview = Overview::default();
     let mut spider_cells = SpiderCells::default();
 
     let file = File::open(conflated)?;
@@ -797,10 +964,22 @@ fn extract_rows(
         // there's nothing to deduplicate or sort here, unlike edits.rs,
         // so no channels/external sort are needed, just an ordered
         // in-memory Vec per batch.
-        type AtpResult = (ConflatedTileRow, Option<(f64, f64)>, String, Vec<String>);
+        type AtpResult = (
+            ConflatedTileRow,
+            Option<(f64, f64)>,
+            Option<(f64, f64)>,
+            String,
+            Vec<String>,
+        );
         enum Extracted {
             Atp(Box<AtpResult>),
-            Deletion { overview: String, detail: String },
+            Deletion {
+                overview: String,
+                detail: String,
+                position: Option<(f64, f64)>,
+                importance: f32,
+                relation: String,
+            },
         }
         let rows: Vec<Extracted> = (0..batch.num_rows())
             .into_par_iter()
@@ -812,6 +991,9 @@ fn extract_rows(
                         return Ok(Extracted::Deletion {
                             overview: deletion.to_overview_geojson_line()?,
                             detail: deletion.to_detail_geojson_line(fid)?,
+                            position: overview_position(&deletion.osm.osm_geometry_wkb),
+                            importance: deletion.importance,
+                            relation: deletion.relation,
                         });
                     }
                 };
@@ -824,9 +1006,11 @@ fn extract_rows(
                     .ok()
                     .and_then(|g| g.to_geometry().centroid())
                     .map(|c| (c.x(), c.y()));
+                let position = overview_position(tile_row.overview_geometry_wkb());
                 Ok(Extracted::Atp(Box::new((
                     tile_row,
                     location,
+                    position,
                     overview_line,
                     detail_lines,
                 ))))
@@ -836,12 +1020,27 @@ fn extract_rows(
 
         for entry in rows {
             progress_bar.inc(1);
-            let (tile_row, location, overview_line, detail_lines) = match entry {
+            let (tile_row, location, position, overview_line, detail_lines) = match entry {
                 Extracted::Atp(entry) => *entry,
-                Extracted::Deletion { overview, detail } => {
+                Extracted::Deletion {
+                    overview: overview_line,
+                    detail,
+                    position,
+                    importance,
+                    relation,
+                } => {
                     writers
                         .overview_deletion_candidates
-                        .write_all(overview.as_bytes())?;
+                        .write_all(overview_line.as_bytes())?;
+                    overview.features.push((
+                        OverviewLayer::DeletionCandidates,
+                        OverviewFeature::new(
+                            position,
+                            importance,
+                            Kind::from_relation(&relation),
+                            None,
+                        ),
+                    ));
                     writers
                         .detail_deletion_candidates
                         .write_all(detail.as_bytes())?;
@@ -852,7 +1051,15 @@ fn extract_rows(
             if let Some(location) = location {
                 spider_cells.add(&tile_row.spider, &tile_row.relation, location);
             }
+            let spider = overview.spider_id(&tile_row.spider);
+            let feature = OverviewFeature::new(
+                position,
+                tile_row.importance,
+                Kind::from_relation(&tile_row.relation),
+                Some(spider),
+            );
             if tile_row.is_matched() {
+                overview.features.push((OverviewLayer::Matched, feature));
                 writers
                     .overview_matched
                     .write_all(overview_line.as_bytes())?;
@@ -862,6 +1069,7 @@ fn extract_rows(
                     counts.matched_detail_features += 1;
                 }
             } else {
+                overview.features.push((OverviewLayer::Unmatched, feature));
                 writers
                     .overview_unmatched
                     .write_all(overview_line.as_bytes())?;
@@ -886,7 +1094,7 @@ fn extract_rows(
         deletion_candidates = counts.deletion_candidates;
         "extract_conflated_layers: done"
     );
-    Ok(counts)
+    Ok((counts, overview))
 }
 
 /// Decodes `row`. A row without an ATP side is an OSM feature that may
@@ -1007,6 +1215,8 @@ mod tests {
             "deletion-candidates.jsonl",
             "deletion-candidates-detail.jsonl",
             "spider-cells.jsonl",
+            "hex.jsonl",
+            "spider-hex.jsonl",
         ] {
             std::fs::write(workdir.path().join(name), b"").expect("write placeholder");
         }
