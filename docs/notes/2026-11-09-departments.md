@@ -86,8 +86,20 @@ host that was clearly no store, such as "Tesco Customer Toilets"
 Timpson; see [#929](https://github.com/brawer/osmdiffs/issues/929).
 48 of the car parks had exactly the store's name, so a stricter name
 rule wouldn't have helped. Now such a host must be a store. A host
-found by `located_in:wikidata` may still be of any category, since a
-brand's Wikidata ID rarely sits on a car park.
+found by `located_in:wikidata` could still be of any category, since
+a brand's Wikidata ID rarely sits on a car park.
+
+It does sit on some. In the planet run of 2026-11-15, a Pep&Co and a
+Timpson were `located_in` an unnamed `amenity=trolley_bay` that OSM
+tags with the store's brand, and a France Pare-Brise an ADA
+`amenity=car_rental`; see
+[#968](https://github.com/brawer/osmdiffs/issues/968). So now no host,
+however it was found, is of a `NOT_HOST_CATEGORIES` category: car
+parks, trolley bays, toilets, charging stations, car rentals and
+other features that hold no store. We kept a deny list for hosts found
+by ID rather than the store list for those found by name, because
+`located_in:wikidata` also names malls, airports and stations, which a
+short list of stores would miss.
 
 ## Alternatives considered
 

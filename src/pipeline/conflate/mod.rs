@@ -1,4 +1,6 @@
+use super::atp::camera;
 use super::atp::nondescript::Signal;
+use super::atp::spider_counts;
 use super::importance::{Quantiles, Signals};
 use super::last_modified;
 use crate::{
@@ -94,7 +96,9 @@ pub fn conflate(
     let nondescript_emails = Signal::Email.path(workdir);
     let nondescript_websites = Signal::Website.path(workdir);
     let brand_domains_path = super::atp::brand_domains_path(workdir);
-    let input_modified = last_modified(&[
+    // Which spiders get a corrected position; see [read_camera_spiders].
+    let spider_counts_path = spider_counts::path(workdir);
+    let mut inputs: Vec<&Path> = vec![
         atp,
         &nondescript_phones,
         &nondescript_emails,
@@ -103,8 +107,11 @@ pub fn conflate(
         importance.osmviews,
         importance.osmviews_ranks,
         importance.qrank_quantiles,
-    ])?
-    .max(osm.modified()?);
+    ];
+    if spider_counts_path.exists() {
+        inputs.push(&spider_counts_path);
+    }
+    let input_modified = last_modified(&inputs)?.max(osm.modified()?);
     let out_path = workdir.join("conflated.parquet");
     let diagnostics_path = diagnostics::path(workdir);
     if out_path.exists()
@@ -121,6 +128,11 @@ pub fn conflate(
     )?;
     let brand_domains = BrandDomains::open(&brand_domains_path)?;
     log::info!(count = brand_domains.len(); "conflate: read brand domains");
+    let camera_spiders = read_camera_spiders(&spider_counts_path)?;
+    log::info!(
+        spiders = camera_spiders.len();
+        "conflate: spiders whose positions look like Google Maps camera centers"
+    );
     let signals = Signals::open(
         importance.osmviews,
         importance.osmviews_ranks,
@@ -140,8 +152,11 @@ pub fn conflate(
             producer_result = produce_rows(
                 &atp_reader,
                 osm,
-                &nondescript,
-                &brand_domains,
+                Lookups {
+                    nondescript: &nondescript,
+                    brand_domains: &brand_domains,
+                    camera_spiders: &camera_spiders,
+                },
                 &signals,
                 producer_progress,
                 tx,
@@ -156,6 +171,50 @@ pub fn conflate(
     producer_result?.write(&diagnostics_path)?;
 
     Ok(out_path)
+}
+
+/// The spiders whose positions look like Google Maps camera centers,
+/// by the counts that `import_atp` wrote to `path`, with the median
+/// offset of their hits in degrees of longitude; see
+/// [camera::is_google_camera_coords]. For their features, matching also
+/// tries the position corrected by that offset. Without the file, as in
+/// some tests, there are none.
+fn read_camera_spiders(path: &Path) -> Result<HashMap<String, f64>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    Ok(spider_counts::read(path)?
+        .into_iter()
+        .filter(camera::is_google_camera_coords)
+        .filter_map(|c| Some((c.spider, c.google_camera_coords_offset?)))
+        .collect())
+}
+
+/// Sends the row of `atp`, which matched `r`. When the match was made
+/// at the position corrected for a Google Maps camera center (`shift`,
+/// in degrees of longitude east), the row gives the corrected position,
+/// and its evidence says so; otherwise the position as AllThePlaces
+/// gave it.
+fn send_match(
+    atp: &Place,
+    r: LocalFeatureRef,
+    info: MatchInfo,
+    shift: Option<f64>,
+    osm: &OsmFeatures,
+    signals: &Signals,
+    out: &SyncSender<ParquetRow>,
+) -> Result<()> {
+    match shift {
+        Some(shift) => send_row(
+            &camera::corrected(atp, -shift),
+            Some(r),
+            info.at_camera_corrected(shift),
+            osm,
+            signals,
+            out,
+        ),
+        None => send_row(atp, Some(r), info, osm, signals, out),
+    }
 }
 
 struct ConflatedFeature {
@@ -219,6 +278,16 @@ fn log_no_matcher(counts: &HashMap<String, u64>) {
     );
 }
 
+/// What [produce_rows] looks up about features and spiders, besides
+/// the OSM features themselves.
+struct Lookups<'a> {
+    nondescript: &'a Nondescript,
+    brand_domains: &'a BrandDomains,
+    /// Spiders whose positions look like Google Maps camera centers,
+    /// with their median offset; see [read_camera_spiders].
+    camera_spiders: &'a HashMap<String, f64>,
+}
+
 /// Matches every ATP feature, in two passes. The first pass matches
 /// features whose matcher isn't exclusive, or that have no candidate,
 /// and sends their rows right away; for the others, it keeps the best
@@ -231,12 +300,16 @@ fn log_no_matcher(counts: &HashMap<String, u64>) {
 fn produce_rows(
     atp_reader: &PlaceReader,
     osm: &OsmFeatures,
-    nondescript: &Nondescript,
-    brand_domains: &BrandDomains,
+    lookups: Lookups,
     signals: &Signals,
     progress_bar: ProgressBar,
     out: SyncSender<ParquetRow>,
 ) -> Result<Diagnostics> {
+    let Lookups {
+        nondescript,
+        brand_domains,
+        camera_spiders,
+    } = lookups;
     let coverer = s2::region::RegionCoverer {
         max_cells: 16,
         min_level: 12,
@@ -253,6 +326,10 @@ fn produce_rows(
     // snapshot at the boundary is fine for a diagnostic like this.
     let last_progress_log_ms = AtomicU64::new(0);
     let exclusive = Mutex::new(Vec::new());
+    // Exclusive candidates, by ATP ordinal and OSM feature, that
+    // matched better at the position corrected for a Google Maps camera
+    // center; see `atp::camera`.
+    let corrected_candidates: Mutex<HashSet<(u64, LocalFeatureRef)>> = Mutex::new(HashSet::new());
     let matched = MatchedSet::new(osm.index.len());
     let mut coverage = AtpCoverage::default();
     // ATP features per spider that no matcher handles, and that get no
@@ -335,20 +412,34 @@ fn produce_rows(
                 return Ok(());
             };
             has_matcher[i].store(matcher.counts_for_coverage(), Ordering::Relaxed);
+            // For a spider whose positions look like Google Maps camera
+            // centers, the corrected position competes with the given
+            // one; see `atp::camera`. `shift` is how far east it lies.
+            let shift = camera_spiders.get(&atp.spider).map(|offset| -offset);
+            let corrected = shift.map(|shift| camera::corrected(atp, -shift));
+            let corrected_matcher = corrected
+                .as_ref()
+                .and_then(|c| create_matcher(c, nondescript, brand_domains));
+            // The OSM features that matched better at the corrected
+            // position.
+            let mut via_corrected = HashSet::new();
             let mut host = host_of(batch_start + i as u64, atp);
             let keep = if matcher.is_exclusive() {
                 EXCLUSIVE_CANDIDATES
             } else {
                 1
             };
-            let covering = {
-                let s2_cell = s2::cell::Cell::from(s2::cellid::CellID(atp.s2_cell_id));
-                let center = s2_cell.center();
-                let radius = matcher
-                    .max_distance()
-                    .unwrap_or_else(|| match_distance(&atp.mask));
-                let cap = s2::cap::Cap::from_center_chordangle(&center, &radius);
+            let radius = matcher
+                .max_distance()
+                .unwrap_or_else(|| match_distance(&atp.mask));
+            let cover = |place: &Place| {
+                let s2_cell = s2::cell::Cell::from(s2::cellid::CellID(place.s2_cell_id));
+                let cap = s2::cap::Cap::from_center_chordangle(&s2_cell.center(), &radius);
                 coverer.covering(&cap)
+            };
+            let covering = match &corrected {
+                Some(corrected) => s2::cellunion::CellUnion::union(&cover(atp), &cover(corrected)),
+                None => cover(atp),
             };
             let mut best = Vec::<(f64, LocalFeatureRef)>::new();
             // OSM features of the kind that the matcher found no
@@ -376,7 +467,14 @@ fn produce_rows(
                     if host.is_some_and(|h| h.excludes(candidate.tags())) {
                         return Ok(());
                     }
-                    let score = matcher.score_osm_candidate(&candidate);
+                    let mut score = matcher.score_osm_candidate(&candidate);
+                    if let Some(m) = &corrected_matcher {
+                        let s = m.score_osm_candidate(&candidate);
+                        if s > score {
+                            score = s;
+                            via_corrected.insert(r);
+                        }
+                    }
                     if score <= 0.0 && rejected.len() < diagnostics::MAX_REJECTED {
                         rejected.push(r);
                     }
@@ -430,15 +528,20 @@ fn produce_rows(
                         feature: &feature,
                         strings: &osm.strings,
                     };
-                    candidates.push((
-                        score,
-                        r,
-                        matcher.may_share(&candidate),
-                        matcher.rule(&candidate),
-                    ));
+                    let m = match &corrected_matcher {
+                        Some(m) if via_corrected.contains(&r) => m,
+                        _ => &matcher,
+                    };
+                    candidates.push((score, r, m.may_share(&candidate), m.rule(&candidate)));
                 }
                 let mut hasher = std::hash::DefaultHasher::new();
                 atp.spider.hash(&mut hasher);
+                if !via_corrected.is_empty() {
+                    corrected_candidates
+                        .lock()
+                        .expect("corrected_candidates lock")
+                        .extend(via_corrected.iter().map(|&r| (batch_start + i as u64, r)));
+                }
                 exclusive
                     .lock()
                     .expect("exclusive lock")
@@ -464,14 +567,20 @@ fn produce_rows(
             };
             matched.insert(r);
             let feature = osm.index.get_feature(r)?;
-            let rule = matcher.rule(&OsmCandidate {
+            let candidate = OsmCandidate {
                 feature: &feature,
                 strings: &osm.strings,
-            });
-            send_row(
+            };
+            let shift = shift.filter(|_| via_corrected.contains(&r));
+            let rule = match (&corrected_matcher, shift) {
+                (Some(m), Some(_)) => m.rule(&candidate),
+                _ => matcher.rule(&candidate),
+            };
+            send_match(
                 atp,
-                Some(r),
+                r,
                 MatchInfo::same(score, rule),
+                shift,
                 osm,
                 signals,
                 &out,
@@ -538,6 +647,9 @@ fn produce_rows(
         })
         .collect();
     drop(exclusive);
+    let corrected_candidates = corrected_candidates
+        .into_inner()
+        .expect("corrected_candidates lock");
     let mut ordinal: u64 = 0;
     for batch in atp_reader.read_all()? {
         for atp in batch? {
@@ -545,10 +657,15 @@ fn produce_rows(
                 match osm_match {
                     Some((r, score, rule)) => {
                         matched.insert(r);
-                        send_row(
+                        let shift = camera_spiders
+                            .get(&atp.spider)
+                            .map(|offset| -offset)
+                            .filter(|_| corrected_candidates.contains(&(ordinal, r)));
+                        send_match(
                             &atp,
-                            Some(r),
+                            r,
                             MatchInfo::same(score, rule),
+                            shift,
                             osm,
                             signals,
                             &out,

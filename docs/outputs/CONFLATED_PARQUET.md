@@ -53,6 +53,8 @@ match                                        STRUCT, non-null
     distance_m  FLOAT                        nullable — null unless both atp and osm are present
     agreeing    LIST<UTF8>                   non-null, may be empty
     local_share FLOAT                        nullable — only for deletion candidates by brand
+    position    UTF8                         nullable — "google_camera_coords" if atp_geometry was corrected, see below
+    position_shift_deg FLOAT                 nullable — how far atp_geometry was moved east, in degrees
 
 importance    FLOAT                          non-null, 0.0 to 1.0
 ```
@@ -172,6 +174,18 @@ or school holidays are left out of the comparison.
 `match.evidence.local_share` is, for deletion candidates by
 brand, the share of OpenStreetMap features of that brand nearby that
 AllThePlaces matched; it is at least 0.5, or the row wouldn't be here.
+
+`match.evidence.position` is null when `atp_geometry` is where
+AllThePlaces put the feature, which is nearly always. It is
+`google_camera_coords` for a `same` row of a spider whose positions
+are often the camera center of a Google Maps URL, about 0.0022° of
+longitude west of the place, when the feature matched better at the
+corrected position. Then `atp_geometry` is the corrected position, and
+`match.evidence.distance_m` is measured from it.
+`match.evidence.position_shift_deg` says how far it was moved east, in
+degrees of longitude; subtract it to get the position AllThePlaces
+gave. See
+[`2026-11-16-google-camera-coords.md`](../notes/2026-11-16-google-camera-coords.md).
 
 ```sh
 duckdb -c "

@@ -24,6 +24,7 @@ use crate::places::{ParquetWriter, Place};
 use crate::tables::OsmFeatures;
 use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
+pub(super) mod camera;
 mod datum;
 mod fetch;
 pub(super) mod nondescript;
@@ -70,6 +71,8 @@ pub(super) fn brand_domains_path(workdir: &Path) -> PathBuf {
 /// Positions in mainland China are converted to WGS-84 for spiders
 /// that give them in GCJ-02 or BD-09, which `osm` tells apart; see
 /// [datum]. With no `osm`, as in some tests, they are left as given.
+/// With `osm`, it also counts, for each spider, how many features look
+/// like Google Maps camera centres; see [camera].
 ///
 /// An existing `alltheplaces.parquet` is reused unless the zip is there
 /// and newer than it (i.e. was fetched again after the parquet file was
@@ -379,6 +382,7 @@ fn process_geojson<T: Read>(
     // This spider's features in mainland China, held back until the
     // spider is read, so that we can find their datum.
     let mut in_china = Vec::new();
+    let mut camera = camera::Tally::default();
     for line in lines {
         let line = line?;
 
@@ -403,6 +407,9 @@ fn process_geojson<T: Read>(
         if osm.is_some() && datum::place_in_mainland_china(&place) {
             in_china.push(place);
             continue;
+        }
+        if let Some(osm) = osm {
+            camera.add(camera::probe(&place, osm)?);
         }
         if let Some(ref channel) = channel {
             channel.send(place)?;
@@ -431,10 +438,28 @@ fn process_geojson<T: Read>(
                 .collect();
         }
     }
+    if let Some(osm) = osm {
+        // After the conversion, so that positions in mainland China
+        // are probed in WGS-84 like all others.
+        for place in &in_china {
+            camera.add(camera::probe(place, osm)?);
+        }
+    }
+    camera.finish(&mut counts);
     if let Some(ref channel) = channel {
         for place in in_china {
             channel.send(place)?;
         }
+    }
+    if camera::is_google_camera_coords(&counts) {
+        log::info!(
+            spider = counts.spider.as_str(),
+            exact = counts.exact_coords_hits,
+            hits = counts.google_camera_coords_hits,
+            control = counts.google_camera_coords_control,
+            offset_deg = counts.google_camera_coords_offset;
+            "import_atp: positions look like Google Maps camera centres"
+        );
     }
     Ok(counts)
 }
