@@ -13,11 +13,14 @@ use super::run_stats::SpiderRunStats;
 /// Filename, within `workdir`, of the counts that `import_atp` writes.
 const FILENAME: &str = "alltheplaces.spider-counts.tsv";
 
-const HEADER: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum\tdataset_attributes";
+const HEADER: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum\tdataset_attributes\texact_coords_hits\tgoogle_camera_coords_hits\tgoogle_camera_coords_control\tgoogle_camera_coords_offset";
 
-/// The header before the file had `dataset_attributes`; [read] still
-/// reads such files, with no attributes, and [is_current] tells
-/// `import_atp` to count again where it can.
+/// The headers of earlier versions, before the file had the camera
+/// counts, and before it had `dataset_attributes`. [read] still reads
+/// such files, with what they lack as zero or empty, and [is_current]
+/// tells `import_atp` to count again where it can.
+const HEADER_7: &str =
+    "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum\tdataset_attributes";
 const OLD_HEADER: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum";
 
 /// Path of the counts that `import_atp` writes in `workdir`.
@@ -25,7 +28,7 @@ pub(in crate::pipeline) fn path(workdir: &Path) -> PathBuf {
     workdir.join(FILENAME)
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(in crate::pipeline) struct SpiderCounts {
     pub spider: String,
 
@@ -55,6 +58,25 @@ pub(in crate::pipeline) struct SpiderCounts {
     /// aren't JSON strings are kept as JSON text. Empty for a spider
     /// that crashed, since its file is empty.
     pub dataset_attributes: Vec<(String, String)>,
+
+    /// Features within a few meters of an OSM feature with the same
+    /// brand, operator or network Wikidata ID; see `atp::camera`.
+    pub exact_coords_hits: u64,
+
+    /// Features without such an OSM feature at their position, but
+    /// with one about 0.0022° of longitude east, where it is if the
+    /// position is a Google Maps camera centre; see `atp::camera`.
+    pub google_camera_coords_hits: u64,
+
+    /// The same as [Self::google_camera_coords_hits], but to the west,
+    /// where no copied position puts a feature: the control.
+    pub google_camera_coords_control: u64,
+
+    /// The median offset of the hits of
+    /// [Self::google_camera_coords_hits], in degrees of longitude: the
+    /// ATP position minus the OSM feature's, so negative. `conflate`
+    /// corrects by it. `None` without hits.
+    pub google_camera_coords_offset: Option<f64>,
 }
 
 impl SpiderCounts {
@@ -82,14 +104,20 @@ pub(super) fn write(counts: &mut [SpiderCounts], out: &Path) -> Result<()> {
             .collect();
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             c.spider,
             c.features,
             c.not_for_osm,
             c.invalid,
             c.in_china,
             c.datum,
-            serde_json::Value::Object(attrs)
+            serde_json::Value::Object(attrs),
+            c.exact_coords_hits,
+            c.google_camera_coords_hits,
+            c.google_camera_coords_control,
+            c.google_camera_coords_offset
+                .map(|o| format!("{o:.7}"))
+                .unwrap_or_default(),
         )?;
     }
     w.into_inner()?.sync_all()?;
@@ -102,7 +130,8 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
     let file = std::fs::File::open(path).with_context(|| format!("could not open {path:?}"))?;
     let mut lines = BufReader::new(file).lines();
     let num_cols = match lines.next().transpose()?.as_deref() {
-        Some(HEADER) => 7,
+        Some(HEADER) => 11,
+        Some(HEADER_7) => 7,
         Some(OLD_HEADER) => 6,
         _ => anyhow::bail!("{path:?} doesn't start with the expected header"),
     };
@@ -125,6 +154,7 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
             s.parse()
                 .with_context(|| format!("bad number in {path:?}: {line:?}"))
         };
+        let camera = |i: usize| -> Result<u64> { cols.get(i).map_or(Ok(0), |s| num(s)) };
         counts.push(SpiderCounts {
             spider: spider.to_string(),
             features: num(features)?,
@@ -133,13 +163,24 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
             in_china: num(in_china)?,
             datum: datum.to_string(),
             dataset_attributes,
+            exact_coords_hits: camera(7)?,
+            google_camera_coords_hits: camera(8)?,
+            google_camera_coords_control: camera(9)?,
+            google_camera_coords_offset: match cols.get(10) {
+                None | Some(&"") => None,
+                Some(s) => Some(
+                    s.parse()
+                        .with_context(|| format!("bad offset in {path:?}: {line:?}"))?,
+                ),
+            },
         });
     }
     Ok(counts)
 }
 
 /// Whether the counts at `path` were written by this version, with the
-/// dataset attributes, rather than by an earlier one.
+/// dataset attributes and the camera counts, rather than by an earlier
+/// one.
 pub(super) fn is_current(path: &Path) -> Result<bool> {
     let file = std::fs::File::open(path).with_context(|| format!("could not open {path:?}"))?;
     let first = BufReader::new(file).lines().next().transpose()?;
@@ -186,6 +227,9 @@ pub(super) struct Summary {
     pub invalid: u64,
     pub written: u64,
     pub converted: u64,
+    /// Spiders whose positions look like Google Maps camera centres;
+    /// see `atp::camera`.
+    pub google_camera_coords: u64,
     /// Spiders with a file, but no features in it.
     pub empty: u64,
     /// Spiders for which AllThePlaces reports errors.
@@ -216,6 +260,9 @@ pub(super) fn summarize(
         }
         if c.features == 0 {
             s.empty += 1;
+        }
+        if super::camera::is_google_camera_coords(c) {
+            s.google_camera_coords += 1;
         }
     }
     let Some(run_stats) = run_stats else {
@@ -253,6 +300,7 @@ pub(super) fn log_summary(s: &Summary, has_run_stats: bool) {
         invalid = s.invalid,
         written = s.written,
         converted_datum = s.converted,
+        google_camera_coords_spiders = s.google_camera_coords,
         empty_spiders = s.empty,
         has_run_stats = has_run_stats,
         spiders_with_errors = s.with_errors,
@@ -292,6 +340,10 @@ mod tests {
                     ("attribution:name".into(), "Zara\tSA\nLine 2".into()),
                     ("license".into(), "Creative Commons Zero".into()),
                 ],
+                exact_coords_hits: 3,
+                google_camera_coords_hits: 2,
+                google_camera_coords_control: 1,
+                google_camera_coords_offset: Some(-0.0022),
             },
             counts("crashed", 0),
         ];
@@ -311,6 +363,20 @@ mod tests {
         let c = read(&out)?;
         assert_eq!((c[0].features, c[0].datum.as_str()), (10, "gcj02"));
         assert!(c[0].dataset_attributes.is_empty());
+        assert!(!is_current(&out)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_header_without_camera_counts() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let out = path(dir.path());
+        std::fs::write(
+            &out,
+            format!("{HEADER_7}\nzara\t10\t0\t1\t4\tgcj02\t{{}}\n"),
+        )?;
+        let c = read(&out)?;
+        assert_eq!((c[0].features, c[0].google_camera_coords_hits), (10, 0));
         assert!(!is_current(&out)?);
         Ok(())
     }
