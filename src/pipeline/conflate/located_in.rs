@@ -96,6 +96,36 @@ const NAMED_HOST_CATEGORIES: &[&str] = &[
     "amenity=pharmacy",
 ];
 
+/// Main categories of OSM features that are never the host of an ATP
+/// feature, even when their `brand:wikidata` is its
+/// `located_in:wikidata`: the car parks, trolley bays, toilets and
+/// charging stations of a store, which OSM tags with the store's brand,
+/// and other businesses that hold no store, such as a car rental. A
+/// host found by name must be of a [NAMED_HOST_CATEGORIES] category
+/// anyway. In the planet run of 2026-11-15, a Pep&Co and a Timpson were
+/// `located_in` unnamed trolley bays, and a France Pare-Brise in an ADA
+/// car rental; see
+/// [brawer/osmdiffs#968](https://github.com/brawer/osmdiffs/issues/968).
+const NOT_HOST_CATEGORIES: &[&str] = &[
+    "amenity=atm",
+    "amenity=bicycle_parking",
+    "amenity=bicycle_rental",
+    "amenity=car_rental",
+    "amenity=car_sharing",
+    "amenity=charging_station",
+    "amenity=motorcycle_parking",
+    "amenity=parcel_locker",
+    "amenity=parking",
+    "amenity=parking_entrance",
+    "amenity=parking_space",
+    "amenity=recycling",
+    "amenity=toilets",
+    "amenity=trolley_bay",
+    "amenity=vending_machine",
+    "amenity=waste_basket",
+    "amenity=waste_disposal",
+];
+
 /// A department and its host must be at most this far apart. Spiders
 /// often give a department the position of the store's entrance, and
 /// the store its center, so large stores need more than a few meters.
@@ -162,8 +192,10 @@ impl Host {
         }
     }
 
-    /// Whether the OSM feature with `tags` is the host. A host found
-    /// by name, not by `located_in:wikidata`, must be a store of a
+    /// Whether the OSM feature with `tags` is the host. A host is never
+    /// of a [NOT_HOST_CATEGORIES] category, such as a trolley bay with
+    /// the store's `brand:wikidata`. A host found by name, not by
+    /// `located_in:wikidata`, must be a store of a
     /// [NAMED_HOST_CATEGORIES] category. It may have another
     /// `brand:wikidata`: ATP and OSM often disagree on the ID, such as
     /// for a Tesco Express (`Q98456772`) in which ATP has a Timpson
@@ -184,7 +216,11 @@ impl Host {
                     && brand_ids(tags).any(|id| brands.contains(&id))
             }
             Host::LocatedIn { ids, name, own } => {
-                if own.is_some() && main_category(tags.clone()) == *own {
+                let category = main_category(tags.clone());
+                if own.is_some() && category == *own {
+                    return false;
+                }
+                if category.as_deref().is_some_and(is_not_host_category) {
                     return false;
                 }
                 if brand_ids(tags.clone()).any(|id| ids.contains(&id)) {
@@ -193,7 +229,7 @@ impl Host {
                 let Some(name) = name else {
                     return false;
                 };
-                if !main_category(tags.clone()).is_some_and(|c| is_named_host_category(&c)) {
+                if !category.as_deref().is_some_and(is_named_host_category) {
                     return false;
                 }
                 tags.filter(|(k, _)| *k == "brand" || *k == "name")
@@ -227,14 +263,27 @@ impl Host {
 /// several `;`-separated values, such as `shop=supermarket;fuel`, is
 /// if any of its values is.
 fn is_named_host_category(category: &str) -> bool {
-    let Some((key, values)) = category.split_once('=') else {
-        return false;
-    };
-    values.split(';').any(|v| {
-        NAMED_HOST_CATEGORIES
-            .iter()
-            .any(|c| c.split_once('=') == Some((key, v.trim())))
-    })
+    category_values(category).any(|c| NAMED_HOST_CATEGORIES.contains(&c.as_str()))
+}
+
+/// Whether `category` is in [NOT_HOST_CATEGORIES]. A category with
+/// several `;`-separated values is only if all of its values are, so
+/// `amenity=parking;fuel` may still be a host.
+fn is_not_host_category(category: &str) -> bool {
+    let mut values = category_values(category).peekable();
+    values.peek().is_some() && values.all(|c| NOT_HOST_CATEGORIES.contains(&c.as_str()))
+}
+
+/// The `key=value` categories of a main category with one or more
+/// `;`-separated values, such as `shop=supermarket` and `shop=fuel` for
+/// `shop=supermarket;fuel`. None for a category without `=`.
+fn category_values(category: &str) -> impl Iterator<Item = String> + '_ {
+    let (key, values) = category.split_once('=').unwrap_or(("", ""));
+    values
+        .split(';')
+        .map(str::trim)
+        .filter(move |v| !key.is_empty() && !v.is_empty())
+        .map(move |v| format!("{key}={v}"))
 }
 
 /// Whether two normalized names are the same, or one is the other
@@ -514,15 +563,58 @@ mod tests {
         ]));
         assert!(!tesco.excludes([("amenity", "parking"), ("name", "Tesco")].into_iter()));
 
-        // A `located_in:wikidata` host may be of any category.
+        // A `located_in:wikidata` host may be of any category but a
+        // [NOT_HOST_CATEGORIES] one.
         let by_id = Host::LocatedIn {
             ids: vec![7],
             name: Some("tesco".into()),
             own: Some("shop=keys".into()),
         };
-        assert!(by_id.is_host([("amenity", "parking"), ("brand:wikidata", "Q7")].into_iter()));
+        assert!(by_id.is_host([("shop", "mall"), ("brand:wikidata", "Q7")].into_iter()));
+        assert!(by_id.is_host([("amenity", "hospital"), ("brand:wikidata", "Q7")].into_iter()));
+        assert!(!by_id.is_host([("amenity", "parking"), ("brand:wikidata", "Q7")].into_iter()));
         assert!(!by_id.is_host([("amenity", "parking"), ("name", "Tesco")].into_iter()));
         assert!(by_id.is_host([("shop", "supermarket"), ("name", "Tesco")].into_iter()));
+    }
+
+    #[test]
+    fn test_host_by_id_must_not_be_trolley_bay_or_car_rental() {
+        // https://github.com/brawer/osmdiffs/issues/968
+        let tesco = Host::LocatedIn {
+            ids: vec![487494],
+            name: Some("tesco".into()),
+            own: Some("shop=keys".into()),
+        };
+        let is_host = |tags: &[(&'static str, &'static str)]| tesco.is_host(tags.iter().copied());
+        assert!(!is_host(&[
+            ("amenity", "trolley_bay"),
+            ("brand:wikidata", "Q487494")
+        ]));
+        assert!(!is_host(&[
+            ("amenity", "car_rental"),
+            ("name", "Tesco"),
+            ("brand:wikidata", "Q487494")
+        ]));
+        assert!(!is_host(&[
+            ("amenity", "charging_station"),
+            ("brand:wikidata", "Q487494")
+        ]));
+        assert!(!is_host(&[
+            ("amenity", "toilets"),
+            ("brand:wikidata", "Q487494")
+        ]));
+        assert!(is_host(&[
+            ("amenity", "parking;fuel"),
+            ("brand:wikidata", "Q487494")
+        ]));
+        assert!(is_host(&[
+            ("shop", "supermarket"),
+            ("brand:wikidata", "Q487494")
+        ]));
+        assert!(
+            !tesco
+                .excludes([("amenity", "trolley_bay"), ("brand:wikidata", "Q487494")].into_iter())
+        );
     }
 
     #[test]
@@ -639,6 +731,19 @@ mod tests {
         assert!(!is_named_host_category("amenity=parking"));
         assert!(!is_named_host_category("amenity=supermarket"));
         assert!(!is_named_host_category("shop"));
+    }
+
+    #[test]
+    fn test_not_host_categories() {
+        for c in NOT_HOST_CATEGORIES {
+            assert!(!NAMED_HOST_CATEGORIES.contains(c), "{c}");
+            assert!(is_not_host_category(c), "{c}");
+        }
+        assert!(is_not_host_category("amenity=parking;toilets"));
+        assert!(!is_not_host_category("amenity=parking;fuel"));
+        assert!(!is_not_host_category("shop=supermarket"));
+        assert!(!is_not_host_category("amenity"));
+        assert!(!is_not_host_category("amenity="));
     }
 
     #[test]
