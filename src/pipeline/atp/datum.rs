@@ -12,6 +12,7 @@
 //! See `docs/notes/2026-11-09-china-datum.md`.
 
 use crate::matchers::{MatchMask, OsmCandidate, meters_to_chord_angle, parse_wikidata_ids};
+use crate::pipeline::wikidata_ids::WIKIDATA_KEYS;
 use crate::places::Place;
 use crate::tables::OsmFeatures;
 use crate::utils::countries::{Country, country};
@@ -66,8 +67,9 @@ const MIN_RATIO: usize = 3;
 
 /// The datum of `places`, all from one spider and in mainland China
 /// (see [in_mainland_china]), found by voting: for each feature with
-/// `brand:wikidata`, which datums put it within [HIT_METERS] of an
-/// OSM feature of that brand. Also returns the votes, as hits for
+/// `brand:wikidata`, `operator:wikidata` or `network:wikidata`, which
+/// datums put it within [HIT_METERS] of an OSM feature with one of the
+/// same IDs, under any of these keys. Also returns the votes, as hits for
 /// WGS-84, GCJ-02 and BD-09.
 pub(super) fn detect(places: &[Place], osm: &OsmFeatures) -> Result<(Datum, [usize; 3])> {
     let votes: Vec<[bool; 3]> = places
@@ -131,7 +133,7 @@ fn has_brand_nearby(
             };
             let mut ids = candidate
                 .tags()
-                .filter(|(k, _)| *k == "brand:wikidata")
+                .filter(|(k, _)| WIKIDATA_KEYS.contains(k))
                 .flat_map(|(_, v)| parse_wikidata_ids(v));
             if ids.any(|id| brands.contains(&id)) {
                 return Ok(true);
@@ -145,7 +147,7 @@ fn brand_ids(place: &Place) -> impl Iterator<Item = u64> + '_ {
     place
         .tags
         .iter()
-        .filter(|(k, _)| k == "brand:wikidata")
+        .filter(|(k, _)| WIKIDATA_KEYS.contains(&k.as_str()))
         .flat_map(|(_, v)| parse_wikidata_ids(v))
 }
 
@@ -284,5 +286,36 @@ mod tests {
         assert!(!in_mainland_china(114.1694, 22.3193)); // Hong Kong
         assert!(!in_mainland_china(121.5654, 25.0330)); // Taipei
         assert!(!in_mainland_china(139.7671, 35.6812)); // Tokyo
+    }
+
+    #[test]
+    fn test_brand_ids() {
+        let mut mask = MatchMask::default();
+        mask.add_tag("shop", "coffee");
+        let shape = geo::Geometry::from(geo::Point::new(121.4737, 31.2304));
+        let place = Place::new(
+            &geo::Coord {
+                x: 121.4737,
+                y: 31.2304,
+            },
+            "test".into(),
+            mask,
+            [
+                ("brand:wikidata", "Q37158"),
+                ("operator:wikidata", "Q1;Q2"),
+                ("network:wikidata", "Q3"),
+                ("wikidata", "Q4"),
+                ("species:wikidata", "Q5"),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+            &shape,
+            crate::utils::UtcTimestamp(time::UtcDateTime::from_unix_timestamp(0).unwrap()),
+        )
+        .unwrap();
+        let mut ids: Vec<u64> = brand_ids(&place).collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3, 37158]);
     }
 }
