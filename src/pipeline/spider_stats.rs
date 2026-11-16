@@ -193,8 +193,14 @@ struct Spider {
     tags: Vec<[u64; 4]>,
     opening_hours: HashMap<String, u64>,
     osm_refs: HashMap<u64, u64>,
+    /// Like `osm_refs` and `positions`, but per [kind]: features of
+    /// different kinds or brands at one spot, such as a car dealer's
+    /// sales and service, or Renault and Dacia at one dealer, are what
+    /// OpenStreetMap expects; see brawer/osmdiffs#975.
+    osm_refs_same_kind: HashMap<(u64, u64), u64>,
     offsets: Vec<(f32, f32)>,
     positions: HashMap<u64, u64>,
+    positions_same_kind: HashMap<(u64, u64), u64>,
     locations: Vec<(f64, f64)>,
     /// By country and Wikidata ID; 0 for features without one.
     brands: HashMap<(Option<Country>, u64), Brand>,
@@ -236,14 +242,17 @@ impl Spider {
         if let Some(oh) = row.opening_hours {
             *self.opening_hours.entry(oh).or_default() += 1;
         }
+        let kind = kind(row.category.as_deref(), &row.wikidata);
         if let Some(r) = row.osm_ref {
             *self.osm_refs.entry(r).or_default() += 1;
+            *self.osm_refs_same_kind.entry((r, kind)).or_default() += 1;
         }
         if let Some(offset) = row.offset {
             self.offsets.push(offset);
         }
         if let Some(p) = row.position {
             *self.positions.entry(p).or_default() += 1;
+            *self.positions_same_kind.entry((p, kind)).or_default() += 1;
         }
         if let Some(l) = row.location {
             self.locations.push(l);
@@ -288,13 +297,49 @@ impl Spider {
         self.positions.values().filter(|&&n| n > 1).sum()
     }
 
+    /// Like [Spider::shared_osm_features], but only among features of
+    /// the same [kind].
+    fn shared_osm_features_same_kind(&self) -> u64 {
+        self.osm_refs_same_kind.values().filter(|&&n| n > 1).sum()
+    }
+
+    /// Like [Spider::shared_positions], but only among features of the
+    /// same [kind].
+    fn shared_positions_same_kind(&self) -> u64 {
+        self.positions_same_kind.values().filter(|&&n| n > 1).sum()
+    }
+
+    /// The most common `opening_hours` of the ATP features, or `None`
+    /// if none have any. Of several equally common values, the
+    /// smallest, so that the result doesn't depend on hashing.
+    fn opening_hours_top(&self) -> Option<(&str, u64)> {
+        self.opening_hours
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+            .map(|(v, n)| (v.as_str(), *n))
+    }
+
     /// The share of ATP features with `opening_hours` that have the
     /// most common value, or `None` if none have any.
     fn opening_hours_top_share(&self) -> Option<f32> {
         let total: u64 = self.opening_hours.values().sum();
-        let top = self.opening_hours.values().max()?;
-        Some(*top as f32 / total as f32)
+        let (_, top) = self.opening_hours_top()?;
+        Some(top as f32 / total as f32)
     }
+}
+
+/// A hash of what kind of feature this is: its main category, such as
+/// `shop=car`, and its brand, operator and network Wikidata IDs, so
+/// that features at one spot count as stacked only if they are the same
+/// kind of thing of the same brand.
+fn kind(category: Option<&str>, wikidata: &[u64]) -> u64 {
+    let mut ids = wikidata.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut hasher = std::hash::DefaultHasher::new();
+    category.hash(&mut hasher);
+    ids.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The median of the east and north components of `offsets`, each
@@ -746,6 +791,8 @@ pub(super) fn schema() -> Schema {
         u64_field("same_google_camera_coords"),
         u64_field("shared_osm_features"),
         u64_field("shared_positions"),
+        u64_field("shared_osm_features_same_kind"),
+        u64_field("shared_positions_same_kind"),
         Field::new("offset_east_m", DataType::Float32, true),
         Field::new("offset_north_m", DataType::Float32, true),
         bbox_field(),
@@ -757,6 +804,7 @@ pub(super) fn schema() -> Schema {
         u64_field("chance_sampled"),
         u64_field("chance_matched"),
         Field::new("opening_hours_top_share", DataType::Float32, true),
+        Field::new("opening_hours_top_value", DataType::Utf8, true),
         Field::new("rules", list_of(rule_fields()), false),
         Field::new("tags", list_of(tag_fields()), false),
         Field::new("brands", list_of(brand_fields()), false),
@@ -822,6 +870,8 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
     let mut missing_in_osm = UInt64Builder::new();
     let mut shared = UInt64Builder::new();
     let mut shared_positions = UInt64Builder::new();
+    let mut shared_same_kind = UInt64Builder::new();
+    let mut shared_positions_same_kind = UInt64Builder::new();
     let mut offset_east = Float32Builder::new();
     let mut offset_north = Float32Builder::new();
     let DataType::Struct(bbox_fields) = bbox_field().data_type().clone() else {
@@ -843,6 +893,7 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
     let mut chance_sampled = UInt64Builder::new();
     let mut chance_matched = UInt64Builder::new();
     let mut oh_share = Float32Builder::new();
+    let mut oh_value = StringBuilder::new();
     let struct_list = |fields: Fields| {
         ListBuilder::new(StructBuilder::from_fields(fields.clone(), 0)).with_field(Arc::new(
             Field::new("item", DataType::Struct(fields), false),
@@ -893,6 +944,8 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         same_camera.append_value(s.same_camera_corrected);
         shared.append_value(s.shared_osm_features());
         shared_positions.append_value(s.shared_positions());
+        shared_same_kind.append_value(s.shared_osm_features_same_kind());
+        shared_positions_same_kind.append_value(s.shared_positions_same_kind());
         let offset = median_offset(&s.offsets);
         offset_east.append_option(offset.map(|o| o.0));
         offset_north.append_option(offset.map(|o| o.1));
@@ -916,6 +969,7 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         chance_sampled.append_value(d.chance_sampled);
         chance_matched.append_value(d.chance_matched);
         oh_share.append_option(s.opening_hours_top_share());
+        oh_value.append_option(s.opening_hours_top().map(|(v, _)| v));
 
         let mut rule_counts: Vec<(&String, &u64)> = s.rules.iter().collect();
         rule_counts.sort();
@@ -1035,6 +1089,8 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         Arc::new(same_camera.finish()),
         Arc::new(shared.finish()),
         Arc::new(shared_positions.finish()),
+        Arc::new(shared_same_kind.finish()),
+        Arc::new(shared_positions_same_kind.finish()),
         Arc::new(offset_east.finish()),
         Arc::new(offset_north.finish()),
         Arc::new(bbox.finish()),
@@ -1046,6 +1102,7 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         Arc::new(chance_sampled.finish()),
         Arc::new(chance_matched.finish()),
         Arc::new(oh_share.finish()),
+        Arc::new(oh_value.finish()),
         Arc::new(rules.finish()),
         Arc::new(tags.finish()),
         Arc::new(brands.finish()),
@@ -1104,6 +1161,54 @@ mod tests {
         assert_eq!(s.brands[&(ch, 379911)].same, 4);
         assert_eq!(s.brands[&(None, 0)].missing_in_osm, 1);
         assert_eq!(Spider::default().opening_hours_top_share(), None);
+        // Four features at positions 1, 2, 3, 3 all of one kind and
+        // brand: the two at 3 stack.
+        assert_eq!(s.shared_osm_features_same_kind(), 2);
+        assert_eq!(s.shared_positions_same_kind(), 2);
+        assert_eq!(s.opening_hours_top(), Some(("Mo-Sa 08:00-20:00", 4)));
+        assert_eq!(Spider::default().opening_hours_top(), None);
+    }
+
+    #[test]
+    fn test_spider_same_kind() {
+        // A car dealer: sales and service of Renault, sales of Dacia,
+        // all at one point and matching one OSM feature. Only a second
+        // Renault sales feature there stacks.
+        let mut s = Spider::default();
+        let renault = 6686;
+        let dacia = 27460;
+        for (category, brand) in [
+            ("shop=car", renault),
+            ("shop=car_repair", renault),
+            ("shop=car", dacia),
+            ("shop=car", renault),
+        ] {
+            s.add(RowInfo {
+                category: Some(category.into()),
+                wikidata: vec![brand],
+                ..same("renault", 3.0, 7)
+            });
+        }
+        assert_eq!(s.shared_positions(), 4);
+        assert_eq!(s.shared_osm_features(), 4);
+        assert_eq!(s.shared_positions_same_kind(), 2);
+        assert_eq!(s.shared_osm_features_same_kind(), 2);
+        // The order of Wikidata IDs doesn't matter.
+        assert_eq!(
+            kind(Some("shop=car"), &[1, 2]),
+            kind(Some("shop=car"), &[2, 1])
+        );
+        assert_ne!(kind(Some("shop=car"), &[1]), kind(None, &[1]));
+    }
+
+    #[test]
+    fn test_opening_hours_top_tie() {
+        let mut s = Spider::default();
+        for oh in ["Mo-Fr 08:00-17:00", "24/7", "24/7", "Mo-Fr 08:00-17:00"] {
+            *s.opening_hours.entry(oh.into()).or_default() += 1;
+        }
+        assert_eq!(s.opening_hours_top(), Some(("24/7", 2)));
+        assert_eq!(s.opening_hours_top_share(), Some(0.5));
     }
 
     #[test]
@@ -1246,6 +1351,17 @@ mod tests {
         assert!(u64s("no_matcher").is_null(1));
         assert!(u64s("atp_features").is_null(0));
         assert_eq!(u64s("missing_taken").value(1), 0);
+        assert_eq!(u64s("shared_positions_same_kind").value(0), 0);
+        assert_eq!(u64s("shared_osm_features_same_kind").value(1), 0);
+        let oh = batch
+            .column_by_name("opening_hours_top_value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .clone();
+        assert_eq!(oh.value(0), "Mo-Sa 08:00-20:00");
+        assert!(oh.is_null(1));
 
         let attributes = get_tags(&batch, "dataset_attributes", 0)?;
         assert_eq!(attributes, counts.dataset_attributes);

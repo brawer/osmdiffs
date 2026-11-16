@@ -54,6 +54,8 @@ missing_in_osm           UINT64   non-null — rows with match.relation = "missi
 same_google_camera_coords UINT64  non-null — same rows matched at the corrected position
 shared_osm_features      UINT64   non-null — same rows whose OSM feature another feature of the spider also matched
 shared_positions         UINT64   non-null — features at the same position as another feature of the spider
+shared_osm_features_same_kind UINT64 non-null — shared_osm_features, only among features of the same kind and brand
+shared_positions_same_kind UINT64 non-null — shared_positions, only among features of the same kind and brand
 offset_east_m            FLOAT    nullable — median of how far same rows lie east of their OSM feature
 offset_north_m           FLOAT    nullable — ... and north
 bbox                     STRUCT   nullable — where the spider's features are, see below
@@ -69,6 +71,7 @@ rejected_distance_m      LIST<UINT64> non-null — histogram of the distance to 
 chance_sampled           UINT64   non-null — features moved 2 km to find chance pairs
 chance_matched           UINT64   non-null — ... and how many of them still matched
 opening_hours_top_share  FLOAT    nullable — share of features with the most common opening_hours
+opening_hours_top_value  UTF8     nullable — ... and that value
 rules                    LIST<STRUCT> non-null
   rule                   UTF8     non-null — match.evidence.rule
   rows                   UINT64   non-null
@@ -187,6 +190,19 @@ position as another one of its features. Some are right, such as the
 departments of one store, but many hint at a spider that puts features
 it can't place at a default position.
 
+Car dealers and banks make both counts high without anything being
+wrong: a dealer lists sales, service and parts, and often several
+brands such as Renault and Dacia, as separate features at one point
+that all match one OpenStreetMap feature; a bank lists its branch and
+its ATM. So `shared_osm_features_same_kind` and
+`shared_positions_same_kind` count the same, but only among features
+of the same kind: the same main category, such as `shop=car` (the
+first of `shop`, `amenity`, `tourism`, `leisure`, `healthcare`, `craft`
+and `office` that the feature has), and the same brand, operator and
+network Wikidata IDs. A spider that puts features it can't place at a
+default position still shows there, since those features are of one
+kind. Files from before brawer/osmdiffs#975 lack these columns.
+
 `offset_east_m` and `offset_north_m` are the medians of how far the
 AllThePlaces feature of a `same` row lies east and north of its
 OpenStreetMap feature, from centroid to centroid, in meters (negative
@@ -213,7 +229,12 @@ of a brand is the same, for the brand's features in that country.
 `opening_hours_top_share` is the share of the spider's features with
 `opening_hours` that have its most common value. Near 1 for a large
 spider, it suggests that the spider writes the same hours everywhere,
-such as those of its head office.
+such as those of its head office. `opening_hours_top_value` is that
+value, as the spider wrote it, so that a reader can tell a chain of
+stores that really are all open around the clock (`24/7`, but also
+`Mo-Su 00:00-24:00`) from one that writes `Mo-Fr 08:00-17:00`
+everywhere. Of several equally common values, it is the smallest. Files
+from before brawer/osmdiffs#975 lack it.
 
 ### Why features are missing
 
