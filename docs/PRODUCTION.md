@@ -197,7 +197,10 @@ file-backed/page-cache memory, not heap growth, exactly as designed. Ended
 up not needed here, but worth knowing before assuming a scary-looking
 warning means real trouble: it doesn't distinguish the two, so check
 `rss_anon_bytes` vs `rss_bytes`/`cgroup_current_bytes` before reacting to
-it.
+it. (Since then the warning leaves out reclaimable page cache --
+`cgroup_file_bytes` minus `cgroup_shmem_bytes`, from `memory.stat` -- so it
+should only fire when the memory an OOM-kill depends on gets close to the
+limit.)
 
 **`render_conflated_detail`** (zoom 13-16 vector tiles via `tippecanoe`,
 ~83 minutes on this run) and **`join_conflated_tiles`** are not swept or

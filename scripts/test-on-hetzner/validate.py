@@ -424,11 +424,14 @@ def check_cgroup_warnings(records):
     # The 85%-of-limit WARN log_snapshot self-logs (CGROUP_WARN_THRESHOLD
     # in src/pipeline/mod.rs) -- an early signal ahead of an actual
     # OOM-kill, worth surfacing even on a run that never hit one.
+    # Since the warning leaves out reclaimable page cache, it carries
+    # cgroup_unreclaimable_fraction; older logs only cgroup_usage_fraction.
     hits = [r for r in records if r.get("level") == "WARN" and "cgroup_usage_fraction" in r.get("fields", {})]
     if not hits:
         return CheckResult("cgroup 85% warnings", True, "none logged")
     lines = [
-        f"{r['fields'].get('step')}/{r['fields'].get('phase')}={r['fields']['cgroup_usage_fraction']:.0%}"
+        f"{r['fields'].get('step')}/{r['fields'].get('phase')}="
+        f"{r['fields'].get('cgroup_unreclaimable_fraction', r['fields']['cgroup_usage_fraction']):.0%}"
         for r in hits
     ]
     return CheckResult("cgroup 85% warnings", True, f"{len(hits)} logged: {', '.join(lines)}")

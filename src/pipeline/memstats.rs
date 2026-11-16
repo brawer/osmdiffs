@@ -110,6 +110,18 @@ pub struct MemStats {
     /// kernels.
     pub cgroup_peak_bytes: Option<u64>,
 
+    /// Page cache charged to this cgroup, in bytes: `file` in
+    /// `memory.stat`, which also counts `cgroup_shmem_bytes`. Apart from
+    /// that shmem part, the kernel can drop these pages under pressure
+    /// instead of OOM-killing, so they don't bring an OOM-kill closer.
+    /// cgroup v2, Linux only.
+    pub cgroup_file_bytes: Option<u64>,
+
+    /// The part of `cgroup_file_bytes` that is tmpfs or shared memory
+    /// (`shmem` in `memory.stat`), which can't be dropped and so counts
+    /// against the limit like anonymous memory. cgroup v2, Linux only.
+    pub cgroup_shmem_bytes: Option<u64>,
+
     /// Peak resident set size of this process's *terminated, reaped*
     /// children, in bytes -- macOS only (`getrusage(RUSAGE_CHILDREN)`).
     /// Exists because `rss_peak_bytes` above is `RUSAGE_SELF`, which
@@ -136,6 +148,24 @@ impl MemStats {
         let max = self.cgroup_max_bytes?;
         (max > 0).then(|| current as f64 / max as f64)
     }
+
+    /// Like [`MemStats::cgroup_usage_fraction`], but leaving out the
+    /// page cache that the kernel can reclaim (`cgroup_file_bytes` minus
+    /// `cgroup_shmem_bytes`). This is the part of the usage that an
+    /// OOM-kill depends on: the pipeline's mmap'd tables and downloads
+    /// keep `memory.current` at the limit by design (see the module
+    /// docs), so [`MemStats::cgroup_usage_fraction`] alone reads close
+    /// to 1.0 for most of a healthy run. Without `cgroup_file_bytes`
+    /// (e.g. no `memory.stat`), falls back to the whole usage, which can
+    /// only overstate the risk.
+    pub fn cgroup_unreclaimable_fraction(&self) -> Option<f64> {
+        let current = self.cgroup_current_bytes?;
+        let max = self.cgroup_max_bytes?;
+        let reclaimable = self.cgroup_file_bytes.map_or(0, |file| {
+            file.saturating_sub(self.cgroup_shmem_bytes.unwrap_or(0))
+        });
+        (max > 0).then(|| current.saturating_sub(reclaimable) as f64 / max as f64)
+    }
 }
 
 impl std::fmt::Display for MemStats {
@@ -143,7 +173,7 @@ impl std::fmt::Display for MemStats {
     /// that are `None` -- meant to be interpolated straight into a
     /// `log::info!` message, e.g. `"step start: {name} {snapshot}"`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let fields: [(&str, Option<u64>); 9] = [
+        let fields: [(&str, Option<u64>); 11] = [
             ("rss_bytes", self.rss_bytes),
             ("rss_peak_bytes", self.rss_peak_bytes),
             ("rss_anon_bytes", self.rss_anon_bytes),
@@ -152,6 +182,8 @@ impl std::fmt::Display for MemStats {
             ("cgroup_current_bytes", self.cgroup_current_bytes),
             ("cgroup_max_bytes", self.cgroup_max_bytes),
             ("cgroup_peak_bytes", self.cgroup_peak_bytes),
+            ("cgroup_file_bytes", self.cgroup_file_bytes),
+            ("cgroup_shmem_bytes", self.cgroup_shmem_bytes),
             ("children_rss_peak_bytes", self.children_rss_peak_bytes),
         ];
         let mut first = true;
@@ -199,7 +231,25 @@ mod linux {
         stats.cgroup_current_bytes = read_cgroup_bytes("memory.current");
         stats.cgroup_max_bytes = read_cgroup_bytes("memory.max");
         stats.cgroup_peak_bytes = read_cgroup_bytes("memory.peak");
+        if let Ok(content) = fs::read_to_string(format!("{CGROUP_DIR}/memory.stat")) {
+            stats.cgroup_file_bytes = parse_memory_stat(&content, "file");
+            stats.cgroup_shmem_bytes = parse_memory_stat(&content, "shmem");
+        }
         stats
+    }
+
+    /// Reads one entry, such as `file`, from the content of a cgroup v2
+    /// `memory.stat` file, whose lines look like `file 123456789` with
+    /// the value in bytes.
+    fn parse_memory_stat(content: &str, key: &str) -> Option<u64> {
+        content.lines().find_map(|line| {
+            let (k, v) = line.split_once(' ')?;
+            if k == key {
+                v.trim().parse().ok()
+            } else {
+                None
+            }
+        })
     }
 
     /// Parses the fields we care about out of the content of
@@ -293,6 +343,21 @@ Threads:\t8
             assert_eq!(parse_kb_value("12345"), None);
             assert_eq!(parse_kb_value("kB"), None);
             assert_eq!(parse_kb_value(""), None);
+        }
+
+        #[test]
+        fn test_parse_memory_stat() {
+            let content = "anon 22806528\nfile 8455716864\nkernel 61440000\nshmem 4096\nfile_mapped 7700000000\n";
+            assert_eq!(parse_memory_stat(content, "file"), Some(8_455_716_864));
+            assert_eq!(parse_memory_stat(content, "shmem"), Some(4096));
+            assert_eq!(parse_memory_stat(content, "anon"), Some(22_806_528));
+            // `file` must not match `file_mapped`, nor the other way round.
+            assert_eq!(
+                parse_memory_stat(content, "file_mapped"),
+                Some(7_700_000_000)
+            );
+            assert_eq!(parse_memory_stat(content, "no_such_key"), None);
+            assert_eq!(parse_memory_stat("file not-a-number\n", "file"), None);
         }
 
         #[test]
@@ -430,6 +495,57 @@ mod tests {
             ..MemStats::default()
         };
         assert_eq!(max_only.cgroup_usage_fraction(), None);
+    }
+
+    #[test]
+    fn test_cgroup_unreclaimable_fraction_leaves_out_page_cache() {
+        // Production 2026-11-15: at the 8 GiB limit, nearly all of it
+        // reclaimable page cache.
+        let stats = MemStats {
+            cgroup_current_bytes: Some(8_000),
+            cgroup_max_bytes: Some(8_000),
+            cgroup_file_bytes: Some(7_800),
+            cgroup_shmem_bytes: Some(0),
+            ..MemStats::default()
+        };
+        assert_eq!(stats.cgroup_usage_fraction(), Some(1.0));
+        assert_eq!(stats.cgroup_unreclaimable_fraction(), Some(0.025));
+    }
+
+    #[test]
+    fn test_cgroup_unreclaimable_fraction_counts_shmem() {
+        // A workdir on tmpfs: its "file" pages are shmem and can't be
+        // dropped.
+        let stats = MemStats {
+            cgroup_current_bytes: Some(90),
+            cgroup_max_bytes: Some(100),
+            cgroup_file_bytes: Some(80),
+            cgroup_shmem_bytes: Some(80),
+            ..MemStats::default()
+        };
+        assert_eq!(stats.cgroup_unreclaimable_fraction(), Some(0.9));
+    }
+
+    #[test]
+    fn test_cgroup_unreclaimable_fraction_without_memory_stat() {
+        let stats = MemStats {
+            cgroup_current_bytes: Some(90),
+            cgroup_max_bytes: Some(100),
+            ..MemStats::default()
+        };
+        assert_eq!(stats.cgroup_unreclaimable_fraction(), Some(0.9));
+        assert_eq!(MemStats::default().cgroup_unreclaimable_fraction(), None);
+    }
+
+    #[test]
+    fn test_cgroup_unreclaimable_fraction_zero_limit() {
+        let stats = MemStats {
+            cgroup_current_bytes: Some(0),
+            cgroup_max_bytes: Some(0),
+            cgroup_file_bytes: Some(0),
+            ..MemStats::default()
+        };
+        assert_eq!(stats.cgroup_unreclaimable_fraction(), None);
     }
 
     #[test]

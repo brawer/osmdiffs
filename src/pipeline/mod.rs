@@ -506,11 +506,13 @@ impl Drop for StepLog<'_> {
     }
 }
 
-/// Above this fraction of the cgroup memory limit, [`log_snapshot`] logs
-/// a warning in addition to its usual info-level snapshot -- an early
-/// signal ahead of an actual OOM-kill, which the kernel triggers once
-/// usage reaches 1.0. 85% leaves a little margin for noise while still
-/// catching a real problem before it turns into a kill.
+/// Above this fraction of the cgroup memory limit, not counting page
+/// cache the kernel can reclaim ([`memstats::MemStats::cgroup_unreclaimable_fraction`]),
+/// [`log_snapshot`] logs a warning in addition to its usual info-level
+/// snapshot -- an early signal ahead of an actual OOM-kill. 85% leaves a
+/// little margin for noise while still catching a real problem before
+/// it turns into a kill. The whole usage, page cache included, sits at
+/// the limit for most of a healthy run, so it would warn all the time.
 const CGROUP_WARN_THRESHOLD: f64 = 0.85;
 
 /// Logs one [`memstats`] snapshot for a pipeline step, as
@@ -534,20 +536,25 @@ fn log_snapshot(name: &str, phase: &str, elapsed_seconds: Option<f64>) {
         cgroup_current_bytes = stats.cgroup_current_bytes,
         cgroup_max_bytes = stats.cgroup_max_bytes,
         cgroup_peak_bytes = stats.cgroup_peak_bytes,
+        cgroup_file_bytes = stats.cgroup_file_bytes,
+        cgroup_shmem_bytes = stats.cgroup_shmem_bytes,
         children_rss_peak_bytes = stats.children_rss_peak_bytes;
         "{name}: {phase}"
     );
-    if let Some(fraction) = stats.cgroup_usage_fraction()
+    if let Some(fraction) = stats.cgroup_unreclaimable_fraction()
         && fraction >= CGROUP_WARN_THRESHOLD
     {
         log::warn!(
             step = name,
             phase = phase,
-            cgroup_usage_fraction = fraction,
+            cgroup_unreclaimable_fraction = fraction,
+            cgroup_usage_fraction = stats.cgroup_usage_fraction(),
             cgroup_current_bytes = stats.cgroup_current_bytes,
+            cgroup_file_bytes = stats.cgroup_file_bytes,
+            cgroup_shmem_bytes = stats.cgroup_shmem_bytes,
             cgroup_max_bytes = stats.cgroup_max_bytes;
-            "{name}: {phase}: memory usage at {:.0}% of the cgroup limit \
-             -- at risk of being OOM-killed",
+            "{name}: {phase}: memory usage, not counting reclaimable page \
+             cache, at {:.0}% of the cgroup limit -- at risk of being OOM-killed",
             fraction * 100.0,
         );
     }
