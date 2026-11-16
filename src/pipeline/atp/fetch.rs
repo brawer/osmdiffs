@@ -232,6 +232,7 @@ async fn fetch_latest_run(client: &Client, history_url: &str) -> Result<AtpMetad
         .ok_or_else(|| anyhow!("{} did not return a JSON array", history_url))?;
 
     let mut rejected: Vec<String> = Vec::new();
+    let mut rejected_starts: Vec<Option<UtcDateTime>> = Vec::new();
     let mut newest: Option<AtpMetadata> = None;
     for entry in entries {
         match parse_run(entry, history_url) {
@@ -245,9 +246,36 @@ async fn fetch_latest_run(client: &Client, history_url: &str) -> Result<AtpMetad
                 }
             }
             Err(reason) => {
-                log::warn!("Skipping AllThePlaces run entry: {reason}");
-                rejected.push(reason.to_string());
+                let run_id = entry.get("run_id").and_then(|v| v.as_str()).unwrap_or("?");
+                log::debug!("Skipping AllThePlaces run entry {run_id}: {reason}");
+                rejected.push(format!("{run_id}: {reason}"));
+                rejected_starts.push(entry_start_time(entry));
             }
+        }
+    }
+
+    // history.json keeps every run since 2021, and hundreds of the old
+    // ones lack fields this parser needs, so a warning for each would
+    // bury the log in noise. Only a rejected run newer than the one we
+    // use says something about this week's data.
+    if let Some(used) = &newest {
+        let mut older = 0;
+        for (reason, start) in rejected.iter().zip(&rejected_starts) {
+            if is_newer_than(*start, used.start_time) {
+                log::warn!(
+                    "Skipping AllThePlaces run entry {reason}, which is newer than the run \
+                     used ({})",
+                    used.run_id
+                );
+            } else {
+                older += 1;
+            }
+        }
+        if older > 0 {
+            log::info!(
+                "Skipped {older} older AllThePlaces run entries in {history_url} \
+                 (details at debug level)"
+            );
         }
     }
 
@@ -279,6 +307,19 @@ async fn fetch_latest_run(client: &Client, history_url: &str) -> Result<AtpMetad
             rejected.join("; ")
         }
     ))
+}
+
+/// The `start_time` of a `history.json` entry, if it has a valid one.
+fn entry_start_time(entry: &serde_json::Value) -> Option<UtcDateTime> {
+    let s = entry.get("start_time")?.as_str()?;
+    UtcDateTime::parse(s, &Rfc3339).ok()
+}
+
+/// Whether a rejected entry that started at `rejected_start` is newer
+/// than the run in use, which started at `used_start`. An entry without
+/// a valid `start_time` counts as newer, since nothing says it isn't.
+fn is_newer_than(rejected_start: Option<UtcDateTime>, used_start: UtcDateTime) -> bool {
+    rejected_start.is_none_or(|start| start > used_start)
 }
 
 /// Parses and sanity-checks a single `history.json` entry. Returns an
@@ -718,6 +759,31 @@ mod tests {
         let client = test_client(&server);
         let err = fetch_latest_run(&client, &server.url()).await.unwrap_err();
         assert!(err.to_string().contains("missing 'run_id'"));
+    }
+
+    #[test]
+    fn test_is_newer_than() {
+        let used = UtcDateTime::parse("2026-10-31T13:32:34Z", &Rfc3339).unwrap();
+        let older = UtcDateTime::parse("2021-06-01T00:00:00Z", &Rfc3339).unwrap();
+        let newer = UtcDateTime::parse("2026-11-07T13:32:34Z", &Rfc3339).unwrap();
+        assert!(!is_newer_than(Some(older), used));
+        assert!(!is_newer_than(Some(used), used));
+        assert!(is_newer_than(Some(newer), used));
+        assert!(is_newer_than(None, used));
+    }
+
+    #[test]
+    fn test_entry_start_time() {
+        let entry = serde_json::json!({"start_time": "2026-10-31T13:32:34Z"});
+        assert_eq!(
+            entry_start_time(&entry),
+            Some(UtcDateTime::parse("2026-10-31T13:32:34Z", &Rfc3339).unwrap())
+        );
+        assert_eq!(entry_start_time(&serde_json::json!({})), None);
+        assert_eq!(
+            entry_start_time(&serde_json::json!({"start_time": "yesterday"})),
+            None
+        );
     }
 
     #[tokio::test]
