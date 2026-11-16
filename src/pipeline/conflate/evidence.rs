@@ -37,12 +37,18 @@ pub(super) fn distance_meters(atp: &Geometry, osm: &Geometry) -> Option<f64> {
 /// any of them does. Phone numbers, emails and websites are compared as
 /// the matchers compare them ([AtpContacts]), so `+41 44 123 45 67`
 /// and `044 123 45 67` agree in Switzerland; `atp_position` gives the
-/// country for numbers in national format.
+/// country for numbers in national format. Postcodes are compared as
+/// [postcode] normalizes them, and a house number at the start or end
+/// of `addr:street` counts as `addr:housenumber` ([split_address]).
 pub(super) fn agreeing<'a>(
     atp: impl Iterator<Item = (&'a str, &'a str)> + Clone,
     osm: impl Iterator<Item = (&'a str, &'a str)> + Clone,
     atp_position: Option<(f64, f64)>,
 ) -> Vec<String> {
+    let atp = split_address(atp);
+    let osm = split_address(osm);
+    let atp = atp.iter().copied();
+    let osm = osm.iter().copied();
     AGREEING
         .iter()
         .filter(|(_, check)| match check {
@@ -109,7 +115,7 @@ const AGREEING: &[(&str, Check)] = &[
     ),
     ("addr:street", Check::Text(&["addr:street"], text)),
     ("addr:housenumber", Check::Text(&["addr:housenumber"], text)),
-    ("addr:postcode", Check::Text(&["addr:postcode"], text)),
+    ("addr:postcode", Check::Text(&["addr:postcode"], postcode)),
     ("addr:city", Check::Text(&["addr:city"], text)),
     ("ref", Check::Text(&["ref"], text)),
     ("ref:IFOPT", Check::Text(&["ref:IFOPT"], text)),
@@ -122,15 +128,16 @@ pub(in crate::pipeline) fn compared_tags() -> impl Iterator<Item = &'static str>
 }
 
 /// Whether `tags` have a value for the tag that [agreeing] calls
-/// `name`, such as any phone key for `phone`.
+/// `name`, such as any phone key for `phone`. Like [agreeing], this
+/// counts a house number in `addr:street` as `addr:housenumber`.
 pub(in crate::pipeline) fn has_compared_tag<'a>(
     name: &str,
-    mut tags: impl Iterator<Item = (&'a str, &'a str)>,
+    tags: impl Iterator<Item = (&'a str, &'a str)>,
 ) -> bool {
     let Some((_, check)) = AGREEING.iter().find(|(n, _)| *n == name) else {
         return false;
     };
-    tags.any(|(k, v)| {
+    split_address(tags).into_iter().any(|(k, v)| {
         !v.trim().is_empty()
             && match check {
                 Check::Text(keys, _) => keys.contains(&k),
@@ -143,6 +150,87 @@ pub(in crate::pipeline) fn has_compared_tag<'a>(
 fn text(value: &str) -> Option<String> {
     let v = normalize_name(value);
     (!v.is_empty()).then_some(v)
+}
+
+/// A postcode without its formatting: only its letters and digits,
+/// lowercased, with full-width forms (`０６０`) made ASCII. So
+/// `7591 BG` and `7591BG` agree, and so do the Japanese `060-0001`,
+/// `0600001` and `〒060-0001`. A US ZIP+4 such as `46901-4131` gives
+/// its first five digits, because OSM mostly has only those; nine
+/// digits are no other country's postcode format.
+fn postcode(value: &str) -> Option<String> {
+    let mut v: String = value
+        .chars()
+        .map(|c| match c {
+            '\u{FF10}'..='\u{FF19}' | '\u{FF21}'..='\u{FF3A}' | '\u{FF41}'..='\u{FF5A}' => {
+                char::from_u32(c as u32 - 0xFEE0).unwrap_or(c)
+            }
+            _ => c,
+        })
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if v.len() == 9 && v.bytes().all(|b| b.is_ascii_digit()) {
+        v.truncate(5);
+    }
+    (!v.is_empty()).then_some(v)
+}
+
+/// `tags`, with a house number moved out of `addr:street` into
+/// `addr:housenumber` when there is no `addr:housenumber`: `Darmstädter
+/// Str. 236` becomes `Darmstädter Str.` and `236`, `123 Main St`
+/// becomes `Main St` and `123`. Many ATP spiders put the whole first
+/// address line into `addr:street`.
+fn split_address<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<(&'a str, &'a str)> {
+    let mut tags: Vec<_> = tags.collect();
+    if tags.iter().any(|&(k, _)| k == "addr:housenumber") {
+        return tags;
+    }
+    let Some(i) = tags.iter().position(|&(k, _)| k == "addr:street") else {
+        return tags;
+    };
+    if let Some((street, number)) = split_house_number(tags[i].1) {
+        tags[i].1 = street;
+        tags.push(("addr:housenumber", number));
+    }
+    tags
+}
+
+/// `street` without the house number at its end (`Nussdorferplatz 7`,
+/// `Hauptstrasse 12a`, `Via Roma 3-5`) or start (`123 Main St`), and
+/// that number; `None` if neither end looks like a house number, or
+/// nothing would be left of the street.
+fn split_house_number(street: &str) -> Option<(&str, &str)> {
+    let street = street.trim();
+    if let Some((rest, last)) = street.rsplit_once(char::is_whitespace)
+        && is_house_number(last, true)
+        && !rest.trim().is_empty()
+    {
+        return Some((rest.trim_end(), last));
+    }
+    if let Some((first, rest)) = street.split_once(char::is_whitespace)
+        && is_house_number(first, false)
+        && !rest.trim().is_empty()
+    {
+        return Some((rest.trim_start(), first));
+    }
+    None
+}
+
+/// Whether `token` is digits, then optionally one letter (`12a`), then,
+/// if `range`, optionally `-` and digits (`3-5`).
+fn is_house_number(token: &str, range: bool) -> bool {
+    let (number, to) = match token.split_once('-') {
+        Some((n, to)) if range => (n, Some(to)),
+        Some(_) => return false,
+        None => (token, None),
+    };
+    let digits = number.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let letters = number.len() - digits.len();
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && letters <= 1
+        && to.is_none_or(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -215,6 +303,83 @@ mod tests {
         // Another number: no agreement on phone.
         let other = [("phone", "+41 44 765 43 21")];
         assert!(agreeing(atp.iter().copied(), other.iter().copied(), None).is_empty());
+    }
+
+    #[test]
+    fn test_postcode() {
+        assert_eq!(postcode("7591 BG"), postcode("7591BG"));
+        assert_eq!(postcode("7591 BG").as_deref(), Some("7591bg"));
+        assert_eq!(postcode("46901-4131").as_deref(), Some("46901"));
+        assert_eq!(postcode("46901").as_deref(), Some("46901"));
+        assert_eq!(postcode("SW1A 1AA"), postcode("sw1a1aa"));
+        // Japan: the forms that ATP spiders use.
+        for jp in [
+            "060-0001",
+            "0600001",
+            "〒060-0001",
+            "060‐0001",
+            "060ｰ0001",
+            "０６０－０００１",
+        ] {
+            assert_eq!(postcode(jp).as_deref(), Some("0600001"), "{jp}");
+        }
+        assert_eq!(postcode(" - "), None);
+    }
+
+    #[test]
+    fn test_split_house_number() {
+        let split = split_house_number;
+        assert_eq!(
+            split("Darmstädter Str. 236"),
+            Some(("Darmstädter Str.", "236"))
+        );
+        assert_eq!(split("Nussdorferplatz 7"), Some(("Nussdorferplatz", "7")));
+        assert_eq!(split("Hauptstrasse 12a"), Some(("Hauptstrasse", "12a")));
+        assert_eq!(split("Via Roma 3-5"), Some(("Via Roma", "3-5")));
+        assert_eq!(split("123 Main St"), Some(("Main St", "123")));
+        assert_eq!(split("12B  Main St "), Some(("Main St", "12B")));
+        assert_eq!(split("Bahnhofstrasse"), None);
+        assert_eq!(split("1st Avenue"), None);
+        assert_eq!(split("Avenue 12ab"), None);
+        assert_eq!(split("3-5 Main St"), None);
+        assert_eq!(split("42"), None);
+        assert_eq!(split("札幌市中央区北1条西2丁目1-1"), None);
+    }
+
+    #[test]
+    fn test_agreeing_address() {
+        let atp = [
+            ("addr:street", "Darmstädter Str. 236"),
+            ("addr:postcode", "64625"),
+        ];
+        let osm = [
+            ("addr:street", "Darmstädter Straße"),
+            ("addr:housenumber", "236"),
+            ("addr:postcode", "64625"),
+        ];
+        assert_eq!(
+            agreeing(atp.iter().copied(), osm.iter().copied(), None),
+            vec!["addr:housenumber", "addr:postcode"]
+        );
+        let atp = [("addr:street", "Nussdorferplatz 7")];
+        let osm = [
+            ("addr:street", "Nussdorferplatz"),
+            ("addr:housenumber", "7"),
+        ];
+        assert_eq!(
+            agreeing(atp.iter().copied(), osm.iter().copied(), None),
+            vec!["addr:street", "addr:housenumber"]
+        );
+        assert!(has_compared_tag("addr:housenumber", atp.iter().copied()));
+        // With its own house number, the street is left alone.
+        let atp = [("addr:street", "Route 66"), ("addr:housenumber", "1")];
+        assert!(agreeing(atp.iter().copied(), osm.iter().copied(), None).is_empty());
+        let atp = [("addr:postcode", "46901-4131")];
+        let osm = [("addr:postcode", "46901")];
+        assert_eq!(
+            agreeing(atp.iter().copied(), osm.iter().copied(), None),
+            vec!["addr:postcode"]
+        );
     }
 
     #[test]
