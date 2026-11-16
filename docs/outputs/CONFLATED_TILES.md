@@ -185,6 +185,14 @@ with `--no-tile-size-limit`.
   OpenStreetMap features of that brand nearby that AllThePlaces
   matched. On z13–14 `deletion_candidate` features only, and only for
   the `wikidata` and `name` rules.
+- `position` — the row's `match.evidence.position`: how the
+  AllThePlaces position was corrected before matching, today only
+  `"google_camera_coords"`. On z13–14 `part: "atp"` features only, and
+  only for rows whose position was corrected.
+- `position_shift_deg` — the row's `match.evidence.position_shift_deg`,
+  rounded to seven decimals (about 1 cm): how many degrees of longitude
+  the AllThePlaces point was moved east. Present exactly when
+  `position` is.
 - `matched` (`true` | `false`) — overview features only; the detail
   layer conveys the same thing through its layer name and `part`.
 - `importance` — the row's `importance` from `conflated.parquet`,

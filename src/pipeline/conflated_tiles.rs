@@ -240,6 +240,13 @@ struct ConflatedTileRow {
     atp_tags: Vec<(String, String)>,
     atp_geometry_wkb: Vec<u8>,
     osm: Option<OsmSide>,
+    /// `match.evidence.position`: how the ATP position was corrected
+    /// before matching, today only `google_camera_coords`; `None` if
+    /// it wasn't, or the file predates the column.
+    position: Option<String>,
+    /// `match.evidence.position_shift_deg`: degrees of longitude the
+    /// ATP position was moved east by [`Self::position`].
+    position_shift_deg: Option<f32>,
 }
 
 /// One row of `conflated.parquet` without an ATP side: an OSM feature
@@ -350,10 +357,7 @@ impl ConflatedTileRow {
         } else {
             "host"
         };
-        let mut atp_properties = self.detail_properties(fid, "atp");
-        for (k, v) in &self.atp_tags {
-            atp_properties.insert(format!("atp:{k}"), Value::String(v.clone()));
-        }
+        let atp_properties = self.atp_detail_properties(fid);
 
         let mut osm_properties = self.detail_properties(fid, osm_part);
         osm_properties.insert("osm:type".to_string(), Value::String(osm.osm_type.clone()));
@@ -404,11 +408,30 @@ impl ConflatedTileRow {
     fn to_unmatched_detail_geojson_line(&self, fid: u64) -> Result<String> {
         let geometry = decode_and_round(&self.atp_geometry_wkb)?;
 
+        geometry_to_geojson_line(&geometry, self.atp_detail_properties(fid))
+    }
+
+    /// The properties of this row's `part: "atp"` detail feature: the
+    /// common ones, the full `atp:*` tag set and, if the ATP position
+    /// was corrected before matching, `position` and
+    /// `position_shift_deg` (rounded to 1e-7 degrees, about 1cm, so
+    /// the tile holds no float32 noise). Only the ATP feature carries
+    /// those two, since they describe where its point came from.
+    fn atp_detail_properties(&self, fid: u64) -> Map<String, Value> {
         let mut properties = self.detail_properties(fid, "atp");
+        if let Some(position) = &self.position {
+            properties.insert("position".to_string(), Value::String(position.clone()));
+        }
+        if let Some(shift) = self.position_shift_deg {
+            properties.insert(
+                "position_shift_deg".to_string(),
+                Value::from((f64::from(shift) * 1e7).round() / 1e7),
+            );
+        }
         for (k, v) in &self.atp_tags {
             properties.insert(format!("atp:{k}"), Value::String(v.clone()));
         }
-        geometry_to_geojson_line(&geometry, properties)
+        properties
     }
 
     /// The properties that every detail feature of this row carries.
@@ -914,6 +937,7 @@ fn extract_conflated_tile_row(batch: &RecordBatch, row: usize) -> Result<TileRow
         }));
     }
     let fetched = get_struct(atp, "fetched")?;
+    let evidence = get_struct(matching, "evidence")?;
 
     let osm = if osm.is_null(row) {
         None
@@ -928,6 +952,9 @@ fn extract_conflated_tile_row(batch: &RecordBatch, row: usize) -> Result<TileRow
         atp_tags: get_tags(atp, "tags", row)?,
         atp_geometry_wkb: get_binary(batch, "atp_geometry", row)?,
         osm,
+        // Not in files from before the camera correction.
+        position: get_string_if_present(evidence, "position", row)?,
+        position_shift_deg: get_f32_if_present(evidence, "position_shift_deg", row)?,
     }))
 }
 
@@ -965,6 +992,24 @@ fn get_optional_f32(src: &StructArray, name: &str, row: usize) -> Result<Option<
         return Ok(None);
     }
     get_f32(src, name, row).map(Some)
+}
+
+/// Like [`get_optional_string`], but also `None` if `src` has no
+/// column `name`, as in files written before it was added.
+fn get_string_if_present(src: &StructArray, name: &str, row: usize) -> Result<Option<String>> {
+    if src.column_by_name(name).is_none() {
+        return Ok(None);
+    }
+    get_optional_string(src, name, row)
+}
+
+/// Like [`get_optional_f32`], but also `None` if `src` has no column
+/// `name`, as in files written before it was added.
+fn get_f32_if_present(src: &StructArray, name: &str, row: usize) -> Result<Option<f32>> {
+    if src.column_by_name(name).is_none() {
+        return Ok(None);
+    }
+    get_optional_f32(src, name, row)
 }
 
 #[cfg(test)]
@@ -1118,6 +1163,8 @@ mod tests {
             atp_tags: vec![("shop".to_string(), "bakery".to_string())],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: None,
+            position: None,
+            position_shift_deg: None,
         };
         let value = parse(&row.to_overview_geojson_line().expect("overview line"));
 
@@ -1150,6 +1197,8 @@ mod tests {
                 osm_tags: vec![("shop".to_string(), "bakery".to_string())],
                 osm_geometry_wkb: encode_point(8.50001, 47.20001),
             }),
+            position: None,
+            position_shift_deg: None,
         };
         let value = parse(&row.to_overview_geojson_line().expect("overview line"));
         let props = &value["properties"];
@@ -1180,6 +1229,8 @@ mod tests {
             atp_tags: vec![],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: None,
+            position: None,
+            position_shift_deg: None,
         };
         let value = parse(&row.to_overview_geojson_line().expect("overview line"));
         assert_eq!(value["properties"]["importance"], 0.99);
@@ -1201,6 +1252,8 @@ mod tests {
             atp_tags: vec![],
             atp_geometry_wkb: encode_point(8.123_456_789, 47.987_654_321),
             osm: None,
+            position: None,
+            position_shift_deg: None,
         };
         let value = parse(&row.to_overview_geojson_line().expect("overview line"));
 
@@ -1229,6 +1282,8 @@ mod tests {
             atp_tags: vec![("name".to_string(), "Acme ATP".to_string())],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: None, // unused; osm side passed explicitly below
+            position: None,
+            position_shift_deg: None,
         };
         let osm = osm_side_far_from(8.5, 47.2);
         let lines = row
@@ -1286,6 +1341,8 @@ mod tests {
             atp_tags: vec![],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: None,
+            position: None,
+            position_shift_deg: None,
         };
         // Same coordinates as the ATP point -- a coincident match.
         let osm = OsmSide {
@@ -1319,6 +1376,8 @@ mod tests {
             ],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: None,
+            position: None,
+            position_shift_deg: None,
         };
         let value = parse(
             &row.to_unmatched_detail_geojson_line(88)
@@ -1346,6 +1405,8 @@ mod tests {
             atp_tags: vec![("amenity".to_string(), "pharmacy".to_string())],
             atp_geometry_wkb: encode_point(8.5, 47.2),
             osm: Some(osm_side_far_from(8.5, 47.2)),
+            position: None,
+            position_shift_deg: None,
         }
     }
 
@@ -1553,5 +1614,205 @@ mod tests {
             panic!("expected a deletion candidate");
         };
         assert_eq!(row.local_share, None);
+    }
+
+    fn corrected_row() -> ConflatedTileRow {
+        ConflatedTileRow {
+            spider: "acme".to_string(),
+            relation: "same".to_string(),
+            importance: 0.5,
+            atp_tags: vec![("name".to_string(), "Acme".to_string())],
+            atp_geometry_wkb: encode_point(8.5, 47.2),
+            osm: None,
+            position: Some("google_camera_coords".to_string()),
+            position_shift_deg: Some(0.002_211_6),
+        }
+    }
+
+    #[test]
+    fn corrected_position_is_on_the_atp_detail_feature_only() {
+        let row = corrected_row();
+        let osm = osm_side_far_from(8.5, 47.2);
+        let lines = row.to_detail_geojson_lines(&osm, 5).expect("detail lines");
+        let features: Vec<Value> = lines.iter().map(|l| parse(l)).collect();
+        let parts: Vec<&str> = features
+            .iter()
+            .map(|f| f["properties"]["part"].as_str().expect("part"))
+            .collect();
+        assert_eq!(parts, vec!["atp", "osm", "link"]);
+
+        let atp = &features[0]["properties"];
+        assert_eq!(atp["position"], "google_camera_coords");
+        // Rounded to 1e-7 degrees, not the float32 value widened to
+        // 0.0022116000298...
+        assert_eq!(atp["position_shift_deg"], Value::from(0.0022116));
+
+        for f in &features[1..] {
+            assert!(f["properties"].get("position").is_none(), "{f}");
+            assert!(f["properties"].get("position_shift_deg").is_none(), "{f}");
+        }
+    }
+
+    #[test]
+    fn corrected_position_is_on_the_unmatched_detail_feature() {
+        let row = ConflatedTileRow {
+            relation: "missing_in_osm".to_string(),
+            ..corrected_row()
+        };
+        let value = parse(&row.to_unmatched_detail_geojson_line(6).expect("detail"));
+        assert_eq!(value["properties"]["position"], "google_camera_coords");
+        assert_eq!(
+            value["properties"]["position_shift_deg"],
+            Value::from(0.0022116)
+        );
+    }
+
+    #[test]
+    fn uncorrected_detail_features_have_no_position() {
+        let row = ConflatedTileRow {
+            position: None,
+            position_shift_deg: None,
+            ..corrected_row()
+        };
+        let osm = osm_side_far_from(8.5, 47.2);
+        let mut lines = row.to_detail_geojson_lines(&osm, 5).expect("detail lines");
+        lines.push(row.to_unmatched_detail_geojson_line(5).expect("detail"));
+        for line in &lines {
+            let f = parse(line);
+            assert!(f["properties"].get("position").is_none(), "{f}");
+            assert!(f["properties"].get("position_shift_deg").is_none(), "{f}");
+        }
+    }
+
+    #[test]
+    fn overview_has_no_position() {
+        let value = parse(
+            &corrected_row()
+                .to_overview_geojson_line()
+                .expect("overview"),
+        );
+        assert!(value["properties"].get("position").is_none());
+        assert!(value["properties"].get("position_shift_deg").is_none());
+    }
+
+    /// A one-row batch of an unmatched ATP row with only the columns
+    /// that [extract_conflated_tile_row] reads, shaped as in
+    /// `conflated.parquet`. `position` adds the evidence columns of the
+    /// camera correction, as files since #973 have them; without it,
+    /// the batch looks like an older file.
+    fn atp_batch(position: Option<(Option<&str>, Option<f32>)>) -> RecordBatch {
+        use arrow::array::{
+            ArrayRef, BinaryArray, Float32Array, MapBuilder, MapFieldNames, StringArray,
+            StringBuilder, UInt64Array,
+        };
+        use arrow::buffer::NullBuffer;
+        use arrow::datatypes::{DataType, Field, Fields};
+        use std::sync::Arc;
+
+        let mut tags = MapBuilder::new(
+            Some(MapFieldNames {
+                entry: "key_value".into(),
+                key: "key".into(),
+                value: "value".into(),
+            }),
+            StringBuilder::new(),
+            StringBuilder::new(),
+        );
+        tags.keys().append_value("name");
+        tags.values().append_value("Acme");
+        tags.append(true).expect("map entry");
+        let tags = Arc::new(tags.finish()) as ArrayRef;
+
+        let fetched = StructArray::try_new(
+            Fields::from(vec![Field::new("spider", DataType::Utf8, false)]),
+            vec![Arc::new(StringArray::from(vec!["acme"])) as ArrayRef],
+            None,
+        )
+        .expect("fetched");
+        let atp = StructArray::try_new(
+            Fields::from(vec![
+                Field::new("fetched", fetched.data_type().clone(), false),
+                Field::new("tags", tags.data_type().clone(), false),
+            ]),
+            vec![Arc::new(fetched) as ArrayRef, tags],
+            None,
+        )
+        .expect("atp");
+        let osm = StructArray::try_new(
+            Fields::from(vec![
+                Field::new("type", DataType::Utf8, true),
+                Field::new("id", DataType::UInt64, true),
+            ]),
+            vec![
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![None::<u64>])),
+            ],
+            Some(NullBuffer::new_null(1)),
+        )
+        .expect("osm");
+
+        let mut fields = vec![Field::new("rule", DataType::Utf8, true)];
+        let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![None::<&str>]))];
+        if let Some((name, shift)) = position {
+            fields.push(Field::new("position", DataType::Utf8, true));
+            fields.push(Field::new("position_shift_deg", DataType::Float32, true));
+            columns.push(Arc::new(StringArray::from(vec![name])));
+            columns.push(Arc::new(Float32Array::from(vec![shift])));
+        }
+        let evidence = StructArray::try_new(Fields::from(fields), columns, None).expect("evidence");
+        let matching = StructArray::try_new(
+            Fields::from(vec![
+                Field::new("relation", DataType::Utf8, false),
+                Field::new("evidence", evidence.data_type().clone(), false),
+            ]),
+            vec![
+                Arc::new(StringArray::from(vec!["missing_in_osm"])) as ArrayRef,
+                Arc::new(evidence),
+            ],
+            None,
+        )
+        .expect("match");
+        RecordBatch::try_from_iter(vec![
+            ("atp", Arc::new(atp) as ArrayRef),
+            ("osm", Arc::new(osm)),
+            (
+                "atp_geometry",
+                Arc::new(BinaryArray::from(vec![encode_point(8.5, 47.2).as_slice()])),
+            ),
+            ("match", Arc::new(matching)),
+            ("importance", Arc::new(Float32Array::from(vec![0.25_f32]))),
+        ])
+        .expect("batch")
+    }
+
+    fn extract_atp_row(batch: &RecordBatch) -> ConflatedTileRow {
+        match extract_conflated_tile_row(batch, 0).expect("decodes") {
+            TileRow::Atp(row) => row,
+            TileRow::Deletion(_) => panic!("expected an ATP row"),
+        }
+    }
+
+    #[test]
+    fn atp_row_reads_the_position_correction() {
+        let row = extract_atp_row(&atp_batch(Some((
+            Some("google_camera_coords"),
+            Some(0.002_211_6),
+        ))));
+        assert_eq!(row.spider, "acme");
+        assert_eq!(row.position.as_deref(), Some("google_camera_coords"));
+        assert_eq!(row.position_shift_deg, Some(0.002_211_6));
+
+        let row = extract_atp_row(&atp_batch(Some((None, None))));
+        assert_eq!(row.position, None);
+        assert_eq!(row.position_shift_deg, None);
+    }
+
+    #[test]
+    fn atp_row_from_a_file_without_the_position_columns_still_decodes() {
+        let row = extract_atp_row(&atp_batch(None));
+        assert_eq!(row.spider, "acme");
+        assert_eq!(row.relation, "missing_in_osm");
+        assert_eq!(row.position, None);
+        assert_eq!(row.position_shift_deg, None);
     }
 }
