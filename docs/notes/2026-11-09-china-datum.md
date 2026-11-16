@@ -40,9 +40,11 @@ doesn't tell either.
 `import_atp` now runs after `import_osm`. While it reads a spider's
 GeoJSON file, it holds back the features in mainland China. Hong Kong,
 Macau and Taiwan don't count; the `country-boundaries` crate tells
-them apart. Each feature with `brand:wikidata` then votes: for each of
-the three systems, is there an OSM feature of its brand within 30 m
-of the converted position? A system other than WGS-84 wins if it has
+them apart. Each feature with `brand:wikidata`, `operator:wikidata`
+or `network:wikidata` then votes: for each of the three systems, is
+there an OSM feature with one of the same IDs, under any of these
+keys, within 30 m of the converted position? Until 2026-11-16, only
+`brand:wikidata` counted, on both sides; see the end of this note. A system other than WGS-84 wins if it has
 at least 3 votes and at least three times as many as the next best.
 Then the spider's features in mainland China are converted to WGS-84:
 point, shape and S2 cell. Otherwise they stay as given.
@@ -175,3 +177,22 @@ stayed at WGS-84. Neither had a deletion candidate in mainland China.
 We could skip deletion candidates in mainland China whose brand has
 only spiders with an unclear vote. For 14 of 383 candidates, that is
 not worth the code for now.
+
+## Operators and networks
+
+On 2026-11-16, the vote started to count `operator:wikidata` and
+`network:wikidata` as well, on both sides, the same keys that the
+brand totals and importance use (`WIKIDATA_KEYS`). A hotel chain, a bank or a charging network may only be tagged
+as an operator in OSM, and a spider for such a chain may only set
+`operator:wikidata`.
+
+In the production run of 2026-11-09
+(`conflated-20261109-e984a3b3.parquet`), this changes no vote yet.
+Of the 30,702 ATP features with `addr:country=CN`, 104 have no
+`brand:wikidata`, mostly from `yha_cn`, `scania`, `worldcat` and
+`accor`, and none of them has `operator:wikidata` or
+`network:wikidata`; the same holds in a box around eastern China
+without the country tag. Of the 2,951 OSM features that these
+features matched, 2 have `operator:wikidata`, and both also have
+`brand:wikidata`. So the vote now follows the rest of the pipeline,
+and will count such features once spiders or mappers add them.
