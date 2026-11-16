@@ -43,10 +43,15 @@ no_matcher               UINT64   nullable — kept, but no matcher handles thei
 in_china                 UINT64   nullable — features in mainland China
 datum                    UTF8     nullable — "wgs84", "gcj02" or "bd09", for in_china
 dataset_attributes       MAP<UTF8, UTF8> nullable — the spider's dataset attributes, such as its license
+exact_coords_hits        UINT64   nullable — features right at an OSM feature with the same Wikidata ID
+google_camera_coords_hits UINT64  nullable — features where a Google Maps camera center would be, see below
+google_camera_coords_control UINT64 nullable — ... the same, mirrored: the control
+google_camera_coords_offset_deg FLOAT nullable — median offset of those hits, in degrees of longitude
 rows                     UINT64   non-null — rows in conflated.parquet
 same                     UINT64   non-null — rows with match.relation = "same"
 located_in               UINT64   non-null — rows with match.relation = "located_in"
 missing_in_osm           UINT64   non-null — rows with match.relation = "missing_in_osm"
+same_google_camera_coords UINT64  non-null — same rows matched at the corrected position
 shared_osm_features      UINT64   non-null — same rows whose OSM feature another feature of the spider also matched
 shared_positions         UINT64   non-null — features at the same position as another feature of the spider
 offset_east_m            FLOAT    nullable — median of how far same rows lie east of their OSM feature
@@ -108,6 +113,37 @@ Chinese sources give coordinates in the GCJ-02 or BD-09 datum, which
 are hundreds of meters off. We find out which datum a spider uses by
 comparing its features with OpenStreetMap, and convert them to WGS-84
 before matching.
+
+### Google Maps camera centers
+
+Some brands give positions that someone copied from a Google Maps
+place URL, `…/@lat,lon,17z`. That is the camera center of the map,
+which Google moves west so that the side panel doesn't cover the
+marker: about 0.0022° of longitude, 120–300 m depending on the
+latitude. When `import_atp` reads a spider, it compares each feature
+that has a `brand:wikidata`, `operator:wikidata` or `network:wikidata`
+with the OpenStreetMap features of the same ID:
+
+- `exact_coords_hits` counts features within 30 m of one.
+- `google_camera_coords_hits` counts features that aren't, but have
+  one 0.0018–0.0030° east, and less than 0.0003° north or south: where
+  the place would be if the position is a camera center.
+- `google_camera_coords_control` counts the same in the mirrored
+  window to the west, where no copied position puts a feature. A
+  spider whose hits don't clearly exceed its control is just dense.
+- `google_camera_coords_offset_deg` is the median offset of the hits,
+  the AllThePlaces position minus OpenStreetMap's, so negative.
+
+A spider is flagged when it has at least 8 hits, at least four times
+as many as its control plus one, and the hits are at least a tenth of
+`exact_coords_hits + google_camera_coords_hits`. For a flagged spider,
+matching also tries each feature at its position corrected by the
+median offset, and `same_google_camera_coords` counts the `same` rows
+that matched better there. The share
+`google_camera_coords_hits / (exact_coords_hits + google_camera_coords_hits)`
+says how much of the spider is affected; a dashboard can show it
+next to the flag. See
+[`2026-11-16-google-camera-coords.md`](../notes/2026-11-16-google-camera-coords.md).
 
 ### Dataset attributes
 

@@ -78,6 +78,8 @@ pub struct ParquetWriter {
     match_distances: Float32Builder,
     match_agreeing: ListBuilder<StringBuilder>,
     match_local_shares: Float32Builder,
+    match_positions: StringBuilder,
+    match_position_shifts: Float32Builder,
 
     importance: Float32Builder,
 }
@@ -124,6 +126,14 @@ pub(super) struct MatchInfo {
     /// For deletion candidates by brand, the share of matched OSM
     /// features of the brand nearby; see `conflate::local_coverage`.
     pub(super) local_share: Option<f32>,
+    /// Why the ATP position in the row isn't the one AllThePlaces gave,
+    /// if it isn't: `google_camera_coords` when the feature matched at
+    /// the position corrected for a Google Maps camera center; see
+    /// `atp::camera`.
+    pub(super) position: Option<String>,
+    /// How far the ATP position was moved east for [Self::position], in
+    /// degrees of longitude. Subtract it to get AllThePlaces' own.
+    pub(super) position_shift_deg: Option<f32>,
 }
 
 impl MatchInfo {
@@ -133,6 +143,18 @@ impl MatchInfo {
             score: Some(score as f32),
             rule: Some(rule.to_string()),
             local_share: None,
+            position: None,
+            position_shift_deg: None,
+        }
+    }
+
+    /// This match, made at the position corrected for a Google Maps
+    /// camera center, which moved the ATP feature `shift_deg` east.
+    pub(super) fn at_camera_corrected(self, shift_deg: f64) -> Self {
+        MatchInfo {
+            position: Some("google_camera_coords".to_string()),
+            position_shift_deg: Some(shift_deg as f32),
+            ..self
         }
     }
 
@@ -142,6 +164,8 @@ impl MatchInfo {
             score: None,
             rule: None,
             local_share: None,
+            position: None,
+            position_shift_deg: None,
         }
     }
 
@@ -151,6 +175,8 @@ impl MatchInfo {
             score: None,
             rule: Some(rule.to_string()),
             local_share: None,
+            position: None,
+            position_shift_deg: None,
         }
     }
 
@@ -160,6 +186,8 @@ impl MatchInfo {
             score: None,
             rule: Some(rule.to_string()),
             local_share: local_share.map(|s| s as f32),
+            position: None,
+            position_shift_deg: None,
         }
     }
 }
@@ -333,6 +361,8 @@ impl ParquetWriter {
                 /* nullable */ false,
             )),
             match_local_shares: Float32Builder::with_capacity(max_rows_per_group),
+            match_positions: StringBuilder::with_capacity(max_rows_per_group, 0),
+            match_position_shifts: Float32Builder::with_capacity(max_rows_per_group),
 
             importance: Float32Builder::with_capacity(max_rows_per_group),
         })
@@ -515,6 +545,10 @@ impl ParquetWriter {
         self.match_agreeing.append(true);
         self.match_local_shares
             .append_option(row.matching.local_share);
+        self.match_positions
+            .append_option(row.matching.position.as_deref());
+        self.match_position_shifts
+            .append_option(row.matching.position_shift_deg);
 
         self.importance.append_value(importance);
         self.rows_in_group += 1;
@@ -700,6 +734,8 @@ impl ParquetWriter {
                 Arc::new(self.match_distances.finish()) as ArrayRef,
                 Arc::new(self.match_agreeing.finish()) as ArrayRef,
                 Arc::new(self.match_local_shares.finish()) as ArrayRef,
+                Arc::new(self.match_positions.finish()) as ArrayRef,
+                Arc::new(self.match_position_shifts.finish()) as ArrayRef,
             ],
             None,
         )?;
@@ -1029,6 +1065,8 @@ mod schema {
                     NOT_NULLABLE,
                 ),
                 Field::new("local_share", DataType::Float32, NULLABLE),
+                Field::new("position", DataType::Utf8, NULLABLE),
+                Field::new("position_shift_deg", DataType::Float32, NULLABLE),
             ],
             NOT_NULLABLE,
         );

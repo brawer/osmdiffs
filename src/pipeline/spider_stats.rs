@@ -121,6 +121,9 @@ struct RowInfo {
     relation: Relation,
     rule: Option<String>,
     distance_m: Option<f32>,
+    /// Whether a `same` row matched at the position corrected for a
+    /// Google Maps camera center (`match.evidence.position`).
+    camera_corrected: bool,
     /// Of the ATP feature, or for a deletion candidate, of the OSM one.
     country: Option<Country>,
     /// The brand, operator and network IDs of the ATP feature, or for a
@@ -178,6 +181,9 @@ struct Brand {
 struct Spider {
     rows: u64,
     same: u64,
+    /// `same` rows matched at the position corrected for a Google Maps
+    /// camera center.
+    same_camera_corrected: u64,
     located_in: u64,
     missing_in_osm: u64,
     rules: HashMap<String, u64>,
@@ -202,6 +208,9 @@ impl Spider {
             Relation::LocatedIn => self.located_in += 1,
             Relation::MissingInOsm => self.missing_in_osm += 1,
             Relation::DeletionCandidate => {}
+        }
+        if row.relation == Relation::Same && row.camera_corrected {
+            self.same_camera_corrected += 1;
         }
         if let Some(rule) = row.rule {
             *self.rules.entry(rule).or_default() += 1;
@@ -447,6 +456,9 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
     let rule = string_or_null(evidence, "rule", row)?;
     let distance_m = f32_or_null(evidence, "distance_m", row)?;
     let agreeing = string_list(evidence, "agreeing", row)?;
+    // Not in files from before the camera correction.
+    let camera_corrected = evidence.column_by_name("position").is_some()
+        && string_or_null(evidence, "position", row)?.as_deref() == Some("google_camera_coords");
 
     let atp = get_struct(batch, "atp")?;
     let osm = get_struct(batch, "osm")?;
@@ -515,6 +527,7 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
         relation,
         rule,
         distance_m,
+        camera_corrected,
         country: location.and_then(|(x, y)| country(x, y)),
         wikidata: wikidata_ids(atp_tag_refs()),
         category: main_category(atp_tag_refs()),
@@ -722,10 +735,15 @@ pub(super) fn schema() -> Schema {
         Field::new("in_china", DataType::UInt64, true),
         Field::new("datum", DataType::Utf8, true),
         Field::new("dataset_attributes", attributes_type(), true),
+        Field::new("exact_coords_hits", DataType::UInt64, true),
+        Field::new("google_camera_coords_hits", DataType::UInt64, true),
+        Field::new("google_camera_coords_control", DataType::UInt64, true),
+        Field::new("google_camera_coords_offset_deg", DataType::Float32, true),
         u64_field("rows"),
         u64_field("same"),
         u64_field("located_in"),
         u64_field("missing_in_osm"),
+        u64_field("same_google_camera_coords"),
         u64_field("shared_osm_features"),
         u64_field("shared_positions"),
         Field::new("offset_east_m", DataType::Float32, true),
@@ -793,8 +811,13 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         StringBuilder::new(),
     )
     .with_values_field(Arc::new(Field::new("value", DataType::Utf8, false)));
+    let mut exact_coords = UInt64Builder::new();
+    let mut camera_hits = UInt64Builder::new();
+    let mut camera_control = UInt64Builder::new();
+    let mut camera_offset = Float32Builder::new();
     let mut num_rows = UInt64Builder::new();
     let mut same = UInt64Builder::new();
+    let mut same_camera = UInt64Builder::new();
     let mut located_in = UInt64Builder::new();
     let mut missing_in_osm = UInt64Builder::new();
     let mut shared = UInt64Builder::new();
@@ -855,10 +878,19 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
             }
             None => attributes.append(false)?,
         }
+        exact_coords.append_option(row.counts.map(|c| c.exact_coords_hits));
+        camera_hits.append_option(row.counts.map(|c| c.google_camera_coords_hits));
+        camera_control.append_option(row.counts.map(|c| c.google_camera_coords_control));
+        camera_offset.append_option(
+            row.counts
+                .and_then(|c| c.google_camera_coords_offset)
+                .map(|o| o as f32),
+        );
         num_rows.append_value(s.rows);
         same.append_value(s.same);
         located_in.append_value(s.located_in);
         missing_in_osm.append_value(s.missing_in_osm);
+        same_camera.append_value(s.same_camera_corrected);
         shared.append_value(s.shared_osm_features());
         shared_positions.append_value(s.shared_positions());
         let offset = median_offset(&s.offsets);
@@ -992,10 +1024,15 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         Arc::new(in_china.finish()),
         Arc::new(datum.finish()),
         Arc::new(attributes.finish()),
+        Arc::new(exact_coords.finish()),
+        Arc::new(camera_hits.finish()),
+        Arc::new(camera_control.finish()),
+        Arc::new(camera_offset.finish()),
         Arc::new(num_rows.finish()),
         Arc::new(same.finish()),
         Arc::new(located_in.finish()),
         Arc::new(missing_in_osm.finish()),
+        Arc::new(same_camera.finish()),
         Arc::new(shared.finish()),
         Arc::new(shared_positions.finish()),
         Arc::new(offset_east.finish()),
@@ -1027,6 +1064,7 @@ mod tests {
             relation: Relation::Same,
             rule: Some("brand_wikidata".into()),
             distance_m: Some(distance_m),
+            camera_corrected: false,
             country: Country::from_code(*b"CH"),
             wikidata: vec![379911],
             category: Some("shop=supermarket".into()),
@@ -1124,10 +1162,17 @@ mod tests {
         let ch = Country::from_code(*b"CH");
         let mut stats = Spider::default();
         stats.add(same("denner", 3.0, 1));
+        stats.add(RowInfo {
+            camera_corrected: true,
+            ..same("denner", 3.0, 2)
+        });
         let counts = spider_counts::SpiderCounts {
             spider: "denner".into(),
             features: 3,
             invalid: 1,
+            exact_coords_hits: 4,
+            google_camera_coords_hits: 9,
+            google_camera_coords_offset: Some(-0.0022),
             dataset_attributes: vec![
                 ("@spider".into(), "denner".into()),
                 ("license".into(), "Creative Commons Zero".into()),
@@ -1177,8 +1222,27 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        // 3 features, 1 invalid, 1 conflated row: 1 without a matcher.
-        assert_eq!(u64s("no_matcher").value(0), 1);
+        // 3 features, 1 invalid, 2 conflated rows: none without a matcher.
+        assert_eq!(u64s("no_matcher").value(0), 0);
+        assert_eq!(
+            (
+                u64s("exact_coords_hits").value(0),
+                u64s("google_camera_coords_hits").value(0),
+                u64s("google_camera_coords_control").value(0),
+                u64s("same_google_camera_coords").value(0),
+            ),
+            (4, 9, 0, 1)
+        );
+        assert!(u64s("google_camera_coords_hits").is_null(1));
+        let offset = batch
+            .column_by_name("google_camera_coords_offset_deg")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap()
+            .clone();
+        assert!((offset.value(0) - -0.0022).abs() < 1e-7);
+        assert!(offset.is_null(1));
         assert!(u64s("no_matcher").is_null(1));
         assert!(u64s("atp_features").is_null(0));
         assert_eq!(u64s("missing_taken").value(1), 0);
