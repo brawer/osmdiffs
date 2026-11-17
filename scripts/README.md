@@ -15,13 +15,19 @@ hardware.
   from a pinned commit of
   [`osm-testdata`](https://github.com/osmcode/osm-testdata).
 
+- [`generate_street_abbreviations.py`](generate_street_abbreviations.py):
+  generates `src/matchers/street_abbreviations.txt` from the address
+  dictionaries of [libpostal](https://github.com/openvenues/libpostal)
+  (MIT), for comparing street names with abbreviations such as `Str.`
+  and `Straße`. Run via `uv run scripts/generate_street_abbreviations.py
+  path/to/libpostal-checkout`.
 - [`infer_contact_category_pairs.py`](infer_contact_category_pairs.py):
   suggests the pairs of categories in
   `src/matchers/contact/category_pairs.tsv`, from a planet run without
   the category check; the output needs a review by hand. See
   [`../docs/notes/2026-10-25-phone-and-email-matching.md`](../docs/notes/2026-10-25-phone-and-email-matching.md).
 
-The first two are run by hand when someone notices upstream has moved; nothing
+The first three are run by hand when someone notices upstream has moved; nothing
 here notifies you of a new release. Automating that is a low-priority,
 deliberately deferred feature request, tracked in
 [brawer/osmdiffs#555](https://github.com/brawer/osmdiffs/issues/555).

@@ -113,6 +113,8 @@ CARGO_CYCLONEDX_VERSION="$(cargo cyclonedx --version | cut -d ' ' -f 2)"
 ID_TAGGING_SCHEMA_LICENSE="$(sed -n 's/.*released under the \(.*\) license.*/\1/p' "${PROJECT_ROOT}/src/pipeline/osm/id_tagging_schema.rs")"
 ID_TAGGING_SCHEMA_PURL="$(grep pkg: "${PROJECT_ROOT}/src/pipeline/osm/id_tagging_schema.rs" | awk '{print $NF}')"
 ID_TAGGING_SCHEMA_VERSION="$(echo "$ID_TAGGING_SCHEMA_PURL" | sed 's/.*@//')"
+LIBPOSTAL_PURL="$(grep pkg: "${PROJECT_ROOT}/src/matchers/street_abbreviations.txt" | awk '{print $NF}')"
+LIBPOSTAL_COMMIT="$(echo "$LIBPOSTAL_PURL" | sed 's/.*@//')"
 JQ_VERSION="$(jq --version | sed -n 's/jq-//p')"
 OSM_TESTDATA_COMMIT="$(sed -n 's/^Commit:  *//p' "${PROJECT_ROOT}/tests/test_data/osm-testdata-grid/VENDORED.md")"
 RUSTC_VERSION="$(rustc --version --verbose | awk '/^release:/{print $2}')"
@@ -155,6 +157,7 @@ jq \
   --arg ID_TAGGING_SCHEMA_PURL    "${ID_TAGGING_SCHEMA_PURL}" \
   --arg ID_TAGGING_SCHEMA_VERSION "${ID_TAGGING_SCHEMA_VERSION}" \
   --arg JQ_VERSION                "${JQ_VERSION}" \
+  --arg LIBPOSTAL_COMMIT          "${LIBPOSTAL_COMMIT}" \
   --arg OSM_TESTDATA_COMMIT       "${OSM_TESTDATA_COMMIT}" \
   --arg PROTOC_VERSION            "${PROTOC_VERSION}" \
   --arg RUSTC_VERSION             "${RUSTC_VERSION}" \
