@@ -746,7 +746,8 @@ until the full pipeline was proven out:
 - Three matchers are implemented. `PoiMatcher` matches shops,
   restaurants, hotels, schools and fuel stations on an exact
   `brand:wikidata` tag, or on a shared phone number, email address,
-  website, brand name or brand website domain with a compatible category,
+  website, brand name, brand website domain or street address with a
+  compatible category,
   one to one within a spider unless the features are within 25 m of
   each other or share a contact (see
   [`notes/2026-10-25-phone-and-email-matching.md`](notes/2026-10-25-phone-and-email-matching.md),
@@ -755,7 +756,8 @@ until the full pipeline was proven out:
   [`notes/2026-11-06-website-matching.md`](notes/2026-11-06-website-matching.md)
   and [`notes/2026-11-08-exclusive-poi-matching.md`](notes/2026-11-08-exclusive-poi-matching.md));
   for how street addresses are compared, see
-  [`notes/2026-11-17-street-addresses.md`](notes/2026-11-17-street-addresses.md)).
+  [`notes/2026-11-17-street-addresses.md`](notes/2026-11-17-street-addresses.md)
+  and [`notes/2026-11-17-address-evidence.md`](notes/2026-11-17-address-evidence.md)).
   `TransitMatcher` matches public transport stops, platforms and
   tracks by `ref:IFOPT`, `uic_ref` and `local_ref`, so far tuned for
   Switzerland (see

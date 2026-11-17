@@ -93,7 +93,7 @@ fn fold(s: &str) -> String {
 }
 
 /// The folded words of `s`, split at anything not a letter or digit.
-fn words(s: &str) -> impl Iterator<Item = String> {
+pub(crate) fn words(s: &str) -> impl Iterator<Item = String> {
     fold(s)
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
