@@ -753,7 +753,9 @@ until the full pipeline was proven out:
   [`notes/2026-11-05-brand-name-matching.md`](notes/2026-11-05-brand-name-matching.md),
   [`notes/2026-11-06-brand-domains.md`](notes/2026-11-06-brand-domains.md)
   [`notes/2026-11-06-website-matching.md`](notes/2026-11-06-website-matching.md)
-  and [`notes/2026-11-08-exclusive-poi-matching.md`](notes/2026-11-08-exclusive-poi-matching.md)).
+  and [`notes/2026-11-08-exclusive-poi-matching.md`](notes/2026-11-08-exclusive-poi-matching.md));
+  for how street addresses are compared, see
+  [`notes/2026-11-17-street-addresses.md`](notes/2026-11-17-street-addresses.md)).
   `TransitMatcher` matches public transport stops, platforms and
   tracks by `ref:IFOPT`, `uic_ref` and `local_ref`, so far tuned for
   Switzerland (see
