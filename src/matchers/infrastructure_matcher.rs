@@ -1,7 +1,7 @@
 //! Matches street infrastructure: post boxes, defibrillators (AEDs),
 //! benches, fire hydrants, public bookcases, bicycle parking, waste
-//! baskets, fountains and toilets for now, with street lamps and the
-//! like to follow.
+//! baskets, fountains, toilets and bike-share stations for now, with
+//! street lamps and the like to follow.
 //!
 //! Such features have no brand and rarely a name, and many of them
 //! stand close together, so the match rests on position. Each kind has
@@ -32,6 +32,17 @@ const KIND_FACTOR: f64 = 0.8;
 /// below [SAME_REF_MIN_SCORE].
 const CONFIRM_BONUS: f64 = 0.04;
 
+/// A bike-share station with the same GBFS ID ([GbfsId]) or station
+/// number may be this far away. Stations get moved, and the IDs are
+/// unique within a system: in Japan, 24 of the 16,359 OSM stations
+/// whose ID is also in AllThePlaces are more than 100 m from it.
+const GBFS_ID_MAX_METERS: f64 = 200.0;
+
+/// A bike-share station whose name shares a word with ours may be this
+/// far away. Nextbike's positions in Switzerland are often 20–60 m off
+/// OSM's, at stations with the same name on both sides.
+const BIKE_SHARE_NAME_MAX_METERS: f64 = 50.0;
+
 /// What kind of infrastructure a feature is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -48,11 +59,31 @@ enum Kind {
     /// `amenity=drinking_water`.
     Fountain,
     Toilets,
+    /// Bike-share stations (`amenity=bicycle_rental`), as AllThePlaces
+    /// takes them from GBFS feeds; not rental shops
+    /// (`bicycle_rental=shop`).
+    BikeShare,
 }
 
 impl Kind {
-    fn from_tags<'a>(mut tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<Kind> {
-        tags.find_map(|kv| match kv {
+    fn from_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<Kind> {
+        let mut kind = None;
+        let mut rental_shop = false;
+        for kv in tags {
+            if kv == ("bicycle_rental", "shop") {
+                rental_shop = true;
+            } else if kind.is_none() {
+                kind = Self::from_tag(kv);
+            }
+        }
+        if rental_shop && kind == Some(Kind::BikeShare) {
+            return None;
+        }
+        kind
+    }
+
+    fn from_tag(kv: (&str, &str)) -> Option<Kind> {
+        match kv {
             ("amenity", "post_box") => Some(Kind::PostBox),
             ("emergency", "defibrillator") => Some(Kind::Defibrillator),
             ("amenity", "bench") => Some(Kind::Bench),
@@ -63,8 +94,9 @@ impl Kind {
             ("amenity", "fountain" | "drinking_water") => Some(Kind::Fountain),
             ("man_made", "drinking_fountain") => Some(Kind::Fountain),
             ("amenity", "toilets") => Some(Kind::Toilets),
+            ("amenity", "bicycle_rental") => Some(Kind::BikeShare),
             _ => None,
-        })
+        }
     }
 
     fn name(self) -> &'static str {
@@ -78,6 +110,7 @@ impl Kind {
             Kind::WasteBasket => "waste_basket",
             Kind::Fountain => "fountain",
             Kind::Toilets => "toilets",
+            Kind::BikeShare => "bicycle_rental",
         }
     }
 
@@ -103,6 +136,9 @@ impl Kind {
             Kind::WasteBasket => &[],
             Kind::Fountain => &[],
             Kind::Toilets => &[],
+            // `capacity` agrees on only 30% of the pairs within 2 m in
+            // Japan: docks get added and removed.
+            Kind::BikeShare => &[],
         }
     }
 
@@ -112,6 +148,15 @@ impl Kind {
     /// donor, and OSM sometimes names the town or shop that runs it.
     fn operator_must_agree(self) -> bool {
         self == Kind::PostBox
+    }
+
+    /// Whether different brands on both sides rule out a match, by
+    /// `brand:wikidata` or by name ([brand_names]). True for bike-share
+    /// stations: a HELLO CYCLING station next to a docomo one is
+    /// another station, and so is a Voi or Dott parking zone next to a
+    /// PubliBike or nextbike station.
+    fn brand_must_agree(self) -> bool {
+        self == Kind::BikeShare
     }
 }
 
@@ -197,6 +242,9 @@ impl Settings {
             Kind::WasteBasket => (15.0, RefRule::Ignore),
             Kind::Fountain => (15.0, RefRule::Ignore),
             Kind::Toilets => (30.0, RefRule::Ignore),
+            // In Japan, 12,183 of the 13,145 pairs within 20 m are
+            // within 2 m; chance pairs catch up beyond 20 m.
+            Kind::BikeShare => (20.0, RefRule::Ignore),
         });
         Settings {
             max_meters,
@@ -219,6 +267,117 @@ fn normalize_ref(value: &str, last_word: bool) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+/// The ID of a bike-share station in its GBFS feed: the system ID,
+/// lowercased, and the station ID within it. AllThePlaces writes it as
+/// `ref:gbfs=hellocycling:1234`. OpenStreetMap has it in one of three
+/// ways: `ref:gbfs` like AllThePlaces (mostly in Canada, Britain and
+/// the US), `gbfs:system_id` and `gbfs:station_id` (mostly in Japan),
+/// or `ref:gbfs:hellocycling=1234`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GbfsId {
+    system: String,
+    station: String,
+}
+
+impl GbfsId {
+    fn new(system: &str, station: &str) -> Option<GbfsId> {
+        let (system, station) = (system.trim(), station.trim());
+        (!system.is_empty() && !station.is_empty()).then(|| GbfsId {
+            system: system.to_lowercase(),
+            station: station.to_string(),
+        })
+    }
+
+    /// Parses `system:station`, as in `ref:gbfs`.
+    fn parse(value: &str) -> Option<GbfsId> {
+        let (system, station) = value.split_once(':')?;
+        GbfsId::new(system, station)
+    }
+
+    /// All GBFS IDs that `tags` give, in any of the three ways.
+    fn from_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<GbfsId> {
+        let mut ids = Vec::new();
+        let (mut system, mut station) = (None, None);
+        for (key, value) in tags {
+            match key {
+                "ref:gbfs" => ids.extend(value.split(';').filter_map(GbfsId::parse)),
+                "gbfs:system_id" => system = Some(value),
+                "gbfs:station_id" => station = Some(value),
+                _ => {
+                    if let Some(system) = key.strip_prefix("ref:gbfs:") {
+                        ids.extend(value.split(';').filter_map(|v| GbfsId::new(system, v)));
+                    }
+                }
+            }
+        }
+        if let (Some(system), Some(station)) = (system, station) {
+            ids.extend(GbfsId::new(system, station));
+        }
+        ids
+    }
+}
+
+/// The brand, network and operator names in `tags`, lowercased and
+/// with nothing but letters and digits, so that `Deezer nextbike`
+/// becomes `deezernextbike`. The system ID of a GBFS feed in `ref:gbfs`
+/// counts too: `sharedmobility.ch:velospot:168` gives
+/// `sharedmobilitych` and `velospot`, since an aggregator's `brand`
+/// names the aggregator, not the operator.
+fn brand_names<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<String> {
+    let compact = |value: &str| -> String {
+        value
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let mut names = Vec::new();
+    for (key, value) in tags {
+        match key {
+            "brand" | "brand:en" | "network" | "network:en" | "network:short:en" | "operator"
+            | "operator:en" => names.extend(value.split(';').map(compact)),
+            "ref:gbfs" => {
+                let mut parts: Vec<&str> = value.split(':').collect();
+                parts.pop(); // the station ID
+                names.extend(parts.into_iter().map(compact));
+            }
+            _ => {}
+        }
+    }
+    names.retain(|n| n.chars().count() >= 3);
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// A station number, trimmed and lowercased.
+fn normalize_code(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+/// The words of a station name, lowercased, of at least four letters
+/// or digits, so that `Löwenplatz / Burbaki-Panorama` gives `löwenplatz`,
+/// `burbaki` and `panorama`. Japanese names have no spaces, so
+/// `M05.塩見縄手` gives `m05` and `塩見縄手`.
+fn name_words(name: &str) -> Vec<String> {
+    name.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 4)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether two lists of [brand_names] share a brand: one name
+/// contains the other, so that `nextbike` agrees with
+/// `deezernextbike`. Empty lists say nothing, so they agree.
+fn brand_names_agree(atp: &[String], osm: &[String]) -> bool {
+    atp.is_empty()
+        || osm.is_empty()
+        || atp.iter().any(|a| {
+            osm.iter()
+                .any(|o| a.contains(o.as_str()) || o.contains(a.as_str()))
+        })
+}
+
 /// A tag value without spaces, lowercased, so that
 /// `Mo-Fr 17:30; Sa 08:00` equals `Mo-Fr 17:30;Sa 08:00`.
 fn normalize_value(value: &str) -> String {
@@ -239,6 +398,15 @@ fn normalize_value(value: &str) -> String {
 ///   A ref never widens the search radius, since short refs repeat:
 ///   1,201 OSM post boxes in Japan share a ref with a Japan Post box,
 ///   and 456 of them are more than 200 m away.
+/// - For bike-share stations, the same GBFS ID ([GbfsId]) scores like
+///   the same ref, up to [GBFS_ID_MAX_METERS], since these IDs are
+///   unique within their system. Another ID of the same system, or
+///   different brands on both sides ([Kind::brand_must_agree]), rules
+///   out a match. The same station number (ATP `short_name`, OSM
+///   `ref`) counts like the same GBFS ID: Bluebikes stations in OSM are
+///   often 20–150 m from where the feed now puts them, but keep their
+///   number. A station name that shares a word confirms a match, and
+///   widens the radius to [BIKE_SHARE_NAME_MAX_METERS].
 /// - Otherwise [KIND_FACTOR], plus [CONFIRM_BONUS] for each confirming
 ///   tag that agrees, times the distance score. Confirming tags are
 ///   those of [Kind::confirming_keys], and an OSM `ref` that contains the ATP
@@ -267,6 +435,18 @@ pub struct InfrastructureMatcher {
     street: Option<String>,
     /// For bicycle parking, the ATP `capacity`; see [Matcher::may_share].
     capacity: Option<u32>,
+    /// For bike-share stations, the ATP `brand:wikidata`.
+    brands: Vec<u64>,
+    /// For bike-share stations, the ATP [brand_names].
+    brand_names: Vec<String>,
+    /// The station's ID in its GBFS feed, from `ref:gbfs`.
+    gbfs_id: Option<GbfsId>,
+    /// For bike-share stations, the [name_words] of the ATP `name`.
+    name_words: Vec<String>,
+    /// For bike-share stations, the station number that riders see,
+    /// lowercased: GBFS `short_name`, which OSM has as `ref`, such as
+    /// Bluebikes' `D32022` or nextbike's `80285`.
+    station_code: Option<String>,
 }
 
 impl InfrastructureMatcher {
@@ -278,6 +458,26 @@ impl InfrastructureMatcher {
             .find(|&(k, _)| k == self.settings.osm_ref_key)
             .and_then(|(_, v)| normalize_ref(v, false));
         matches!((&self.reference, osm), (Some(atp), Some(osm)) if *atp == osm)
+            || self.gbfs_match(candidate) == Some(true)
+            || self.same_code(candidate)
+    }
+
+    /// For a bike-share station, `Some(true)` if `candidate` has our
+    /// GBFS ID, `Some(false)` if it has another ID of the same system,
+    /// and `None` otherwise. An ID of another system only counts as a
+    /// name ([brand_names]): a system may be renamed, such as
+    /// `docomo-cycle` and `docomo-cycle-tokyo`, and OSM may still have
+    /// the old one.
+    fn gbfs_match(&self, candidate: &OsmCandidate) -> Option<bool> {
+        let atp = self.gbfs_id.as_ref()?;
+        let osm = GbfsId::from_tags(candidate.tags());
+        if osm.contains(atp) {
+            Some(true)
+        } else if osm.iter().any(|id| id.system == atp.system) {
+            Some(false)
+        } else {
+            None
+        }
     }
 
     pub fn for_place(place: &Place) -> Option<InfrastructureMatcher> {
@@ -312,7 +512,52 @@ impl InfrastructureMatcher {
             capacity: (kind == Kind::BicycleParking)
                 .then(|| tag("capacity").and_then(parse_capacity))
                 .flatten(),
+            brands: if kind.brand_must_agree() {
+                tag("brand:wikidata")
+                    .map(|v| parse_wikidata_ids(v).collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
+            brand_names: if kind.brand_must_agree() {
+                brand_names(tags())
+            } else {
+                Vec::new()
+            },
+            gbfs_id: (kind == Kind::BikeShare)
+                .then(|| tag("ref:gbfs").and_then(GbfsId::parse))
+                .flatten(),
+            station_code: (kind == Kind::BikeShare)
+                .then(|| tag("short_name").map(normalize_code))
+                .flatten()
+                .filter(|code| code.chars().count() >= 3),
+            name_words: if kind == Kind::BikeShare {
+                tag("name").map(name_words).unwrap_or_default()
+            } else {
+                Vec::new()
+            },
         })
+    }
+
+    /// Whether `candidate`'s `ref` is our station number, for
+    /// bike-share stations.
+    fn same_code(&self, candidate: &OsmCandidate) -> bool {
+        self.station_code.as_ref().is_some_and(|code| {
+            candidate
+                .tags()
+                .find(|&(k, _)| k == "ref")
+                .is_some_and(|(_, v)| normalize_code(v) == *code)
+        })
+    }
+
+    /// Whether `candidate`'s name shares a word with ours, for
+    /// bike-share stations.
+    fn same_name(&self, candidate: &OsmCandidate) -> bool {
+        !self.name_words.is_empty()
+            && candidate
+                .tags()
+                .find(|&(k, _)| k == "name")
+                .is_some_and(|(_, v)| name_words(v).iter().any(|w| self.name_words.contains(w)))
     }
 
     /// For `candidate`, the score at zero distance and the minimum
@@ -331,6 +576,27 @@ impl InfrastructureMatcher {
                 return (0.0, 0.0);
             }
         }
+        // The same GBFS ID outweighs a different brand, since OSM may
+        // still have a station's former brand.
+        match self.gbfs_match(candidate) {
+            Some(true) => return (1.0, SAME_REF_MIN_SCORE),
+            Some(false) => return (0.0, 0.0),
+            None => {}
+        }
+        if !self.brands.is_empty() {
+            let mut osm = tag("brand:wikidata")
+                .into_iter()
+                .flat_map(parse_wikidata_ids)
+                .peekable();
+            if osm.peek().is_some() && !osm.any(|id| self.brands.contains(&id)) {
+                return (0.0, 0.0);
+            }
+        }
+        if !self.brand_names.is_empty()
+            && !brand_names_agree(&self.brand_names, &brand_names(candidate.tags()))
+        {
+            return (0.0, 0.0);
+        }
         if self.same_ref(candidate) {
             return (1.0, SAME_REF_MIN_SCORE);
         }
@@ -339,6 +605,9 @@ impl InfrastructureMatcher {
             if tag(key).is_some_and(|osm| normalize_value(osm) == *atp) {
                 factor += CONFIRM_BONUS;
             }
+        }
+        if self.same_name(candidate) {
+            factor += CONFIRM_BONUS;
         }
         let osm_ref = tag("ref");
         if let (Some(street), Some(osm)) = (&self.street, osm_ref)
@@ -372,7 +641,13 @@ impl Matcher for InfrastructureMatcher {
         let Some(centroid) = geometry.centroid() else {
             return 0.0;
         };
-        let max_meters = self.settings.max_meters;
+        let max_meters = if self.gbfs_match(candidate) == Some(true) || self.same_code(candidate) {
+            GBFS_ID_MAX_METERS
+        } else if self.same_name(candidate) {
+            BIKE_SHARE_NAME_MAX_METERS
+        } else {
+            self.settings.max_meters
+        };
         if geo_point_distance(&self.center, &centroid) > max_meters {
             return 0.0;
         }
@@ -401,7 +676,14 @@ impl Matcher for InfrastructureMatcher {
     }
 
     fn max_distance(&self) -> Option<ChordAngle> {
-        Some(meters_to_chord_angle(self.settings.max_meters))
+        let meters = if self.gbfs_id.is_some() || self.station_code.is_some() {
+            self.settings.max_meters.max(GBFS_ID_MAX_METERS)
+        } else if !self.name_words.is_empty() {
+            self.settings.max_meters.max(BIKE_SHARE_NAME_MAX_METERS)
+        } else {
+            self.settings.max_meters
+        };
+        Some(meters_to_chord_angle(meters))
     }
 }
 
@@ -506,6 +788,16 @@ mod tests {
     }
 
     const NO_MATCH: (f64, f64) = (0.0, 0.0);
+
+    const HELLO_CYCLING: &[(&str, &str)] = &[
+        ("amenity", "bicycle_rental"),
+        ("ref", "hellocycling:1234"),
+        ("ref:gbfs", "hellocycling:1234"),
+        ("ref:gbfs:hellocycling", "1234"),
+        ("brand", "HELLO CYCLING"),
+        ("brand:wikidata", "Q91231927"),
+        ("capacity", "7"),
+    ];
 
     // ATP features, as the spiders emit them (shortened).
     const SWISS_POST_BOX: &[(&str, &str)] = &[
@@ -913,6 +1205,254 @@ mod tests {
             want: NO_MATCH,
         },
         Case {
+            what: "bike share, same GBFS ID as gbfs:system_id and gbfs:station_id",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("gbfs:system_id", "hellocycling"),
+                ("gbfs:station_id", "1234"),
+            ],
+            meters: 150.0,
+            want: (0.9, 0.93),
+        },
+        Case {
+            what: "bike share, same GBFS ID as ref:gbfs",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "HelloCycling:1234"),
+            ],
+            meters: 0.0,
+            want: (1.0, 1.0),
+        },
+        Case {
+            what: "bike share, same GBFS ID as ref:gbfs:<system>",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs:hellocycling", "1234"),
+            ],
+            meters: 10.0,
+            want: (0.99, 1.0),
+        },
+        Case {
+            what: "bike share, same GBFS ID beats a different brand",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("brand:wikidata", "Q55533296"),
+                ("ref:gbfs", "hellocycling:1234"),
+            ],
+            meters: 10.0,
+            want: (0.99, 1.0),
+        },
+        Case {
+            what: "bike share, same GBFS ID too far away",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "hellocycling:1234"),
+            ],
+            meters: 250.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "bike share, another station of the same system",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "hellocycling:999"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "bike share, ID of another system names another brand",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "docomo-cycle:1234"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "bike share, ID of a renamed system",
+            spider: "gbfs",
+            atp: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "docomo-cycle-tokyo:1131"),
+                ("brand", "Docomo Bike Share"),
+            ],
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "docomo-cycle:1131"),
+            ],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "bike share without IDs, close by",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("brand:wikidata", "Q91231927"),
+            ],
+            meters: 10.0,
+            want: (0.4, 0.4),
+        },
+        Case {
+            what: "bike share without IDs, same name word at 35 m",
+            spider: "gbfs",
+            atp: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "nextbike_ch:348292"),
+                ("brand", "Nextbike"),
+                ("name", "Mariazell"),
+            ],
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("operator", "nextbike"),
+                ("name", "Mariazell"),
+            ],
+            meters: 35.0,
+            want: (0.25, 0.26),
+        },
+        Case {
+            what: "bike share, same station number at 90 m",
+            spider: "gbfs",
+            atp: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "bluebikes:f8348719-0de8-11e7-991c-3863bb43a7d0"),
+                ("brand", "Bluebikes"),
+                ("short_name", "B32000"),
+            ],
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("brand", "Bluebikes"),
+                ("ref", "B32000"),
+            ],
+            meters: 90.0,
+            want: (0.94, 0.96),
+        },
+        Case {
+            what: "bike share, other station number at 90 m",
+            spider: "gbfs",
+            atp: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "bluebikes:f8348719-0de8-11e7-991c-3863bb43a7d0"),
+                ("short_name", "B32000"),
+            ],
+            osm: &[("amenity", "bicycle_rental"), ("ref", "B32005")],
+            meters: 90.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "bike share without IDs, other name at 35 m",
+            spider: "gbfs",
+            atp: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "nextbike_ch:348292"),
+                ("name", "Mariazell"),
+            ],
+            osm: &[("amenity", "bicycle_rental"), ("name", "Bahnhof")],
+            meters: 35.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "bike share without IDs, beyond 20 m",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[("amenity", "bicycle_rental")],
+            meters: 25.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "bike share of another brand",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("brand:wikidata", "Q55533296"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "bike share, brand names differ",
+            spider: "gbfs",
+            atp: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "voi_ch:VOI:Station:af32f6ac"),
+                ("brand", "Voi Switzerland"),
+                ("network", "Voi Switzerland"),
+            ],
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("brand", "PubliBike"),
+                ("operator", "PubliBike"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "bike share, brand name within the OSM network",
+            spider: "gbfs",
+            atp: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "nextbike_bn:3167232"),
+                ("brand", "Nextbike"),
+            ],
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("network", "Deezer nextbike"),
+                ("operator", "nextbike GmbH"),
+            ],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "bike share, aggregator feed names the operator in its system ID",
+            spider: "gbfs",
+            atp: &[
+                ("amenity", "bicycle_rental"),
+                ("ref:gbfs", "sharedmobility.ch:velospot:1186"),
+                ("brand", "sharedmobility.ch"),
+                ("operator", "Swiss Federal Office of Energy"),
+            ],
+            osm: &[
+                ("amenity", "bicycle_rental"),
+                ("brand", "Velospot"),
+                ("operator", "PubliBike"),
+            ],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "bike share, OSM without brand names",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[("amenity", "bicycle_rental"), ("name", "Jelbi-Station")],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "bike share station against a rental shop",
+            spider: "gbfs",
+            atp: HELLO_CYCLING,
+            osm: &[("amenity", "bicycle_rental"), ("bicycle_rental", "shop")],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
             what: "default radius for an unknown AED spider",
             spider: "some_aed_spider",
             atp: &[("emergency", "defibrillator")],
@@ -983,6 +1523,116 @@ mod tests {
         assert_eq!(kind(&[("man_made", "drinking_fountain")]), Some("fountain"));
         assert_eq!(kind(&[("amenity", "toilets")]), Some("toilets"));
         assert_eq!(kind(&[("amenity", "waste_basket")]), Some("waste_basket"));
+        assert_eq!(
+            kind(&[("amenity", "bicycle_rental")]),
+            Some("bicycle_rental")
+        );
+        assert_eq!(
+            kind(&[("bicycle_rental", "shop"), ("amenity", "bicycle_rental")]),
+            None
+        );
+        assert_eq!(
+            kind(&[("amenity", "bicycle_rental"), ("bicycle_rental", "shop")]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_no_matcher_for_rental_shops() {
+        let shop = &[("amenity", "bicycle_rental"), ("bicycle_rental", "shop")];
+        assert!(InfrastructureMatcher::for_place(&place("x", shop)).is_none());
+    }
+
+    #[test]
+    fn test_gbfs_max_distance() {
+        let station = InfrastructureMatcher::for_place(&place("gbfs", HELLO_CYCLING)).unwrap();
+        assert!(station.max_distance() == Some(meters_to_chord_angle(GBFS_ID_MAX_METERS)));
+        assert!(station.is_exclusive());
+        let without_id = &[("amenity", "bicycle_rental")];
+        let other = InfrastructureMatcher::for_place(&place("x", without_id)).unwrap();
+        assert!(other.max_distance() == Some(meters_to_chord_angle(20.0)));
+    }
+
+    #[test]
+    fn test_gbfs_rule() {
+        let station = InfrastructureMatcher::for_place(&place("gbfs", HELLO_CYCLING)).unwrap();
+        let rule = |osm: &[(&str, &str)]| with_candidate(osm, |c| station.rule(c));
+        let same = &[
+            ("amenity", "bicycle_rental"),
+            ("ref:gbfs", "hellocycling:1234"),
+        ];
+        assert_eq!(rule(same), "ref");
+        assert_eq!(rule(&[("amenity", "bicycle_rental")]), "kind");
+    }
+
+    #[test]
+    fn test_name_words() {
+        assert_eq!(
+            name_words("Löwenplatz / Burbaki-Panorama"),
+            vec!["löwenplatz", "burbaki", "panorama"]
+        );
+        assert_eq!(name_words("M05.塩見縄手"), vec!["塩見縄手"]);
+        assert!(name_words("U 7").is_empty());
+    }
+
+    #[test]
+    fn test_brand_names() {
+        let names = |tags: &[(&'static str, &'static str)]| brand_names(tags.iter().copied());
+        assert_eq!(
+            names(&[
+                ("brand", "Deezer nextbike"),
+                ("operator", "nextbike GmbH"),
+                ("name", "Fraenkelufer"),
+            ]),
+            vec!["deezernextbike", "nextbikegmbh"]
+        );
+        assert_eq!(
+            names(&[("ref:gbfs", "sharedmobility.ch:velospot:168")]),
+            vec!["sharedmobilitych", "velospot"]
+        );
+        assert_eq!(
+            names(&[("brand", "ドコモ・バイクシェア")]),
+            vec!["ドコモバイクシェア"]
+        );
+        assert!(names(&[("brand", "VB")]).is_empty());
+        let agree = |a: &[&str], o: &[&str]| {
+            let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            brand_names_agree(&v(a), &v(o))
+        };
+        assert!(agree(&["nextbike"], &["deezernextbike"]));
+        assert!(agree(&["docomobikeshareservice"], &["docomobikeshare"]));
+        assert!(!agree(&["voiswitzerland", "voi"], &["publibike"]));
+        assert!(agree(&[], &["publibike"]));
+        assert!(agree(&["voi"], &[]));
+    }
+
+    #[test]
+    fn test_gbfs_id_from_tags() {
+        let ids = |tags: &[(&'static str, &'static str)]| GbfsId::from_tags(tags.iter().copied());
+        let id = |system: &str, station: &str| GbfsId::new(system, station).unwrap();
+        assert_eq!(
+            ids(&[("ref:gbfs", "Bixi_MTL:3;Bixi_MTL:4")]),
+            vec![id("bixi_mtl", "3"), id("bixi_mtl", "4")]
+        );
+        assert_eq!(
+            ids(&[
+                ("gbfs:station_id", "77"),
+                ("gbfs:system_id", "docomo-cycle")
+            ]),
+            vec![id("docomo-cycle", "77")]
+        );
+        assert_eq!(
+            ids(&[("ref:gbfs:hellocycling", "1234")]),
+            vec![id("hellocycling", "1234")]
+        );
+        // Station IDs may contain colons; only the first one separates.
+        assert_eq!(
+            ids(&[("ref:gbfs", "lyft_nyc:a:b")]),
+            vec![id("lyft_nyc", "a:b")]
+        );
+        assert!(ids(&[("gbfs:station_id", "77")]).is_empty());
+        assert!(ids(&[("ref:gbfs", "77"), ("ref", "x:1")]).is_empty());
+        assert!(ids(&[("ref:gbfs", ":77")]).is_empty());
     }
 
     #[test]
