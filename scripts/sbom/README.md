@@ -46,7 +46,7 @@ tools such as `apk`, `sed`, `awk` and `grep`. It then:
    comments for why a curated CA root bundle isn’t a good fit for
    CycloneDX’s `certificate` cryptographic-asset type), and the
    vendored “data” components (`id-tagging-schema`,
-   `osm-testdata-grid`) that `cargo cyclonedx` has no way to see.
+   `libpostal-dictionaries`, `osm-testdata-grid`) that `cargo cyclonedx` has no way to see.
 3. Builds a CycloneDX fragment for each statically linked binary from
    the `felt/tippecanoe` build — `tippecanoe` itself and its sibling
    `tile-join` (same commit, same static-link treatment) — by

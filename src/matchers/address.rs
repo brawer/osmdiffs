@@ -3,6 +3,8 @@
 //! address parsing: OSM's split `addr:street`/`addr:housenumber` are
 //! looked up in whatever address text the ATP feature carries.
 
+use super::street;
+
 fn find<'a>(tags: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
     tags.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
 }
@@ -47,7 +49,9 @@ fn fold_tokens(s: &str) -> Vec<String> {
 /// address text (`349-B` in `Mythenquai 349b`), and OSM's
 /// `addr:street` must appear in it with spaces and punctuation
 /// removed, or start with one ATP word of 5+ letters (abbreviations
-/// like `Zürcherstr.`). The ATP text is all of `addr:street_address`,
+/// like `Zürcherstr.`), or occur in it as [street::contains_street]
+/// finds it, allowing for abbreviations from libpostal's dictionaries
+/// (`W Lloyd Expy` for `West Lloyd Expressway`). The ATP text is all of `addr:street_address`,
 /// `addr:street`, `addr:housenumber` and `addr:full` that are present.
 pub fn osm_address_in_atp_text(atp_tags: &[(&str, &str)], osm_tags: &[(&str, &str)]) -> bool {
     let (Some(street), Some(hn)) = (
@@ -70,6 +74,7 @@ pub fn osm_address_in_atp_text(atp_tags: &[(&str, &str)], osm_tags: &[(&str, &st
     }
     let atp = fold_tokens(&text.join(" "));
     let hn = fold_tokens(hn);
+    let osm_street = street;
     let street: String = fold_tokens(street).concat();
     if hn.is_empty() || street.is_empty() {
         return false;
@@ -83,7 +88,12 @@ pub fn osm_address_in_atp_text(atp_tags: &[(&str, &str)], osm_tags: &[(&str, &st
                 && !t.chars().any(|c| c.is_ascii_digit())
                 && street.starts_with(t.as_str())
         });
-    hn_ok && street_ok
+    hn_ok
+        && (street_ok
+            || street::contains_street(
+                &street::street_words(&text.join(" ")),
+                &street::street_words(osm_street),
+            ))
 }
 
 #[cfg(test)]
@@ -107,6 +117,27 @@ mod tests {
         assert!(osm_address_in_atp_text(
             &[("addr:street_address", "Mythenquai 349b")],
             &osm_b
+        ));
+    }
+
+    #[test]
+    fn abbreviations() {
+        let osm = [
+            ("addr:street", "West Lloyd Expressway"),
+            ("addr:housenumber", "4850"),
+        ];
+        assert!(osm_address_in_atp_text(
+            &[("addr:street_address", "4850 W Lloyd Expy")],
+            &osm
+        ));
+        assert!(!osm_address_in_atp_text(
+            &[("addr:street_address", "4850 E Lloyd Expy")],
+            &osm
+        ));
+        let osm = [("addr:street", "Lange Straße"), ("addr:housenumber", "10")];
+        assert!(osm_address_in_atp_text(
+            &[("addr:street", "Lange Strasse"), ("addr:housenumber", "10")],
+            &osm
         ));
     }
 }

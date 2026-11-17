@@ -15,6 +15,7 @@ pub mod brand_domains;
 pub mod contact;
 mod infrastructure_matcher;
 mod poi_matcher;
+pub(crate) mod street;
 mod transit_matcher;
 pub(crate) use infrastructure_matcher::kind_name as infrastructure_kind;
 pub(crate) use transit_matcher::{IFOPT_KEYS, is_stop as is_transit_stop, split_values, swiss_uic};

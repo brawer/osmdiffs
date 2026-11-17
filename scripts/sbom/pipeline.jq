@@ -21,6 +21,7 @@
 #   ID_TAGGING_SCHEMA_PURL    package URL of the vendored id-tagging-schema
 #   ID_TAGGING_SCHEMA_VERSION version of the vendored id-tagging-schema
 #   JQ_VERSION                version of jq used to build this SBOM
+#   LIBPOSTAL_COMMIT          commit of the vendored libpostal dictionaries
 #   OSM_TESTDATA_COMMIT       commit hash of the vendored osm-testdata grid
 #   PROTOC_VERSION            version of the Protocol Buffers compiler
 #   RUSTC_VERSION             version of the Rust compiler
@@ -63,12 +64,12 @@ else . end |
 ) as $root_idx |
 .dependencies[$root_idx].ref = $root_ref |
 
-# Declare the root component's dependency on our two vendored, non-crate
+# Declare the root component's dependency on our three vendored, non-crate
 # "data" components, so the dependency graph has a single root instead of
-# three (the FOSSA NTIA validator flags orphaned components -- ones no
+# four (the FOSSA NTIA validator flags orphaned components -- ones no
 # other component depends on -- as extra roots).
 .dependencies[$root_idx].dependsOn =
-  ((.dependencies[$root_idx].dependsOn // []) + ["id-tagging-schema", "osm-testdata-grid"]) |
+  ((.dependencies[$root_idx].dependsOn // []) + ["id-tagging-schema", "libpostal-dictionaries", "osm-testdata-grid"]) |
 
 .bomFormat = "CycloneDX" |
 .specVersion = "1.7" |
@@ -193,6 +194,27 @@ else . end |
     "supplier": {
       "name": "iD Tagging Schema project (OpenStreetMap)",
       "url": [ "https://github.com/openstreetmap/id-tagging-schema" ]
+    }
+  },
+  {
+    "type": "data",
+    "bom-ref": "libpostal-dictionaries",
+    "name": "libpostal-dictionaries",
+    "description": "Street-name abbreviations from libpostal's address dictionaries",
+    "version": $LIBPOSTAL_COMMIT,
+    "purl": "pkg:github/openvenues/libpostal@" + $LIBPOSTAL_COMMIT + "#resources/dictionaries",
+    "licenses": [{"license": {"id": "MIT"}}],
+    "externalReferences": [{
+        "type": "vcs",
+        "url": "https://github.com/openvenues/libpostal/tree/" + $LIBPOSTAL_COMMIT + "/resources/dictionaries"
+    }],
+    "manufacturer": {
+      "name": "openvenues",
+      "url": ["https://github.com/openvenues/libpostal"]
+    },
+    "supplier": {
+      "name": "openvenues",
+      "url": ["https://github.com/openvenues/libpostal"]
     }
   },
   {

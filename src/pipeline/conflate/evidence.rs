@@ -6,6 +6,7 @@
 use crate::matchers::contact::{
     AtpContacts, Nondescript, is_email_key, is_phone_key, is_website_key,
 };
+use crate::matchers::street::same_street;
 use crate::matchers::{normalize_name, split_values};
 use crate::utils::opening_hours::same_schedule;
 use geo::{Distance, Euclidean, Geometry, MapCoords};
@@ -113,7 +114,7 @@ const AGREEING: &[(&str, Check)] = &[
         "opening_hours",
         Check::Whole("opening_hours", same_schedule),
     ),
-    ("addr:street", Check::Text(&["addr:street"], text)),
+    ("addr:street", Check::Whole("addr:street", same_streets)),
     ("addr:housenumber", Check::Text(&["addr:housenumber"], text)),
     ("addr:postcode", Check::Text(&["addr:postcode"], postcode)),
     ("addr:city", Check::Text(&["addr:city"], text)),
@@ -150,6 +151,12 @@ pub(in crate::pipeline) fn has_compared_tag<'a>(
 fn text(value: &str) -> Option<String> {
     let v = normalize_name(value);
     (!v.is_empty()).then_some(v)
+}
+
+/// Whether any of the `;`-separated streets in `a` is the same as one
+/// in `b`, allowing for abbreviations ([same_street]).
+fn same_streets(a: &str, b: &str) -> bool {
+    split_values(a).any(|a| split_values(b).any(|b| same_street(a, b)))
 }
 
 /// A postcode without its formatting: only its letters and digits,
@@ -359,9 +366,17 @@ mod tests {
         ];
         assert_eq!(
             agreeing(atp.iter().copied(), osm.iter().copied(), None),
-            vec!["addr:housenumber", "addr:postcode"]
+            vec!["addr:street", "addr:housenumber", "addr:postcode"]
         );
         let atp = [("addr:street", "Nussdorferplatz 7")];
+        let osm = [
+            ("addr:street", "Nußdorfer Platz"),
+            ("addr:housenumber", "7"),
+        ];
+        assert_eq!(
+            agreeing(atp.iter().copied(), osm.iter().copied(), None),
+            vec!["addr:street", "addr:housenumber"]
+        );
         let osm = [
             ("addr:street", "Nussdorferplatz"),
             ("addr:housenumber", "7"),
