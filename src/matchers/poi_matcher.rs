@@ -1,5 +1,6 @@
 use super::brand_domains::BrandDomains;
 use super::contact::{AtpContacts, CONTACT_FACTOR, Nondescript, category_factor, main_category};
+use super::official_id::{self, IdEvidence};
 use super::{
     MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
     meters_to_chord_angle, normalize_name, parse_wikidata_ids, split_values, street,
@@ -175,6 +176,12 @@ const COLOCATED_METERS: f64 = 25.0;
 /// Matches points of interest, such as shops, restaurants, hotels and
 /// schools, by evidence:
 ///
+/// - The same official ID, such as a French school's UAI: at least
+///   [official_id::SAME_ID_MIN_SCORE], by the distance to the OSM
+///   shape; see [official_id::same_id_score].
+/// - Both sides have an official ID of the same kind, but share none:
+///   no match, whatever else agrees. A collège and its SEGPA section
+///   can share an address, a name and a phone number.
 /// - Equal `brand:wikidata`: the distance score.
 /// - Both sides have `brand:wikidata`, but share no ID: no match,
 ///   whatever else agrees.
@@ -202,7 +209,7 @@ const COLOCATED_METERS: f64 = 25.0;
 /// so that two branches of a chain don't both take the same OSM shop
 /// when OSM lacks one of them. Features within [COLOCATED_METERS] of
 /// each other may share one ([Matcher::colocated_radius]), and so may
-/// features with a shared contact ([Matcher::may_share]).
+/// features with a shared contact or official ID ([Matcher::may_share]).
 ///
 /// Contacts that differ never lower a score: about one in six
 /// right `brand:wikidata` matches has different numbers on the two
@@ -226,6 +233,8 @@ pub struct PoiMatcher<'a> {
     /// The ATP feature's `name` and `brand`, for [Self::name_fits].
     name: Option<String>,
     brand: Option<String>,
+    /// See [official_id::atp_ids].
+    official_ids: Vec<(&'static str, String)>,
 }
 
 impl<'a> PoiMatcher<'a> {
@@ -265,7 +274,9 @@ impl<'a> PoiMatcher<'a> {
             ) && (v.chars().any(|c| c.is_ascii_digit())
                 || address.iter().any(|(k, _)| k == "addr:housenumber"))
         });
+        let official_ids = official_id::atp_ids(tags());
         if brand_wikidata.is_empty()
+            && official_ids.is_empty()
             && brand_names.is_empty()
             && contacts.is_empty()
             && domain_brand_ids.is_empty()
@@ -286,6 +297,7 @@ impl<'a> PoiMatcher<'a> {
             address,
             name: find("name"),
             brand: find("brand"),
+            official_ids,
         })
     }
 
@@ -294,6 +306,11 @@ impl<'a> PoiMatcher<'a> {
     /// `brand:wikidata`, below 1.0 for a contact, brand name, brand
     /// domain or address match, 0.0 for no match.
     fn factor_and_rule(&self, candidate: &OsmCandidate) -> (f64, &'static str) {
+        match official_id::compare(&self.official_ids, candidate.tags()) {
+            IdEvidence::Same => return (1.0, "official_id"),
+            IdEvidence::Different => return (0.0, "official_id"),
+            IdEvidence::Unknown => {}
+        }
         let mut osm_brand = find_brand_wikidata(candidate.tags()).peekable();
         let osm_has_brand = osm_brand.peek().is_some();
         if !self.brand_wikidata.is_empty() && osm_has_brand {
@@ -418,8 +435,9 @@ impl<'a> PoiMatcher<'a> {
 }
 
 impl Matcher for PoiMatcher<'_> {
-    /// `brand_wikidata`, `contact` (phone or email), `brand_name` or
-    /// `brand_domain`, in the order [PoiMatcher::factor] tries them.
+    /// `official_id`, `brand_wikidata`, `contact` (phone or email),
+    /// `brand_name`, `brand_domain` or `address`, in the order
+    /// [PoiMatcher::factor_and_rule] tries them.
     fn rule(&self, candidate: &OsmCandidate) -> &'static str {
         self.factor_and_rule(candidate).1
     }
@@ -433,7 +451,9 @@ impl Matcher for PoiMatcher<'_> {
     ///
     /// A website alone doesn't count either, for the same reason: the
     /// Swiss Post spider gives each post office a page of its own.
-    /// Only the street address can't say that a place is missing.
+    /// Only the street address can't say that a place is missing,
+    /// and neither can an official ID: OSM often has a school without
+    /// its UAI.
     fn reports_missing(&self) -> bool {
         !self.brand_wikidata.is_empty()
             || !self.brand_names.is_empty()
@@ -460,8 +480,13 @@ impl Matcher for PoiMatcher<'_> {
     /// our spider took it. Spiders sometimes list one store several
     /// times, such as Staples with a feature for each of its print
     /// services, a few dozen meters from the store.
+    ///
+    /// The same holds for an official ID: OSM sometimes maps a lycée
+    /// polyvalent and its lycée professionnel as one school, tagged
+    /// with the IDs of both.
     fn may_share(&self, candidate: &OsmCandidate) -> bool {
-        !self.contacts.is_empty() && self.contacts.agrees(candidate.tags())
+        (!self.contacts.is_empty() && self.contacts.agrees(candidate.tags()))
+            || official_id::compare(&self.official_ids, candidate.tags()) == IdEvidence::Same
     }
 
     fn colocated_radius(&self) -> Option<ChordAngle> {
@@ -478,6 +503,9 @@ impl Matcher for PoiMatcher<'_> {
         let Result::Ok(geometry) = candidate.geometry() else {
             return 0.0;
         };
+        if rule == "official_id" {
+            return official_id::same_id_score(&self.center, &geometry);
+        }
         let Some(centroid) = geometry.centroid() else {
             return 0.0;
         };
@@ -1338,5 +1366,128 @@ mod tests {
         assert!(!m.counts_for_coverage());
         let m = PoiMatcher::for_place(&denner, &Nondescript::none(), &domains).expect("matcher");
         assert!(m.counts_for_coverage());
+    }
+
+    /// Official ID evidence: a French school's UAI (`ref:FR:UAI` in
+    /// ATP, `ref:UAI` in OSM). The same ID matches whatever else
+    /// differs; a different one vetoes any other evidence.
+    #[test]
+    fn test_poi_matcher_official_id() {
+        use crate::tables::{Feature, StringPool};
+        use s2::{cellid::CellID, latlng::LatLng};
+        use tempfile::TempDir;
+
+        let school = |t: &[(&str, &str)]| {
+            let mut mask = MatchMask::default();
+            for (k, v) in t {
+                mask.add_tag(k, v);
+            }
+            Place {
+                s2_cell_id: CH_CLOTHES_ATP.s2_cell_id,
+                spider: String::from("enseignement_premier_second_degre_fr"),
+                mask,
+                fetched: test_timestamp(),
+                shape_wkb: test_shape(CH_CLOTHES_ATP.s2_cell_id),
+                tags: tags(t),
+            }
+        };
+        let atp = school(&[
+            ("amenity", "school"),
+            ("ref:FR:UAI", "0351686T"),
+            ("name", "Ecole primaire publique Françoise Dolto"),
+            ("addr:street_address", "8 rue Frédéric Lanne"),
+        ]);
+        assert!(atp.mask.intersects(&MatchMask::OFFICIAL_ID));
+        let m = PoiMatcher::for_place(&atp, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
+        assert!(!m.reports_missing());
+        assert!(!m.counts_for_coverage());
+
+        // A school with nothing but its ID still gets a matcher.
+        let id_only = school(&[("amenity", "school"), ("ref:FR:UAI", "0351686T")]);
+        assert!(PoiMatcher::for_place(&id_only, &Nondescript::none(), &NO_DOMAINS).is_some());
+
+        let dir = TempDir::new().expect("tempdir");
+        let mut strings: Vec<String> = [
+            "addr:housenumber",
+            "addr:street",
+            "amenity",
+            "building",
+            "name",
+            "ref:UAI",
+            "school",
+            "yes",
+            "8",
+            "Rue Frédéric Lanne",
+            "0351686T",
+            "0350001A",
+            "École Françoise Dolto",
+            "École maternelle Françoise Dolto",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        strings.sort();
+        let pool = StringPool::create(strings.into_iter(), dir.path(), &dir.path().join("strings"))
+            .expect("StringPool::create");
+        let score = |m: &PoiMatcher, t: &[(&str, &str)], meters: f64| {
+            let ll = LatLng::from(CellID(atp.s2_cell_id));
+            let point = geo::Point::new(ll.lng.deg(), ll.lat.deg() + meters / 111_195.0);
+            let feature = Feature {
+                id: 1,
+                tags: t
+                    .iter()
+                    .flat_map(|(k, v)| {
+                        [
+                            pool.lookup(k).unwrap() as u32,
+                            pool.lookup(v).unwrap() as u32,
+                        ]
+                    })
+                    .collect(),
+                geometry_wkb: crate::geometry::encode_wkb(&geo::Geometry::from(point)),
+                ..Default::default()
+            };
+            let candidate = OsmCandidate {
+                feature: &feature,
+                strings: &pool,
+            };
+            (
+                m.score_osm_candidate(&candidate),
+                m.rule(&candidate),
+                m.may_share(&candidate),
+            )
+        };
+        let address = [
+            ("addr:street", "Rue Frédéric Lanne"),
+            ("addr:housenumber", "8"),
+        ];
+
+        // The same ID: a match even far away, and for a building
+        // without any school tags.
+        let (s, rule, share) = score(&m, &[("building", "yes"), ("ref:UAI", "0351686T")], 0.0);
+        assert!((s - 1.0).abs() < 1e-6, "{s}");
+        assert_eq!(rule, "official_id");
+        assert!(share);
+        let (s, _, _) = score(&m, &[("amenity", "school"), ("ref:UAI", "0351686T")], 390.0);
+        assert!(s >= official_id::SAME_ID_MIN_SCORE, "{s}");
+
+        // Without an ID in OSM, the address still counts.
+        let mut unknown = vec![("amenity", "school"), ("name", "École Françoise Dolto")];
+        unknown.extend(address);
+        let (s, rule, share) = score(&m, &unknown, 0.0);
+        assert!(s > 0.5 && s < 1.0, "{s}");
+        assert_eq!(rule, "address");
+        assert!(!share);
+
+        // A different ID at the same address: the école maternelle
+        // next door, which no other evidence can outweigh.
+        let mut other = vec![
+            ("amenity", "school"),
+            ("name", "École maternelle Françoise Dolto"),
+            ("ref:UAI", "0350001A"),
+        ];
+        other.extend(address);
+        let (s, rule, _) = score(&m, &other, 0.0);
+        assert_eq!(s, 0.0);
+        assert_eq!(rule, "official_id");
     }
 }
