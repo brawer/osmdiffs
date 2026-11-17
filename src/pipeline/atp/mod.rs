@@ -529,6 +529,10 @@ fn is_usable_for_osm(fc: &geojson::FeatureCollection) -> bool {
         "Q115716001" => return false, // opendata.swiss BY-ASK
         "Q133462062" => return true,  // opendata.swiss OPEN
         "Q133802534" => return false, // opendata.swiss BY
+        // Public domain: a work of the US federal government, such as
+        // the National Register of Historic Places, which shares
+        // `ref:nrhp` with OSM.
+        "Q60671452" => return true,
         _ => {}
     }
 
@@ -1060,6 +1064,11 @@ mod tests {
             ("license", "Etalab Open License 2.0"),
             ("license:wikidata", "Q80939351"),
             ("spider:lineage", "S_ATP_GOVERNMENT")
+        ])));
+        assert!(is_usable_for_osm(&make_dataset(&[
+            ("license", "United States Government Work"),
+            ("license:wikidata", "Q60671452"),
+            ("spider:lineage", "S_ATP_GOVERNMENTS")
         ])));
         assert!(!is_usable_for_osm(&make_dataset(&[(
             "spider:lineage",

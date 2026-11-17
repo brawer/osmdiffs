@@ -14,6 +14,7 @@ mod address;
 pub mod brand_domains;
 pub mod contact;
 mod infrastructure_matcher;
+pub(crate) mod official_id;
 mod poi_matcher;
 pub(crate) mod street;
 mod transit_matcher;
@@ -75,6 +76,10 @@ impl MatchMask {
     pub const FUEL: MatchMask = MatchMask(1 << 6);
     pub const SHRUBBERY: MatchMask = MatchMask(1 << 7);
     pub const STREET_FURNITURE: MatchMask = MatchMask(1 << 8);
+    /// Features with an official ID that both sides share, such as a
+    /// French school's UAI; see [official_id::OFFICIAL_IDS]. Many of
+    /// them, such as historic places, are of no other kind we match.
+    pub const OFFICIAL_ID: MatchMask = MatchMask(1 << 11);
 
     /// Modifier bit: large objects such as railway platforms, which
     /// get a longer [match_distance].
@@ -94,10 +99,11 @@ impl MatchMask {
         | Self::PARKING.0
         | Self::FUEL.0
         | Self::SHRUBBERY.0
-        | Self::STREET_FURNITURE.0;
+        | Self::STREET_FURNITURE.0
+        | Self::OFFICIAL_ID.0;
 
     /// The importance of each category bit, for [MatchMask::importance].
-    const CATEGORY_IMPORTANCE: [(MatchMask, f32); 9] = [
+    const CATEGORY_IMPORTANCE: [(MatchMask, f32); 10] = [
         (Self::SCHOOL, 0.8),
         (Self::TRANSIT, 0.8),
         (Self::SHOP, 0.7),
@@ -107,6 +113,8 @@ impl MatchMask {
         (Self::PARKING, 0.4),
         (Self::STREET_FURNITURE, 0.2),
         (Self::SHRUBBERY, 0.1),
+        // The same as a feature of no known category.
+        (Self::OFFICIAL_ID, 0.3),
     ];
 
     /// True if no category bit is set, i.e. the feature can't match
@@ -302,6 +310,8 @@ impl MatchMask {
 
             ("tower", _) => Self::STREET_FURNITURE.0,
 
+            (key, _) if official_id::is_official_id_key(key) => Self::OFFICIAL_ID.0,
+
             _ => 0,
         }
     }
@@ -475,6 +485,8 @@ pub fn create_matcher<'a>(
     if let Some(matcher) = poi_matcher::PoiMatcher::for_place(place, nondescript, brand_domains) {
         Some(Box::new(matcher))
     } else if let Some(matcher) = transit_matcher::TransitMatcher::for_place(place) {
+        Some(Box::new(matcher))
+    } else if let Some(matcher) = official_id::OfficialIdMatcher::for_place(place) {
         Some(Box::new(matcher))
     } else if let Some(matcher) = infrastructure_matcher::InfrastructureMatcher::for_place(place) {
         Some(Box::new(matcher))
