@@ -256,11 +256,14 @@ impl<'a> PoiMatcher<'a> {
             .filter(|(k, _)| k.starts_with("addr:"))
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let has_street_address = address.iter().any(|(k, _)| {
+        // Only an address with a house number can say which place
+        // this is. A playground with just a street name can't.
+        let has_street_address = address.iter().any(|(k, v)| {
             matches!(
                 k.as_str(),
                 "addr:street" | "addr:street_address" | "addr:full"
-            )
+            ) && (v.chars().any(|c| c.is_ascii_digit())
+                || address.iter().any(|(k, _)| k == "addr:housenumber"))
         });
         if brand_wikidata.is_empty()
             && brand_names.is_empty()
@@ -894,6 +897,10 @@ mod tests {
         // No brand:wikidata and no contacts: no matcher at all.
         let bare = atp(&[("shop", "florist")]);
         assert!(PoiMatcher::for_place(&bare, &Nondescript::none(), &NO_DOMAINS).is_none());
+
+        // A street without a house number doesn't make a matcher.
+        let street_only = atp(&[("leisure", "playground"), ("addr:street", "Bahnhofstrasse")]);
+        assert!(PoiMatcher::for_place(&street_only, &Nondescript::none(), &NO_DOMAINS).is_none());
     }
 
     /// Brand name evidence: an equal `brand` name matches when the
