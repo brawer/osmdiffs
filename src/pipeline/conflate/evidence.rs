@@ -115,7 +115,10 @@ const AGREEING: &[(&str, Check)] = &[
         Check::Whole("opening_hours", same_schedule),
     ),
     ("addr:street", Check::Whole("addr:street", same_streets)),
-    ("addr:housenumber", Check::Text(&["addr:housenumber"], text)),
+    (
+        "addr:housenumber",
+        Check::Text(&["addr:housenumber"], house_number),
+    ),
     ("addr:postcode", Check::Text(&["addr:postcode"], postcode)),
     ("addr:city", Check::Text(&["addr:city"], text)),
     ("ref", Check::Text(&["ref"], text)),
@@ -157,6 +160,28 @@ fn text(value: &str) -> Option<String> {
 /// in `b`, allowing for abbreviations ([same_street]).
 fn same_streets(a: &str, b: &str) -> bool {
     split_values(a).any(|a| split_values(b).any(|b| same_street(a, b)))
+}
+
+/// A house number without its formatting: lowercased, without spaces,
+/// and without a `-` or `/` before a single final letter. So `7 a`,
+/// `7A` and `7-a` agree, but `3-5` stays a range.
+fn house_number(value: &str) -> Option<String> {
+    let mut v: String = value
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    let n = v.chars().count();
+    if n >= 3 {
+        let chars: Vec<char> = v.chars().collect();
+        if chars[n - 1].is_alphabetic()
+            && matches!(chars[n - 2], '-' | '/')
+            && chars[n - 3].is_ascii_digit()
+        {
+            v = chars[..n - 2].iter().chain(&chars[n - 1..]).collect();
+        }
+    }
+    (!v.is_empty()).then_some(v)
 }
 
 /// A postcode without its formatting: only its letters and digits,
@@ -214,6 +239,17 @@ fn split_house_number(street: &str) -> Option<(&str, &str)> {
         && !rest.trim().is_empty()
     {
         return Some((rest.trim_end(), last));
+    }
+    // A letter written apart from the number: `Ruhlebener Str. 1 a`.
+    if let Some((rest, letter)) = street.rsplit_once(char::is_whitespace)
+        && letter.len() == 1
+        && letter.bytes().all(|b| b.is_ascii_alphabetic())
+        && let Some((before, number)) = rest.trim_end().rsplit_once(char::is_whitespace)
+        && is_house_number(number, false)
+        && !before.trim().is_empty()
+    {
+        let start = before.trim_end().len();
+        return Some((before.trim_end(), street[start..].trim_start()));
     }
     if let Some((first, rest)) = street.split_once(char::is_whitespace)
         && is_house_number(first, false)
@@ -334,6 +370,15 @@ mod tests {
     }
 
     #[test]
+    fn test_house_number() {
+        assert_eq!(house_number("7 a"), house_number("7a"));
+        assert_eq!(house_number("7A"), house_number("7a"));
+        assert_eq!(house_number("349-B"), house_number("349b"));
+        assert_eq!(house_number("3-5").as_deref(), Some("3-5"));
+        assert_eq!(house_number(" "), None);
+    }
+
+    #[test]
     fn test_split_house_number() {
         let split = split_house_number;
         assert_eq!(
@@ -350,6 +395,11 @@ mod tests {
         assert_eq!(split("Avenue 12ab"), None);
         assert_eq!(split("3-5 Main St"), None);
         assert_eq!(split("42"), None);
+        assert_eq!(
+            split("Ruhlebener Str. 1 a"),
+            Some(("Ruhlebener Str.", "1 a"))
+        );
+        assert_eq!(split("Avenue A"), None);
         assert_eq!(split("札幌市中央区北1条西2丁目1-1"), None);
     }
 
