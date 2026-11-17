@@ -2,10 +2,10 @@ use super::brand_domains::BrandDomains;
 use super::contact::{AtpContacts, CONTACT_FACTOR, Nondescript, category_factor, main_category};
 use super::{
     MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
-    meters_to_chord_angle, normalize_name, parse_wikidata_ids, split_values,
+    meters_to_chord_angle, normalize_name, parse_wikidata_ids, split_values, street,
 };
 use crate::places::Place;
-use geo::Centroid;
+use geo::{Centroid, Closest, ClosestPoint};
 use s2::{cell::Cell, cellid::CellID, latlng::LatLng, point::Point, s1::ChordAngle};
 
 /// Finds the first `brand:wikidata` tag in `tags` and parses its
@@ -76,6 +76,80 @@ const BRAND_DOMAIN_FACTOR: f64 = 0.96;
 /// a brand name says less than a shared phone number.
 const BRAND_NAME_FACTOR: f64 = 0.96;
 
+/// The evidence factor for an OSM feature without a brand of its own
+/// that has our street address, a compatible category and a fitting
+/// name, see [PoiMatcher::address_evidence]. Below the other kinds of
+/// evidence: an address is shared by every business in a building.
+const ADDRESS_FACTOR: f64 = 0.9;
+
+/// Address evidence counts only up to this distance.
+const ADDRESS_MAX_METERS: f64 = 150.0;
+
+/// Address evidence for an OSM shop without a name counts only up to
+/// this distance, because in a mall many shops share one address.
+const ADDRESS_UNNAMED_SHOP_MAX_METERS: f64 = 30.0;
+
+/// Words that say nothing about which business a name is, for
+/// [PoiMatcher::name_fits]. Lowercase and without accents, as
+/// [street::words] gives them.
+const GENERIC_NAME_WORDS: &[&str] = &[
+    "and",
+    "apotheke",
+    "auto",
+    "automobile",
+    "automobiles",
+    "banco",
+    "bank",
+    "banque",
+    "cafe",
+    "center",
+    "centre",
+    "coffee",
+    "company",
+    "corp",
+    "das",
+    "del",
+    "der",
+    "des",
+    "die",
+    "farmacia",
+    "fitness",
+    "garage",
+    "gmbh",
+    "group",
+    "hotel",
+    "inc",
+    "international",
+    "kids",
+    "las",
+    "les",
+    "llc",
+    "los",
+    "ltd",
+    "ltda",
+    "mall",
+    "market",
+    "markt",
+    "motors",
+    "pharmacie",
+    "pharmacy",
+    "pizza",
+    "plaza",
+    "posto",
+    "restaurant",
+    "salon",
+    "sarl",
+    "service",
+    "services",
+    "shop",
+    "shopping",
+    "station",
+    "store",
+    "studio",
+    "the",
+    "und",
+];
+
 /// AllThePlaces features of these kinds get a [PoiMatcher].
 const POI_MASK: MatchMask = MatchMask(
     MatchMask::SHOP.0
@@ -104,7 +178,7 @@ const COLOCATED_METERS: f64 = 25.0;
 /// - Equal `brand:wikidata`: the distance score.
 /// - Both sides have `brand:wikidata`, but share no ID: no match,
 ///   whatever else agrees.
-/// - Otherwise, the best of three kinds of evidence, each times
+/// - Otherwise, the first of four kinds of evidence that agrees, times
 ///   [category_factor] times the distance score:
 ///   - a shared descriptive phone number, email address or website, with
 ///     [CONTACT_FACTOR];
@@ -114,7 +188,12 @@ const COLOCATED_METERS: f64 = 25.0;
 ///     [find_osm_brand_names];
 ///   - an OSM feature without `brand:wikidata` whose website is on a
 ///     domain of the ATP feature's brand, with [BRAND_DOMAIN_FACTOR];
-///     see [BrandDomains] and [find_domain_brand_ids].
+///     see [BrandDomains] and [find_domain_brand_ids];
+///   - an OSM feature without a brand of its own at the ATP feature's
+///     street address, with a name that fits, with [ADDRESS_FACTOR];
+///     see [PoiMatcher::address_evidence]. Only within
+///     [ADDRESS_MAX_METERS], or [ADDRESS_UNNAMED_SHOP_MAX_METERS] for
+///     a shop without a name, as in a mall many shops share an address.
 ///
 ///   Beyond [CONTACT_ADDRESS_CHECK_BEYOND_METERS], the street address
 ///   must agree too.
@@ -142,9 +221,11 @@ pub struct PoiMatcher<'a> {
     /// Main category as `key=value`, for contact and name matches.
     category: Option<String>,
     /// The ATP feature's `addr:*` tags, for far contact and name
-    /// matches. Empty if `contacts`, `brand_names` and
-    /// `domain_brand_ids` are empty.
+    /// matches and for [Self::address_evidence].
     address: Vec<(String, String)>,
+    /// The ATP feature's `name` and `brand`, for [Self::name_fits].
+    name: Option<String>,
+    brand: Option<String>,
 }
 
 impl<'a> PoiMatcher<'a> {
@@ -171,23 +252,29 @@ impl<'a> PoiMatcher<'a> {
             find_domain_brand_ids(tags())
         };
         domain_brand_ids.retain(|id| brand_domains.has_brand(*id));
+        let address: Vec<(String, String)> = tags()
+            .filter(|(k, _)| k.starts_with("addr:"))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        // Only an address with a house number can say which place
+        // this is. A playground with just a street name can't.
+        let has_street_address = address.iter().any(|(k, v)| {
+            matches!(
+                k.as_str(),
+                "addr:street" | "addr:street_address" | "addr:full"
+            ) && (v.chars().any(|c| c.is_ascii_digit())
+                || address.iter().any(|(k, _)| k == "addr:housenumber"))
+        });
         if brand_wikidata.is_empty()
             && brand_names.is_empty()
             && contacts.is_empty()
             && domain_brand_ids.is_empty()
+            && !has_street_address
         {
             return None;
         }
-        let (category, address) =
-            if contacts.is_empty() && brand_names.is_empty() && domain_brand_ids.is_empty() {
-                (None, Vec::new())
-            } else {
-                let address = tags()
-                    .filter(|(k, _)| k.starts_with("addr:"))
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-                (main_category(tags()), address)
-            };
+        let category = main_category(tags());
+        let find = |key: &str| tags().find(|(k, _)| *k == key).map(|(_, v)| v.to_string());
         Some(PoiMatcher {
             center: Cell::from(CellID(place.s2_cell_id)).center(),
             brand_wikidata,
@@ -197,17 +284,15 @@ impl<'a> PoiMatcher<'a> {
             brand_domains,
             category,
             address,
+            name: find("name"),
+            brand: find("brand"),
         })
     }
 
-    /// The evidence factor for `candidate`, before distance: 1.0 for
-    /// equal `brand:wikidata`, below 1.0 for a contact, brand name or
-    /// brand domain match, 0.0 for no match.
-    fn factor(&self, candidate: &OsmCandidate) -> f64 {
-        self.factor_and_rule(candidate).0
-    }
-
-    /// [Self::factor], and the rule that gave it, for [Matcher::rule].
+    /// The evidence factor for `candidate`, before distance, and the
+    /// rule that gave it, for [Matcher::rule]: 1.0 for equal
+    /// `brand:wikidata`, below 1.0 for a contact, brand name, brand
+    /// domain or address match, 0.0 for no match.
     fn factor_and_rule(&self, candidate: &OsmCandidate) -> (f64, &'static str) {
         let mut osm_brand = find_brand_wikidata(candidate.tags()).peekable();
         let osm_has_brand = osm_brand.peek().is_some();
@@ -224,6 +309,8 @@ impl<'a> PoiMatcher<'a> {
             (BRAND_NAME_FACTOR, "brand_name")
         } else if self.brand_domain_agrees(candidate, osm_has_brand) {
             (BRAND_DOMAIN_FACTOR, "brand_domain")
+        } else if self.address_evidence(candidate, osm_has_brand) {
+            (ADDRESS_FACTOR, "address")
         } else {
             return (0.0, "none");
         };
@@ -245,6 +332,78 @@ impl<'a> PoiMatcher<'a> {
         let ours = |id: &u64| self.domain_brand_ids.contains(id);
         find_domain_brand_ids(candidate.tags()).iter().any(ours)
             || (!osm_has_brand && self.brand_domains.brands(candidate.tags()).iter().any(ours))
+    }
+
+    /// Whether `candidate` has our street address and a name that fits
+    /// ours ([Self::name_fits]), and no brand of its own: no
+    /// `brand:wikidata`, `brand` or `operator`. A brand of its own that
+    /// differs from ours means another business at the same address.
+    /// The category and distance are checked by the caller.
+    fn address_evidence(&self, candidate: &OsmCandidate, osm_has_brand: bool) -> bool {
+        !osm_has_brand
+            && find_osm_brand_names(candidate.tags()).next().is_none()
+            && self.name_fits(candidate)
+            && self.address_agrees(candidate)
+    }
+
+    /// Whether the OSM name, if there is one, can be the name of our
+    /// feature. Words of either address, such as the city in `Dunkin'
+    /// Berlin`, don't count. When our name is our brand, the OSM name
+    /// must share a word with it (`Domino's Pizza` for `Domino's`).
+    /// Otherwise it must share a word of our name that isn't part of
+    /// our brand (`Ira Ford` for `Ira Ford Auburn`, but not `DCH Toyota`
+    /// for `Imperial Toyota`), or be our brand alone (`Rossmann` for
+    /// `Rossmann Drogerie-Markt Klosterstr. 34`). Words shorter than
+    /// four letters and [GENERIC_NAME_WORDS] count only as part of a
+    /// name that is the same as ours as a whole.
+    fn name_fits(&self, candidate: &OsmCandidate) -> bool {
+        let Some(osm_name) = candidate.tags().find(|(k, _)| *k == "name").map(|(_, v)| v) else {
+            return true;
+        };
+        let place_words: Vec<String> = self
+            .address
+            .iter()
+            .map(|(_, v)| v.as_str())
+            .chain(
+                candidate
+                    .tags()
+                    .filter(|(k, _)| k.starts_with("addr:"))
+                    .map(|(_, v)| v),
+            )
+            .flat_map(street::words)
+            .collect();
+        let all_words = |s: &str| -> Vec<String> {
+            street::words(s)
+                .filter(|w| !place_words.contains(w))
+                .collect()
+        };
+        let telling = |words: Vec<String>| -> Vec<String> {
+            words
+                .into_iter()
+                .filter(|w| w.chars().count() >= 4 && !GENERIC_NAME_WORDS.contains(&w.as_str()))
+                .collect()
+        };
+        let osm_all = all_words(osm_name);
+        let osm = telling(osm_all.clone());
+        if osm.is_empty() {
+            // Compare all words, without accents or punctuation, so
+            // that `École primaire publique Eugène Pottier` on Boulevard
+            // Eugène Pottier fits `Ecole primaire publique Eugène Pottier`.
+            let osm_name: Vec<String> = street::words(osm_name).collect();
+            return [&self.name, &self.brand]
+                .into_iter()
+                .flatten()
+                .any(|n| street::words(n).eq(osm_name.iter().cloned()));
+        }
+        let brand_all: Vec<String> = self.brand.as_deref().map(all_words).unwrap_or_default();
+        let brand = telling(brand_all.clone());
+        let name = telling(self.name.as_deref().map(all_words).unwrap_or_default());
+        let distinct: Vec<&String> = name.iter().filter(|w| !brand.contains(w)).collect();
+        if distinct.is_empty() {
+            return osm.iter().any(|w| brand.contains(w));
+        }
+        osm.iter().any(|w| distinct.contains(&w))
+            || (!brand_all.is_empty() && osm_all.iter().all(|w| brand_all.contains(w)))
     }
 
     fn address_agrees(&self, candidate: &OsmCandidate) -> bool {
@@ -274,6 +433,14 @@ impl Matcher for PoiMatcher<'_> {
     ///
     /// A website alone doesn't count either, for the same reason: the
     /// Swiss Post spider gives each post office a page of its own.
+    /// Only the street address can't say that a place is missing.
+    fn reports_missing(&self) -> bool {
+        !self.brand_wikidata.is_empty()
+            || !self.brand_names.is_empty()
+            || !self.contacts.is_empty()
+            || !self.domain_brand_ids.is_empty()
+    }
+
     fn counts_for_coverage(&self) -> bool {
         !self.brand_wikidata.is_empty()
             || !self.brand_names.is_empty()
@@ -304,7 +471,7 @@ impl Matcher for PoiMatcher<'_> {
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64 {
         // Cheap check first: only decode the (potentially large) geometry
         // for candidates that have some evidence.
-        let factor = self.factor(candidate);
+        let (factor, rule) = self.factor_and_rule(candidate);
         if factor == 0.0 {
             return 0.0;
         }
@@ -314,8 +481,30 @@ impl Matcher for PoiMatcher<'_> {
         let Some(centroid) = geometry.centroid() else {
             return 0.0;
         };
+        let distance = geo_point_distance(&self.center, &centroid);
+        if rule == "address" {
+            let unnamed_shop = candidate.tags().any(|(k, _)| k == "shop")
+                && !candidate.tags().any(|(k, _)| k == "name");
+            let max = if unnamed_shop {
+                ADDRESS_UNNAMED_SHOP_MAX_METERS
+            } else {
+                ADDRESS_MAX_METERS
+            };
+            // Measure to the nearest point of the shape, as a car
+            // dealer's lot can be large but has one address.
+            let ll = LatLng::from(self.center);
+            let atp = geo::Point::new(ll.lng.deg(), ll.lat.deg());
+            let nearest = match geometry.closest_point(&atp) {
+                Closest::Intersection(_) => 0.0,
+                Closest::SinglePoint(p) => geo_point_distance(&self.center, &p),
+                Closest::Indeterminate => distance,
+            };
+            if nearest > max {
+                return 0.0;
+            }
+        }
         if factor < 1.0
-            && geo_point_distance(&self.center, &centroid) > CONTACT_ADDRESS_CHECK_BEYOND_METERS
+            && distance > CONTACT_ADDRESS_CHECK_BEYOND_METERS
             && !self.address_agrees(candidate)
         {
             return 0.0;
@@ -719,6 +908,10 @@ mod tests {
         // No brand:wikidata and no contacts: no matcher at all.
         let bare = atp(&[("shop", "florist")]);
         assert!(PoiMatcher::for_place(&bare, &Nondescript::none(), &NO_DOMAINS).is_none());
+
+        // A street without a house number doesn't make a matcher.
+        let street_only = atp(&[("leisure", "playground"), ("addr:street", "Bahnhofstrasse")]);
+        assert!(PoiMatcher::for_place(&street_only, &Nondescript::none(), &NO_DOMAINS).is_none());
     }
 
     /// Brand name evidence: an equal `brand` name matches when the
@@ -823,6 +1016,162 @@ mod tests {
             ],
         );
         assert_eq!(vetoed, 0.0);
+    }
+
+    /// Address evidence: an OSM feature without a brand of its own, at
+    /// our street address, with a compatible category and a name that
+    /// fits ours.
+    #[test]
+    fn test_poi_matcher_address() {
+        use crate::tables::{Feature, StringPool};
+        use s2::{cellid::CellID, latlng::LatLng};
+        use tempfile::TempDir;
+        use wkb::writer::{WriteOptions, write_point};
+
+        let dir = TempDir::new().expect("tempdir");
+        let strings = [
+            "addr:city",
+            "addr:housenumber",
+            "addr:street",
+            "amenity",
+            "brand",
+            "car",
+            "chemist",
+            "fuel",
+            "name",
+            "shop",
+            "Fortune Boulevard",
+            "Fortune Blvd",
+            "Milford",
+            "300",
+            "302",
+            "Imperial Toyota",
+            "DCH Toyota of Milford",
+            "Honda",
+            "Rossmann",
+            "Rossmann Drogerie-Markt",
+            "Toyota",
+        ];
+        let pool = StringPool::create(
+            strings.iter().map(|s| s.to_string()),
+            dir.path(),
+            &dir.path().join("strings"),
+        )
+        .expect("StringPool::create");
+        let s2_cell_id = CH_CLOTHES_ATP.s2_cell_id;
+        let score = |matcher: &PoiMatcher, tags: &[(&str, &str)]| {
+            let mut flat_tags = Vec::with_capacity(tags.len() * 2);
+            for (k, v) in tags {
+                flat_tags.push(pool.lookup(k).expect("key in pool") as u32);
+                flat_tags.push(pool.lookup(v).expect("value in pool") as u32);
+            }
+            let ll = LatLng::from(CellID(s2_cell_id));
+            let mut geometry_wkb = Vec::new();
+            write_point(
+                &mut geometry_wkb,
+                &geo::Point::new(ll.lng.deg(), ll.lat.deg()),
+                &WriteOptions {
+                    endianness: wkb::Endianness::LittleEndian,
+                },
+            )
+            .expect("wkb encode");
+            let feature = Feature {
+                id: 1,
+                tags: flat_tags,
+                geometry_wkb,
+                ..Default::default()
+            };
+            let candidate = OsmCandidate {
+                feature: &feature,
+                strings: &pool,
+            };
+            (
+                matcher.score_osm_candidate(&candidate),
+                matcher.rule(&candidate),
+            )
+        };
+        let atp = |tags: &[(&str, &str)]| Place {
+            s2_cell_id,
+            spider: String::from("test"),
+            mask: MatchMask::SHOP,
+            fetched: test_timestamp(),
+            shape_wkb: test_shape(s2_cell_id),
+            tags: self::tags(tags),
+        };
+        let dealer = atp(&[
+            ("shop", "car"),
+            ("name", "Imperial Toyota"),
+            ("brand", "Toyota"),
+            ("addr:street", "Fortune Blvd"),
+            ("addr:housenumber", "300"),
+            ("addr:city", "Milford"),
+        ]);
+        let m = PoiMatcher::for_place(&dealer, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
+        let at = |extra: &[(&'static str, &'static str)]| {
+            let mut tags = vec![
+                ("addr:street", "Fortune Boulevard"),
+                ("addr:housenumber", "300"),
+                ("addr:city", "Milford"),
+            ];
+            tags.extend_from_slice(extra);
+            tags
+        };
+        let (same, rule) = score(&m, &at(&[("shop", "car"), ("name", "Imperial Toyota")]));
+        assert_eq!(rule, "address");
+        assert!(
+            same > ADDRESS_FACTOR - 0.01 && same <= ADDRESS_FACTOR,
+            "{same}"
+        );
+        // No name: fine, this close.
+        assert_eq!(score(&m, &at(&[("shop", "car")])).0, same);
+        // Another dealer of the same brand at the same address.
+        assert_eq!(
+            score(
+                &m,
+                &at(&[("shop", "car"), ("name", "DCH Toyota of Milford")])
+            )
+            .0,
+            0.0
+        );
+        // A brand of its own.
+        assert_eq!(
+            score(&m, &at(&[("shop", "car"), ("brand", "Honda")])).0,
+            0.0
+        );
+        // Another category.
+        assert_eq!(score(&m, &at(&[("amenity", "fuel")])).0, 0.0);
+        // Another house number.
+        let other = [
+            ("addr:street", "Fortune Boulevard"),
+            ("addr:housenumber", "302"),
+            ("shop", "car"),
+        ];
+        assert_eq!(score(&m, &other).0, 0.0);
+
+        // The OSM name is just our brand.
+        let chemist = atp(&[
+            ("shop", "chemist"),
+            ("name", "Rossmann Drogerie-Markt"),
+            ("brand", "Rossmann"),
+            ("addr:street", "Fortune Blvd"),
+            ("addr:housenumber", "300"),
+        ]);
+        let m =
+            PoiMatcher::for_place(&chemist, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
+        assert!(score(&m, &at(&[("shop", "chemist"), ("name", "Rossmann")])).0 > 0.0);
+        assert!(m.reports_missing());
+
+        // A matcher with only an address can't say a place is missing.
+        let unbranded = atp(&[
+            ("shop", "car"),
+            ("name", "Imperial Motors"),
+            ("addr:street", "Fortune Blvd"),
+            ("addr:housenumber", "300"),
+        ]);
+        let m =
+            PoiMatcher::for_place(&unbranded, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
+        assert!(!m.reports_missing());
+        assert!(!m.counts_for_coverage());
     }
 
     /// Brand domain evidence: an OSM feature without `brand:wikidata`

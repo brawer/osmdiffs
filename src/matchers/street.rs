@@ -93,7 +93,7 @@ fn fold(s: &str) -> String {
 }
 
 /// The folded words of `s`, split at anything not a letter or digit.
-fn words(s: &str) -> impl Iterator<Item = String> {
+pub(crate) fn words(s: &str) -> impl Iterator<Item = String> {
     fold(s)
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
@@ -129,9 +129,18 @@ pub(crate) fn same_words(a: &[String], b: &[String]) -> bool {
     !a.is_empty() && a.len() == b.len() && a.iter().zip(b).all(|(a, b)| dict.same_word(a, b))
 }
 
-/// Whether `a` and `b` name the same street.
+/// Whether `a` and `b` name the same street. A leading `ul.` or
+/// `ulica` is ignored, because Polish street names in OSM leave it
+/// out: `ul. Tucholska` is `Tucholska`.
 pub(crate) fn same_street(a: &str, b: &str) -> bool {
-    same_words(&street_words(a), &street_words(b))
+    let words = |s: &str| {
+        let mut w = street_words(s);
+        if w.len() > 1 && matches!(w[0].as_str(), "ul" | "ulica") {
+            w.remove(0);
+        }
+        w
+    };
+    same_words(&words(a), &words(b))
 }
 
 /// Whether the [street_words] of `street` occur, in order and next to
@@ -162,6 +171,8 @@ mod tests {
             ("Dozsa György ut.", "Dózsa György út"),
             ("ул. Ларина", "улица Ларина"),
             ("Gustav-Ree-Anlage", "Gustav-Rée-Anlage"),
+            ("ul. Tucholska", "Tucholska"),
+            ("ulica Kościuszki", "Kościuszki"),
         ] {
             assert!(same_street(a, b), "{a} | {b}");
             assert!(same_street(b, a), "{b} | {a}");
