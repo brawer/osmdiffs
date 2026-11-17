@@ -330,6 +330,10 @@ fn produce_rows(
     // matched better at the position corrected for a Google Maps camera
     // center; see `atp::camera`.
     let corrected_candidates: Mutex<HashSet<(u64, LocalFeatureRef)>> = Mutex::new(HashSet::new());
+    // Exclusive candidates, by ATP ordinal, whose matcher doesn't
+    // report a feature it can't match as missing; see
+    // [crate::matchers::Matcher::reports_missing].
+    let silent_when_unmatched: Mutex<HashSet<u64>> = Mutex::new(HashSet::new());
     let matched = MatchedSet::new(osm.index.len());
     let mut coverage = AtpCoverage::default();
     // ATP features per spider that no matcher handles, and that get no
@@ -536,6 +540,12 @@ fn produce_rows(
                 }
                 let mut hasher = std::hash::DefaultHasher::new();
                 atp.spider.hash(&mut hasher);
+                if !matcher.reports_missing() {
+                    silent_when_unmatched
+                        .lock()
+                        .expect("silent_when_unmatched lock")
+                        .insert(batch_start + i as u64);
+                }
                 if !via_corrected.is_empty() {
                     corrected_candidates
                         .lock()
@@ -555,6 +565,9 @@ fn produce_rows(
                 return Ok(());
             }
             let Some(&(score, r)) = best.first() else {
+                if !matcher.reports_missing() {
+                    return Ok(());
+                }
                 if send_unmatched(atp, host.as_ref())? {
                     let why = if rejected.is_empty() {
                         Missing::NoCandidate
@@ -650,6 +663,9 @@ fn produce_rows(
     let corrected_candidates = corrected_candidates
         .into_inner()
         .expect("corrected_candidates lock");
+    let silent_when_unmatched = silent_when_unmatched
+        .into_inner()
+        .expect("silent_when_unmatched lock");
     let mut ordinal: u64 = 0;
     for batch in atp_reader.read_all()? {
         for atp in batch? {
@@ -671,6 +687,7 @@ fn produce_rows(
                             &out,
                         )?;
                     }
+                    None if silent_when_unmatched.contains(&ordinal) => {}
                     None => {
                         if send_unmatched(&atp, host_of(ordinal, &atp).as_ref())? {
                             diagnostics.add_missing(&atp.spider, Missing::Taken);

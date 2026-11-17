@@ -98,8 +98,8 @@ const GENERIC_NAME_WORDS: &[&str] = &[
     "auto",
     "automobile",
     "automobiles",
-    "bank",
     "banco",
+    "bank",
     "banque",
     "cafe",
     "center",
@@ -386,11 +386,14 @@ impl<'a> PoiMatcher<'a> {
         let osm_all = all_words(osm_name);
         let osm = telling(osm_all.clone());
         if osm.is_empty() {
-            let osm_name = normalize_name(osm_name);
+            // Compare all words, without accents or punctuation, so
+            // that `École primaire publique Eugène Pottier` on Boulevard
+            // Eugène Pottier fits `Ecole primaire publique Eugène Pottier`.
+            let osm_name: Vec<String> = street::words(osm_name).collect();
             return [&self.name, &self.brand]
                 .into_iter()
                 .flatten()
-                .any(|n| normalize_name(n) == osm_name);
+                .any(|n| street::words(n).eq(osm_name.iter().cloned()));
         }
         let brand_all: Vec<String> = self.brand.as_deref().map(all_words).unwrap_or_default();
         let brand = telling(brand_all.clone());
@@ -430,6 +433,14 @@ impl Matcher for PoiMatcher<'_> {
     ///
     /// A website alone doesn't count either, for the same reason: the
     /// Swiss Post spider gives each post office a page of its own.
+    /// Only the street address can't say that a place is missing.
+    fn reports_missing(&self) -> bool {
+        !self.brand_wikidata.is_empty()
+            || !self.brand_names.is_empty()
+            || !self.contacts.is_empty()
+            || !self.domain_brand_ids.is_empty()
+    }
+
     fn counts_for_coverage(&self) -> bool {
         !self.brand_wikidata.is_empty()
             || !self.brand_names.is_empty()
@@ -1148,6 +1159,19 @@ mod tests {
         let m =
             PoiMatcher::for_place(&chemist, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
         assert!(score(&m, &at(&[("shop", "chemist"), ("name", "Rossmann")])).0 > 0.0);
+        assert!(m.reports_missing());
+
+        // A matcher with only an address can't say a place is missing.
+        let unbranded = atp(&[
+            ("shop", "car"),
+            ("name", "Imperial Motors"),
+            ("addr:street", "Fortune Blvd"),
+            ("addr:housenumber", "300"),
+        ]);
+        let m =
+            PoiMatcher::for_place(&unbranded, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
+        assert!(!m.reports_missing());
+        assert!(!m.counts_for_coverage());
     }
 
     /// Brand domain evidence: an OSM feature without `brand:wikidata`

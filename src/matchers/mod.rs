@@ -411,6 +411,15 @@ pub trait Matcher {
         true
     }
 
+    /// True if an AllThePlaces feature that this matcher doesn't match
+    /// goes into `conflated.parquet` as `missing_in_osm`. False for a
+    /// matcher that can only confirm a match, such as one on a street
+    /// address alone: without it, the feature had no matcher and no row,
+    /// and failing to match by address doesn't say it is missing.
+    fn reports_missing(&self) -> bool {
+        true
+    }
+
     /// True if no two AllThePlaces features of the same spider should
     /// match the same OpenStreetMap feature, such as two bus platforms
     /// of a stop, or two branches of a chain. Features of different
