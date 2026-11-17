@@ -5,7 +5,7 @@ use super::{
     meters_to_chord_angle, normalize_name, parse_wikidata_ids, split_values, street,
 };
 use crate::places::Place;
-use geo::Centroid;
+use geo::{Centroid, Closest, ClosestPoint};
 use s2::{cell::Cell, cellid::CellID, latlng::LatLng, point::Point, s1::ChordAngle};
 
 /// Finds the first `brand:wikidata` tag in `tags` and parses its
@@ -476,7 +476,16 @@ impl Matcher for PoiMatcher<'_> {
             } else {
                 ADDRESS_MAX_METERS
             };
-            if distance > max {
+            // Measure to the nearest point of the shape, as a car
+            // dealer's lot can be large but has one address.
+            let ll = LatLng::from(self.center);
+            let atp = geo::Point::new(ll.lng.deg(), ll.lat.deg());
+            let nearest = match geometry.closest_point(&atp) {
+                Closest::Intersection(_) => 0.0,
+                Closest::SinglePoint(p) => geo_point_distance(&self.center, &p),
+                Closest::Indeterminate => distance,
+            };
+            if nearest > max {
                 return 0.0;
             }
         }
