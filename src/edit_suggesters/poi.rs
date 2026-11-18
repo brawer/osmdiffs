@@ -2,6 +2,9 @@ use super::EditSuggester;
 use crate::matchers::contact::{
     AtpContacts, Nondescript, is_email_key, is_phone_key, is_website_key,
 };
+use crate::matchers::former_brands::{former_brands, has_former_brands};
+use crate::matchers::parse_wikidata_ids;
+use crate::utils::countries::{self, Country};
 use crate::utils::opening_hours::{has_rich_syntax, same_schedule};
 use std::collections::HashMap;
 
@@ -43,7 +46,7 @@ impl EditSuggester for PoiEditSuggester {
             .iter()
             .find(|(k, _)| k == "addr:country")
             .map(|(_, v)| v.as_str());
-        let tag_edits: Vec<(String, String)> = atp_tags
+        let mut tag_edits: Vec<(String, String)> = atp_tags
             .iter()
             .filter(|(key, _atp_value)| Self::is_atp_tag_trustworthy(key))
             .filter(|(key, atp_value)| !is_date_key(key) || parse_date(atp_value).is_some())
@@ -57,12 +60,80 @@ impl EditSuggester for PoiEditSuggester {
                 _ => (key.clone(), value.clone()),
             })
             .collect();
+        tag_edits.extend(rebrand_edits(atp_tags, &osm_tags, country, position));
         if tag_edits.is_empty() {
             None
         } else {
             Some(tag_edits)
         }
     }
+}
+
+/// The brand tags to change when the OSM feature still has a former
+/// brand of the ATP feature's, as given by [former_brands] for the
+/// country at `position` (or else ATP's `addr:country`): ATP's
+/// `brand:wikidata`, `brand` and `brand:<language>` tags where OSM
+/// differs, and ATP's `brand` as `name` if the OSM name is just the
+/// old brand, such as `name=出光` with `brand=出光`. A name that says
+/// more, such as a branch, is left alone. Updating the brand is the
+/// point of matching a former brand (brawer/osmdiffs#990), so these
+/// tags need no place in [PoiEditSuggester::is_atp_tag_trustworthy].
+fn rebrand_edits(
+    atp_tags: &[(String, String)],
+    osm_tags: &HashMap<&str, &str>,
+    country: Option<&str>,
+    position: Option<(f64, f64)>,
+) -> Vec<(String, String)> {
+    let find = |key: &str| {
+        atp_tags
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    };
+    let Some(atp_wikidata) = find("brand:wikidata") else {
+        return Vec::new();
+    };
+    let new: Vec<u64> = parse_wikidata_ids(atp_wikidata).collect();
+    if !has_former_brands(&new) {
+        return Vec::new();
+    }
+    let Some(osm_wikidata) = osm_tags.get("brand:wikidata") else {
+        return Vec::new();
+    };
+    let osm: Vec<u64> = parse_wikidata_ids(osm_wikidata).collect();
+    if osm.iter().any(|id| new.contains(id)) {
+        return Vec::new();
+    }
+    let country = position
+        .and_then(|(lng, lat)| countries::country(lng, lat))
+        .or_else(|| {
+            let code: [u8; 2] = country?.to_ascii_uppercase().as_bytes().try_into().ok()?;
+            Country::from_code(code)
+        });
+    let old = former_brands(&new, country);
+    if !osm.iter().any(|id| old.contains(id)) {
+        return Vec::new();
+    }
+    let mut edits: Vec<(String, String)> = atp_tags
+        .iter()
+        .filter(|(k, _)| {
+            k == "brand"
+                || k == "brand:wikidata"
+                || k.strip_prefix("brand:").is_some_and(|lang| {
+                    !lang.is_empty() && lang.bytes().all(|b| b.is_ascii_lowercase())
+                })
+        })
+        .filter(|(k, v)| osm_tags.get(k.as_str()) != Some(&v.as_str()))
+        .cloned()
+        .collect();
+    if let (Some(atp_brand), Some(osm_name), Some(osm_brand)) =
+        (find("brand"), osm_tags.get("name"), osm_tags.get("brand"))
+        && osm_name == osm_brand
+        && *osm_name != atp_brand
+    {
+        edits.push(("name".to_string(), atp_brand.to_string()));
+    }
+    edits
 }
 
 /// Whether the ATP and OSM values of `key` say the same, compared as
@@ -286,6 +357,71 @@ mod tests {
         // A value that just doesn't parse is still replaced.
         let osm = tags(&[("opening_hours", "Até 22:00 hs")]);
         assert!(PoiEditSuggester.suggest_edit(&atp, &osm, None).is_some());
+    }
+
+    #[test]
+    fn suggests_new_brand_for_former_brand() {
+        let atp = tags(&[
+            ("amenity", "bank"),
+            ("brand", "三十三銀行"),
+            ("brand:en", "San ju San Bank"),
+            ("brand:ja", "三十三銀行"),
+            ("brand:wikidata", "Q106781309"),
+        ]);
+        let osm = tags(&[
+            ("amenity", "bank"),
+            ("brand", "三重銀行"),
+            ("brand:en", "Mie Bank"),
+            ("brand:wikidata", "Q11358192"),
+            ("name", "三重銀行"),
+        ]);
+        let yokkaichi = Some((136.62, 34.97));
+        let edit = PoiEditSuggester
+            .suggest_edit(&atp, &osm, yokkaichi)
+            .expect("should suggest an edit");
+        assert_eq!(
+            edit,
+            tags(&[
+                ("brand", "三十三銀行"),
+                ("brand:en", "San ju San Bank"),
+                ("brand:ja", "三十三銀行"),
+                ("brand:wikidata", "Q106781309"),
+                ("name", "三十三銀行"),
+            ])
+        );
+
+        // Without a position, ATP's `addr:country` gives the country.
+        let mut atp_jp = atp.clone();
+        atp_jp.push(("addr:country".to_string(), "JP".to_string()));
+        assert_eq!(
+            PoiEditSuggester.suggest_edit(&atp_jp, &osm, None),
+            Some(edit)
+        );
+
+        // A name that says more than the old brand is left alone.
+        let osm_branch = tags(&[
+            ("brand", "三重銀行"),
+            ("brand:wikidata", "Q11358192"),
+            ("name", "三重銀行 四日市支店"),
+        ]);
+        let edit = PoiEditSuggester
+            .suggest_edit(&atp, &osm_branch, yokkaichi)
+            .expect("should suggest an edit");
+        assert!(!edit.iter().any(|(k, _)| k == "name"), "{edit:?}");
+
+        // Not a former brand in this country, or not a former brand.
+        let zurich = Some((8.54, 47.37));
+        assert!(PoiEditSuggester.suggest_edit(&atp, &osm, zurich).is_none());
+        let osm_other = tags(&[
+            ("brand", "Other"),
+            ("brand:wikidata", "Q1"),
+            ("name", "Other"),
+        ]);
+        assert!(
+            PoiEditSuggester
+                .suggest_edit(&atp, &osm_other, yokkaichi)
+                .is_none()
+        );
     }
 
     #[test]

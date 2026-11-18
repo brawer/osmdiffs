@@ -35,6 +35,7 @@ impl Country {
     pub const ITALY: Country = Country(*b"IT");
     /// Mainland China; Hong Kong, Macau and Taiwan have their own codes.
     pub const CHINA: Country = Country(*b"CN");
+    pub const JAPAN: Country = Country(*b"JP");
 
     /// The two-letter code, such as `CH`.
     pub fn code(&self) -> &str {
