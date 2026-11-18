@@ -324,7 +324,12 @@ fetch away.
   checked against the SHA-256 in jsDelivr's package listing
   ([`nsi.rs`](../src/pipeline/nsi.rs)); matching takes the names of
   brands, operators and networks from it
-  ([`brand_names.rs`](../src/matchers/brand_names.rs)). Each input is hashed (SHA-256) while it streams in,
+  ([`brand_names.rs`](../src/matchers/brand_names.rs)). Alongside, it
+  reads our own published `datapackage.json` to learn which
+  `spider-stats.parquet` came out last time (`fetch_inputs.previous`,
+  [`previous_release.rs`](../src/pipeline/previous_release.rs)), kept
+  in `previous-release.json`; unlike the inputs, failing to read it only
+  logs a warning. Each input is hashed (SHA-256) while it streams in,
   and its provenance written to a `*.meta.json` sidecar. A broken or
   stalled connection, or a 5xx/408/429 answer, is retried with
   exponential backoff, and a download that broke off partway resumes
