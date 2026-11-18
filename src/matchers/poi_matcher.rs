@@ -1,11 +1,13 @@
 use super::brand_domains::BrandDomains;
 use super::contact::{AtpContacts, CONTACT_FACTOR, Nondescript, category_factor, main_category};
+use super::former_brands;
 use super::official_id::{self, IdEvidence};
 use super::{
     MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
     meters_to_chord_angle, normalize_name, parse_wikidata_ids, split_values, street,
 };
 use crate::places::Place;
+use crate::utils::countries;
 use geo::{Centroid, Closest, ClosestPoint};
 use s2::{cell::Cell, cellid::CellID, latlng::LatLng, point::Point, s1::ChordAngle};
 
@@ -76,6 +78,13 @@ const BRAND_DOMAIN_FACTOR: f64 = 0.96;
 /// do not both have `brand:wikidata`. Below [CONTACT_FACTOR], because
 /// a brand name says less than a shared phone number.
 const BRAND_NAME_FACTOR: f64 = 0.96;
+
+/// The evidence factor for an OSM feature whose `brand:wikidata` is a
+/// former brand of the ATP feature's in its country, see
+/// [former_brands]. The same as [BRAND_NAME_FACTOR]: it says which
+/// brand a feature is, not which branch, and the old brand's stations
+/// may also have closed rather than changed brand.
+const FORMER_BRAND_FACTOR: f64 = 0.96;
 
 /// The evidence factor for an OSM feature without a brand of its own
 /// that has our street address, a compatible category and a fitting
@@ -184,7 +193,10 @@ const COLOCATED_METERS: f64 = 25.0;
 ///   can share an address, a name and a phone number.
 /// - Equal `brand:wikidata`: the distance score.
 /// - Both sides have `brand:wikidata`, but share no ID: no match,
-///   whatever else agrees.
+///   whatever else agrees, unless the OSM brand is a former brand of
+///   ours in this country, such as Idemitsu for apollostation in
+///   Japan ([former_brands]). Then [FORMER_BRAND_FACTOR] times
+///   [category_factor] times the distance score.
 /// - Otherwise, the first of four kinds of evidence that agrees, times
 ///   [category_factor] times the distance score:
 ///   - a shared descriptive phone number, email address or website, with
@@ -218,6 +230,9 @@ pub struct PoiMatcher<'a> {
     center: Point,
     /// Usually a single ID; see [find_brand_wikidata].
     brand_wikidata: Vec<u64>,
+    /// The brands that ours replaced in the ATP feature's country,
+    /// see [former_brands]; usually empty.
+    former_brand_wikidata: Vec<u64>,
     /// Usually a single name; see [find_brand_names].
     brand_names: Vec<String>,
     contacts: AtpContacts,
@@ -254,6 +269,12 @@ impl<'a> PoiMatcher<'a> {
         let brand_names: Vec<String> = find_brand_names(tags()).collect();
         let ll = LatLng::from(CellID(place.s2_cell_id));
         let position = Some((ll.lng.deg(), ll.lat.deg()));
+        let former_brand_wikidata = if former_brands::has_former_brands(&brand_wikidata) {
+            let country = countries::country(ll.lng.deg(), ll.lat.deg());
+            former_brands::former_brands(&brand_wikidata, country)
+        } else {
+            Vec::new()
+        };
         let contacts = AtpContacts::from_tags(tags(), position, nondescript);
         let mut domain_brand_ids = if brand_domains.is_empty() {
             Vec::new()
@@ -289,6 +310,7 @@ impl<'a> PoiMatcher<'a> {
         Some(PoiMatcher {
             center: Cell::from(CellID(place.s2_cell_id)).center(),
             brand_wikidata,
+            former_brand_wikidata,
             brand_names,
             contacts,
             domain_brand_ids,
@@ -303,8 +325,8 @@ impl<'a> PoiMatcher<'a> {
 
     /// The evidence factor for `candidate`, before distance, and the
     /// rule that gave it, for [Matcher::rule]: 1.0 for equal
-    /// `brand:wikidata`, below 1.0 for a contact, brand name, brand
-    /// domain or address match, 0.0 for no match.
+    /// `brand:wikidata`, below 1.0 for a former brand, contact, brand
+    /// name, brand domain or address match, 0.0 for no match.
     fn factor_and_rule(&self, candidate: &OsmCandidate) -> (f64, &'static str) {
         match official_id::compare(&self.official_ids, candidate.tags()) {
             IdEvidence::Same => return (1.0, "official_id"),
@@ -313,9 +335,20 @@ impl<'a> PoiMatcher<'a> {
         }
         let mut osm_brand = find_brand_wikidata(candidate.tags()).peekable();
         let osm_has_brand = osm_brand.peek().is_some();
+        let osm_category = || main_category(candidate.tags());
         if !self.brand_wikidata.is_empty() && osm_has_brand {
-            let shared = osm_brand.any(|id| self.brand_wikidata.contains(&id));
-            return (if shared { 1.0 } else { 0.0 }, "brand_wikidata");
+            let osm_brand: Vec<u64> = osm_brand.collect();
+            if osm_brand.iter().any(|id| self.brand_wikidata.contains(id)) {
+                return (1.0, "brand_wikidata");
+            }
+            if osm_brand
+                .iter()
+                .any(|id| self.former_brand_wikidata.contains(id))
+            {
+                let category = category_factor(self.category.as_deref(), osm_category().as_deref());
+                return (FORMER_BRAND_FACTOR * category, "former_brand");
+            }
+            return (0.0, "brand_wikidata");
         }
         let contact = !self.contacts.is_empty() && self.contacts.agrees(candidate.tags());
         let name = !self.brand_names.is_empty()
@@ -331,9 +364,8 @@ impl<'a> PoiMatcher<'a> {
         } else {
             return (0.0, "none");
         };
-        let osm_category = main_category(candidate.tags());
         (
-            evidence * category_factor(self.category.as_deref(), osm_category.as_deref()),
+            evidence * category_factor(self.category.as_deref(), osm_category().as_deref()),
             rule,
         )
     }
@@ -435,9 +467,9 @@ impl<'a> PoiMatcher<'a> {
 }
 
 impl Matcher for PoiMatcher<'_> {
-    /// `official_id`, `brand_wikidata`, `contact` (phone or email),
-    /// `brand_name`, `brand_domain` or `address`, in the order
-    /// [PoiMatcher::factor_and_rule] tries them.
+    /// `official_id`, `brand_wikidata`, `former_brand`, `contact`
+    /// (phone or email), `brand_name`, `brand_domain` or `address`, in
+    /// the order [PoiMatcher::factor_and_rule] tries them.
     fn rule(&self, candidate: &OsmCandidate) -> &'static str {
         self.factor_and_rule(candidate).1
     }
@@ -1044,6 +1076,111 @@ mod tests {
             ],
         );
         assert_eq!(vetoed, 0.0);
+    }
+
+    /// Former brands: in Japan, an OSM station still tagged as
+    /// Idemitsu or Showa Shell matches an apollostation in ATP, but a
+    /// Shell station elsewhere doesn't, and neither does another brand.
+    #[test]
+    fn test_poi_matcher_former_brand() {
+        use crate::tables::{Feature, StringPool};
+        use s2::{cellid::CellID, latlng::LatLng};
+        use tempfile::TempDir;
+        use wkb::writer::{WriteOptions, write_point};
+
+        let dir = TempDir::new().expect("tempdir");
+        let strings = [
+            "amenity",
+            "brand:wikidata",
+            "fuel",
+            "shop",
+            "supermarket",
+            "Q114731101",
+            "Q2216770",
+            "Q110716465",
+            "Q1",
+        ];
+        let pool = StringPool::create(
+            strings.iter().map(|s| s.to_string()),
+            dir.path(),
+            &dir.path().join("strings"),
+        )
+        .expect("StringPool::create");
+        let tokyo = CellID::from(LatLng::from_degrees(35.6812, 139.7671)).0;
+        let berlin = CellID::from(LatLng::from_degrees(52.5200, 13.4050)).0;
+        let score = |matcher: &PoiMatcher, s2_cell_id: u64, tags: &[(&str, &str)]| {
+            let mut flat_tags = Vec::with_capacity(tags.len() * 2);
+            for (k, v) in tags {
+                flat_tags.push(pool.lookup(k).expect("key in pool") as u32);
+                flat_tags.push(pool.lookup(v).expect("value in pool") as u32);
+            }
+            let ll = LatLng::from(CellID(s2_cell_id));
+            let mut geometry_wkb = Vec::new();
+            write_point(
+                &mut geometry_wkb,
+                &geo::Point::new(ll.lng.deg(), ll.lat.deg()),
+                &WriteOptions {
+                    endianness: wkb::Endianness::LittleEndian,
+                },
+            )
+            .expect("wkb encode");
+            let feature = Feature {
+                id: 1,
+                tags: flat_tags,
+                geometry_wkb,
+                ..Default::default()
+            };
+            let candidate = OsmCandidate {
+                feature: &feature,
+                strings: &pool,
+            };
+            (
+                matcher.score_osm_candidate(&candidate),
+                matcher.rule(&candidate),
+            )
+        };
+        let apollostation = |s2_cell_id: u64| Place {
+            s2_cell_id,
+            spider: String::from("apollostation_jp"),
+            mask: MatchMask::FUEL,
+            fetched: test_timestamp(),
+            shape_wkb: test_shape(s2_cell_id),
+            tags: tags(&[("amenity", "fuel"), ("brand:wikidata", "Q114731101")]),
+        };
+
+        let jp = apollostation(tokyo);
+        let m = PoiMatcher::for_place(&jp, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
+        let (same, rule) = score(
+            &m,
+            tokyo,
+            &[("amenity", "fuel"), ("brand:wikidata", "Q114731101")],
+        );
+        assert_eq!(rule, "brand_wikidata");
+        for old in ["Q2216770", "Q110716465"] {
+            let (former, rule) = score(&m, tokyo, &[("amenity", "fuel"), ("brand:wikidata", old)]);
+            assert_eq!(rule, "former_brand");
+            assert!(former > 0.9 && former < same, "{former}");
+        }
+        // Another brand still vetoes.
+        let (other, rule) = score(&m, tokyo, &[("amenity", "fuel"), ("brand:wikidata", "Q1")]);
+        assert_eq!((other, rule), (0.0, "brand_wikidata"));
+        // So does another category.
+        let (shop, _) = score(
+            &m,
+            tokyo,
+            &[("shop", "supermarket"), ("brand:wikidata", "Q2216770")],
+        );
+        assert_eq!(shop, 0.0);
+
+        // Outside Japan, Shell is still Shell.
+        let de = apollostation(berlin);
+        let m = PoiMatcher::for_place(&de, &Nondescript::none(), &NO_DOMAINS).expect("matcher");
+        let (shell, rule) = score(
+            &m,
+            berlin,
+            &[("amenity", "fuel"), ("brand:wikidata", "Q110716465")],
+        );
+        assert_eq!((shell, rule), (0.0, "brand_wikidata"));
     }
 
     /// Address evidence: an OSM feature without a brand of its own, at
