@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.8.18](https://github.com/brawer/osmdiffs/compare/v0.8.17...v0.8.18) (2026-11-18)
+
+
+### 🆕 Enhancements
+
+* detect Google Maps camera coords and try a corrected position ([e7381b3](https://github.com/brawer/osmdiffs/commit/e7381b32b86e3e5aa9a17be7cbae9a611d3543bf))
+* Detect Google Maps camera coords and try a corrected position ([#973](https://github.com/brawer/osmdiffs/issues/973)) ([e7381b3](https://github.com/brawer/osmdiffs/commit/e7381b32b86e3e5aa9a17be7cbae9a611d3543bf))
+* **evidence:** normalize postcodes and split house numbers off addr:street ([#980](https://github.com/brawer/osmdiffs/issues/980)) ([6000d16](https://github.com/brawer/osmdiffs/commit/6000d168bc6871d9d74392d314ba8758fee4f427)), closes [#967](https://github.com/brawer/osmdiffs/issues/967)
+* **matching:** allow for street abbreviations when comparing addresses ([#982](https://github.com/brawer/osmdiffs/issues/982)) ([8d08006](https://github.com/brawer/osmdiffs/commit/8d080063ca7fa193c20a1813a473cefccc2d0c21)), closes [#981](https://github.com/brawer/osmdiffs/issues/981)
+* **matching:** count an agreeing street address as POI evidence ([#984](https://github.com/brawer/osmdiffs/issues/984)) ([d93b369](https://github.com/brawer/osmdiffs/commit/d93b369729f89d467e65af1c48457c609635adbc))
+* **matching:** find the brand at the start of OSM names, with NSI names ([#996](https://github.com/brawer/osmdiffs/issues/996)) ([6953ead](https://github.com/brawer/osmdiffs/commit/6953ead3062b959b089f0179905bc68a6816ffe1))
+* **matching:** match bike-share stations from GBFS feeds ([#987](https://github.com/brawer/osmdiffs/issues/987)) ([508836c](https://github.com/brawer/osmdiffs/commit/508836c2f0512289f87b396b3977f0610a474b9e))
+* **matching:** match OSM features that still have a former brand ([#994](https://github.com/brawer/osmdiffs/issues/994)) ([8de6b39](https://github.com/brawer/osmdiffs/commit/8de6b393da28a91635f99b98e2d245c006b568f4))
+* **matching:** match places by shared official IDs ([#986](https://github.com/brawer/osmdiffs/issues/986)) ([2542aa1](https://github.com/brawer/osmdiffs/commit/2542aa1eac827b618ccf691432fda8efb89bf9cf)), closes [#985](https://github.com/brawer/osmdiffs/issues/985)
+* **spider-stats:** count deletion candidates matched by name ([#1002](https://github.com/brawer/osmdiffs/issues/1002)) ([97edaf0](https://github.com/brawer/osmdiffs/commit/97edaf0af8f2cd0ce4b410d00b7510f0a896b352)), closes [#1001](https://github.com/brawer/osmdiffs/issues/1001)
+* **spider-stats:** count stacking by kind and brand, publish the most common opening_hours ([#979](https://github.com/brawer/osmdiffs/issues/979)) ([2af0378](https://github.com/brawer/osmdiffs/commit/2af0378184e87f1091799e390ea325f3f5e37d74)), closes [#975](https://github.com/brawer/osmdiffs/issues/975)
+* **spider-stats:** kinds of opening_hours difference, and value quality per key ([#1003](https://github.com/brawer/osmdiffs/issues/1003)) ([4ccffb7](https://github.com/brawer/osmdiffs/commit/4ccffb7d09bdb781d87aac293c9e9457989a8ace)), closes [#1000](https://github.com/brawer/osmdiffs/issues/1000)
+* **spider-stats:** name last week's file in the metadata ([#1004](https://github.com/brawer/osmdiffs/issues/1004)) ([6b20a55](https://github.com/brawer/osmdiffs/commit/6b20a55fdafbf4b4ed91694dc36f03416eb7bebe)), closes [#999](https://github.com/brawer/osmdiffs/issues/999)
+* **tiles:** write the Google Maps camera correction into conflated.pmtiles ([#978](https://github.com/brawer/osmdiffs/issues/978)) ([f58bdb2](https://github.com/brawer/osmdiffs/commit/f58bdb2d67bd294e80aac7f888d568cd5eb273c5)), closes [#977](https://github.com/brawer/osmdiffs/issues/977)
+
+
+### 🐞 Bug Fixes
+
+* **atp:** Count operator and network IDs in the China datum vote ([#974](https://github.com/brawer/osmdiffs/issues/974)) ([7c089f8](https://github.com/brawer/osmdiffs/commit/7c089f8cc9e26531732da8921665dcd346d73c91))
+* **atp:** Warn only about skipped history.json runs newer than the one used ([#964](https://github.com/brawer/osmdiffs/issues/964)) ([ad55f9e](https://github.com/brawer/osmdiffs/commit/ad55f9ecb271a014e7cc69fb221477723b1d7bea))
+* **conflate:** never take trolley bays or car rentals as located_in hosts ([#969](https://github.com/brawer/osmdiffs/issues/969)) ([ee471e9](https://github.com/brawer/osmdiffs/commit/ee471e9831cf6f0d1fe2961e1ca0a020ad3fc875)), closes [#968](https://github.com/brawer/osmdiffs/issues/968)
+* **deps:** upgrade to Rust 1.100.0 ([#976](https://github.com/brawer/osmdiffs/issues/976)) ([0eed8b5](https://github.com/brawer/osmdiffs/commit/0eed8b5deb0a4acd278e1d79d522550d5d7104c1))
+* **memstats:** Leave reclaimable page cache out of the OOM warning ([#963](https://github.com/brawer/osmdiffs/issues/963)) ([b216073](https://github.com/brawer/osmdiffs/commit/b216073471b22f8f169241d38b092c4f86c03627))
+
+
+### ⚡ Performance
+
+* **tiles:** Stop conflated.pmtiles detail at z14 ([#956](https://github.com/brawer/osmdiffs/issues/956)) ([8fb31e2](https://github.com/brawer/osmdiffs/commit/8fb31e29d0441394ca082879ff4d6ecd57f96fc9))
+
+
+### 📚 Documentation
+
+* **notes:** add evaluation of street address comparison ([#983](https://github.com/brawer/osmdiffs/issues/983)) ([8a8f209](https://github.com/brawer/osmdiffs/commit/8a8f2093fddb79c0be76cfcd57104aaea8637f98))
+
+
+### 🚧 Maintenance
+
+* **ci:** Bump taiki-e/install-action from 2.90.3 to 2.90.4 ([#993](https://github.com/brawer/osmdiffs/issues/993)) ([492f84c](https://github.com/brawer/osmdiffs/commit/492f84c4c2ed5f2baf63774c7fbbb057d5e7056b))
+* **deps:** Bump rust from 1.99.1-alpine3.23 to 1.100.0-alpine3.23 ([#972](https://github.com/brawer/osmdiffs/issues/972)) ([4e46e12](https://github.com/brawer/osmdiffs/commit/4e46e12718396d5f2a38bc734a88abbdcad5e598))
+* **deps:** ignore unmaintained chrono advisory in cargo-deny ([#998](https://github.com/brawer/osmdiffs/issues/998)) ([c0e083e](https://github.com/brawer/osmdiffs/commit/c0e083e663f8be51535e5c4a2bf749d09278371a))
+* take cargo-cyclonedx from stable Alpine 3.24 ([#1005](https://github.com/brawer/osmdiffs/issues/1005)) ([d6e663d](https://github.com/brawer/osmdiffs/commit/d6e663d8911b44153b7525e060f0b359eb5f2603)), closes [#556](https://github.com/brawer/osmdiffs/issues/556)
+
 ## [0.8.17](https://github.com/brawer/osmdiffs/compare/v0.8.16...v0.8.17) (2026-11-15)
 
 
