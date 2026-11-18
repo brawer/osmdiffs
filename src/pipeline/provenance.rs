@@ -162,12 +162,18 @@ pub fn build_bom_for_conflated_parquet(
         .context("could not read QRank provenance")?;
     let osmviews_metadata = read_cached_metadata(&pipeline::osm_views::OSMVIEWS, workdir)
         .context("could not read OSMViews provenance")?;
+    let nsi_metadata = pipeline::nsi::read_cached_metadata(workdir)
+        .context("could not read name-suggestion-index provenance")?;
 
     let anchor = format_rfc3339(anchor_timestamp(&atp_metadata, &osm_metadata));
     let serial_number = deterministic_serial_number(
         &atp_metadata,
         &osm_metadata,
-        &[&qrank_metadata, &osmviews_metadata],
+        &[
+            &qrank_metadata.sha256,
+            &osmviews_metadata.sha256,
+            &nsi_metadata.sha256,
+        ],
     )?;
 
     Ok(json!({
@@ -188,6 +194,7 @@ pub fn build_bom_for_conflated_parquet(
             osm_component(&osm_metadata)?,
             packaged_component(&pipeline::qrank::QRANK, &qrank_metadata),
             packaged_component(&pipeline::osm_views::OSMVIEWS, &osmviews_metadata),
+            nsi_component(&nsi_metadata),
             country_boundaries_component(),
         ],
         // Declares conflated.parquet's inputs as *its* dependencies,
@@ -217,12 +224,13 @@ pub(crate) fn anchor_timestamp(atp: &AtpMetadata, osm: &OsmMetadata) -> UtcDateT
 
 /// The `bom-ref`s of conflated.parquet's inputs, in the order the BOM
 /// lists them.
-fn input_refs() -> [&'static str; 5] {
+fn input_refs() -> [&'static str; 6] {
     [
         "alltheplaces.zip",
         pipeline::PLANET_PBF_FILENAME,
         pipeline::qrank::QRANK.filename,
         pipeline::osm_views::OSMVIEWS.filename,
+        pipeline::nsi::BOM_REF,
         COUNTRY_BOUNDARIES_REF,
     ]
 }
@@ -241,13 +249,14 @@ const SERIAL_NAMESPACE: Uuid = Uuid::from_bytes([
 /// The BOM's `serialNumber`, derived from the inputs' SHA-256s so
 /// identical inputs always yield an identically identified BOM --
 /// rather than a fresh random v4 UUID per run, which made every BOM
-/// (and, with it, `conflated.parquet`) non-reproducible. The packaged
-/// inputs (QRank, OSMViews) are appended after ATP's and OSM's, so a
-/// new QRank or OSMViews build also gets a new serial number.
+/// (and, with it, `conflated.parquet`) non-reproducible. The SHA-256s
+/// of the other downloaded inputs (QRank, OSMViews, the
+/// name-suggestion-index) are appended after ATP's and OSM's, so a new
+/// build of any of them also gets a new serial number.
 fn deterministic_serial_number(
     atp: &AtpMetadata,
     osm: &OsmMetadata,
-    packaged: &[&PackagedMetadata],
+    others: &[&str],
 ) -> Result<String> {
     let atp_sha = atp
         .sha256
@@ -257,9 +266,9 @@ fn deterministic_serial_number(
         "OpenStreetMap metadata has no sha256 (workdir from an older osmdiffs version?)",
     )?;
     let mut name = format!("{atp_sha}:{osm_sha}");
-    for p in packaged {
+    for sha256 in others {
         name.push(':');
-        name.push_str(&p.sha256);
+        name.push_str(sha256);
     }
     Ok(Uuid::new_v5(&SERIAL_NAMESPACE, name.as_bytes())
         .urn()
@@ -420,6 +429,30 @@ fn packaged_component(resource: &PackagedResource, metadata: &PackagedMetadata) 
     })
 }
 
+/// The name-suggestion-index, which matching uses for the names of
+/// brands, operators and networks; see `pipeline::nsi`.
+fn nsi_component(metadata: &pipeline::nsi::NsiMetadata) -> Value {
+    use pipeline::nsi::{BOM_REF, LICENSE, LICENSE_URL};
+    json!({
+        "bom-ref": BOM_REF,
+        "type": "data",
+        "name": "name-suggestion-index",
+        "version": metadata.version,
+        "supplier": {
+            "name": "name-suggestion-index contributors",
+            "url": ["https://github.com/osmlab/name-suggestion-index"]
+        },
+        "licenses": license(LICENSE, LICENSE_URL),
+        "hashes": [{"alg": "SHA-256", "content": metadata.sha256}],
+        "purl": format!("pkg:npm/name-suggestion-index@{}", metadata.version),
+        "data": [{"type": "dataset", "contents": {"url": metadata.url}}],
+        "externalReferences": [
+            {"type": "distribution", "url": metadata.url},
+            license_external_reference(LICENSE_URL),
+        ],
+    })
+}
+
 /// `bom-ref` of [country_boundaries_component].
 const COUNTRY_BOUNDARIES_REF: &str = "country-boundaries";
 
@@ -530,7 +563,7 @@ mod tests {
                 "sha256": "c6d2ef441a79c401dab2399c5737e14f4c5b0d5f766e4b00d201870b0ff997bd"
             }"#,
         )?;
-        for name in ["qrank.meta.json", "osmviews.meta.json"] {
+        for name in ["qrank.meta.json", "osmviews.meta.json", "nsi.meta.json"] {
             let mut src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             src.push("tests/test_data");
             src.push(name);
@@ -578,7 +611,7 @@ mod tests {
         assert_eq!(output["copyright"], OSM_COPYRIGHT);
 
         let components = bom["components"].as_array().expect("components array");
-        assert_eq!(components.len(), 5);
+        assert_eq!(components.len(), 6);
 
         let atp = &components[0];
         assert_eq!(atp["bom-ref"], "alltheplaces.zip");
@@ -660,7 +693,17 @@ mod tests {
             "https://osmviews.brawer.ch/data/osmviews-20261018.tiff"
         );
 
-        let boundaries = &components[4];
+        let nsi = &components[4];
+        assert_eq!(nsi["bom-ref"], "nsi.json");
+        assert_eq!(nsi["version"], "8.0.20261101");
+        assert_eq!(nsi["licenses"][0]["license"]["id"], "BSD-3-Clause");
+        assert_eq!(nsi["purl"], "pkg:npm/name-suggestion-index@8.0.20261101");
+        assert_eq!(
+            nsi["data"][0]["contents"]["url"],
+            "https://cdn.jsdelivr.net/npm/name-suggestion-index@8.0.20261101/dist/json/nsi.min.json"
+        );
+
+        let boundaries = &components[5];
         assert_eq!(boundaries["bom-ref"], "country-boundaries");
         assert_eq!(boundaries["type"], "data");
         assert_eq!(boundaries["version"], "1.2.0");
@@ -686,6 +729,7 @@ mod tests {
                 pipeline::PLANET_PBF_FILENAME,
                 "qrank.csv.gz",
                 "osmviews.tiff",
+                "nsi.json",
                 "country-boundaries",
             ]
         );
@@ -718,6 +762,7 @@ mod tests {
             pipeline::PLANET_PBF_FILENAME,
             "qrank.csv.gz",
             "osmviews.tiff",
+            "nsi.json",
             "country-boundaries",
         ];
         let workflow = &bom["formulation"][0]["workflows"][0];
@@ -729,7 +774,7 @@ mod tests {
         assert_eq!(workflow["timeStart"], "2026-03-04T15:16:17Z");
         assert_eq!(workflow["timeEnd"], bom["metadata"]["timestamp"]);
         assert_eq!(workflow["resourceReferences"][0]["ref"], "tool-osmdiffs");
-        assert_eq!(workflow["inputs"].as_array().expect("inputs").len(), 5);
+        assert_eq!(workflow["inputs"].as_array().expect("inputs").len(), 6);
         for input in workflow["inputs"].as_array().expect("inputs") {
             let r = input["resource"]["ref"].as_str().expect("ref");
             assert!(known_refs.contains(&r), "unknown bom-ref {r}");

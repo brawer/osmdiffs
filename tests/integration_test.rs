@@ -47,6 +47,8 @@ fn run_pipeline_on_fixtures(extra_args: &[&str]) -> Result<TempDir> {
         "qrank.meta.json",
         "osmviews.tiff",
         "osmviews.meta.json",
+        "nsi.json",
+        "nsi.meta.json",
     ] {
         symlink(fixture(name), workdir.path().join(name))?;
     }
@@ -250,8 +252,10 @@ fn assert_spider_stats(path: &Path) -> Result<()> {
     // One Misenso shop has a shop of the same kind right next to it in
     // OSM, which the matcher rejected.
     assert_eq!(rejected, [0, 0, 0, 1, 0, 0]);
-    // Small spiders move all their features for chance pairs.
-    assert_eq!(numbers("chance_sampled"), [1, 0, 1, 3, 1, 2]);
+    // Small spiders move all their features for chance pairs. For
+    // Winterthur, that's two benches and two playgrounds, which have a
+    // matcher because their operator can be found by name.
+    assert_eq!(numbers("chance_sampled"), [1, 0, 1, 3, 1, 4]);
 
     // The dataset attributes of each spider's FeatureCollection; none
     // for the crashed spider, whose file is empty.

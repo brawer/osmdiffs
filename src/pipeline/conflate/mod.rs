@@ -6,8 +6,8 @@ use super::last_modified;
 use crate::{
     make_progress_bar,
     matchers::{
-        OsmCandidate, brand_domains::BrandDomains, contact::Nondescript, create_matcher,
-        match_distance,
+        OsmCandidate, brand_domains::BrandDomains, brand_names::NsiNames, contact::Nondescript,
+        create_matcher, match_distance,
     },
     pipeline::EXTERNAL_SORT_CHUNK_BYTES,
     places::{Place, PlaceReader},
@@ -111,6 +111,10 @@ pub fn conflate(
     if spider_counts_path.exists() {
         inputs.push(&spider_counts_path);
     }
+    let nsi_path = super::nsi::path(workdir);
+    if nsi_path.exists() {
+        inputs.push(&nsi_path);
+    }
     let input_modified = last_modified(&inputs)?.max(osm.modified()?);
     let out_path = workdir.join("conflated.parquet");
     let diagnostics_path = diagnostics::path(workdir);
@@ -128,6 +132,16 @@ pub fn conflate(
     )?;
     let brand_domains = BrandDomains::open(&brand_domains_path)?;
     log::info!(count = brand_domains.len(); "conflate: read brand domains");
+    // Without NSI, as in some tests, names come from ATP's tags alone.
+    let nsi = if nsi_path.exists() {
+        NsiNames::open(&nsi_path)?
+    } else {
+        NsiNames::default()
+    };
+    log::info!(
+        wikidata_ids = nsi.len(), version = nsi.version.as_str();
+        "conflate: read name-suggestion-index"
+    );
     let camera_spiders = read_camera_spiders(&spider_counts_path)?;
     log::info!(
         spiders = camera_spiders.len();
@@ -155,6 +169,7 @@ pub fn conflate(
                 Lookups {
                     nondescript: &nondescript,
                     brand_domains: &brand_domains,
+                    nsi: &nsi,
                     camera_spiders: &camera_spiders,
                 },
                 &signals,
@@ -283,6 +298,9 @@ fn log_no_matcher(counts: &HashMap<String, u64>) {
 struct Lookups<'a> {
     nondescript: &'a Nondescript,
     brand_domains: &'a BrandDomains,
+    /// Names of brands, operators and networks; see
+    /// [crate::matchers::brand_names].
+    nsi: &'a NsiNames,
     /// Spiders whose positions look like Google Maps camera centers,
     /// with their median offset; see [read_camera_spiders].
     camera_spiders: &'a HashMap<String, f64>,
@@ -308,6 +326,7 @@ fn produce_rows(
     let Lookups {
         nondescript,
         brand_domains,
+        nsi,
         camera_spiders,
     } = lookups;
     let coverer = s2::region::RegionCoverer {
@@ -411,7 +430,7 @@ fn produce_rows(
                 )
             });
 
-            let Some(matcher) = create_matcher(atp, nondescript, brand_domains) else {
+            let Some(matcher) = create_matcher(atp, nondescript, brand_domains, nsi) else {
                 no_matcher[i].store(true, Ordering::Relaxed);
                 return Ok(());
             };
@@ -423,7 +442,7 @@ fn produce_rows(
             let corrected = shift.map(|shift| camera::corrected(atp, -shift));
             let corrected_matcher = corrected
                 .as_ref()
-                .and_then(|c| create_matcher(c, nondescript, brand_domains));
+                .and_then(|c| create_matcher(c, nondescript, brand_domains, nsi));
             // The OSM features that matched better at the corrected
             // position.
             let mut via_corrected = HashSet::new();
@@ -708,6 +727,7 @@ fn produce_rows(
         osm,
         nondescript,
         brand_domains,
+        nsi,
         &mut diagnostics,
     )?;
     log::info!(

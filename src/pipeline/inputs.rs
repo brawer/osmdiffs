@@ -28,6 +28,7 @@ use anyhow::Result;
 use indicatif::MultiProgress;
 use std::path::{Path, PathBuf};
 
+use super::nsi::{self, NsiMetadata};
 use super::osm_views;
 use super::packaged::{PackagedMetadata, fetch_packaged};
 use super::qrank;
@@ -52,6 +53,7 @@ pub(crate) struct Inputs {
     pub osm: Input<OsmMetadata>,
     pub qrank: Input<PackagedMetadata>,
     pub osmviews: Input<PackagedMetadata>,
+    pub nsi: Input<NsiMetadata>,
 }
 
 /// Where to fetch the pipeline's inputs from. Only ever not the
@@ -68,6 +70,12 @@ pub(crate) struct Sources {
 
     /// OSMViews' `datapackage.json`, which points to the actual file.
     pub osmviews_datapackage_url: String,
+
+    /// Resolves the latest version of the name-suggestion-index.
+    pub nsi_resolve_url: String,
+
+    /// The CDN to download the name-suggestion-index from.
+    pub nsi_cdn_url: String,
 }
 
 impl Default for Sources {
@@ -77,13 +85,15 @@ impl Default for Sources {
             osm_planet_url: osm::OSM_PLANET_URL.to_string(),
             qrank_datapackage_url: qrank::QRANK_DATAPACKAGE_URL.to_string(),
             osmviews_datapackage_url: osm_views::OSMVIEWS_DATAPACKAGE_URL.to_string(),
+            nsi_resolve_url: nsi::NSI_RESOLVE_URL.to_string(),
+            nsi_cdn_url: nsi::NSI_CDN_URL.to_string(),
         }
     }
 }
 
 /// Fetches every input in parallel, each logged as its own sub-step
 /// (`fetch_inputs.atp`, `fetch_inputs.osm`, `fetch_inputs.qrank`,
-/// `fetch_inputs.osmviews`). If any fetch fails, the
+/// `fetch_inputs.osmviews`, `fetch_inputs.nsi`). If any fetch fails, the
 /// others are cancelled right away (a cancelled planet download leaves a
 /// `.part` file that the next attempt resumes), and the error is
 /// returned. See the module documentation for when a cached input is
@@ -94,7 +104,7 @@ pub(crate) async fn fetch_inputs(
     workdir: &Path,
     sources: &Sources,
 ) -> Result<Inputs> {
-    let (atp, osm, qrank, osmviews) = futures_util::future::try_join4(
+    let (atp, osm, qrank, osmviews, nsi) = futures_util::future::try_join5(
         super::run_step_async(
             "fetch_inputs.atp",
             atp::fetch_atp(&sources.atp_history_url, http_client, progress, workdir),
@@ -123,6 +133,16 @@ pub(crate) async fn fetch_inputs(
                 workdir,
             ),
         ),
+        super::run_step_async(
+            "fetch_inputs.nsi",
+            nsi::fetch_nsi(
+                &sources.nsi_resolve_url,
+                &sources.nsi_cdn_url,
+                http_client,
+                progress,
+                workdir,
+            ),
+        ),
     )
     .await?;
     Ok(Inputs {
@@ -130,6 +150,7 @@ pub(crate) async fn fetch_inputs(
         osm,
         qrank,
         osmviews,
+        nsi,
     })
 }
 
@@ -168,6 +189,8 @@ mod tests {
             osm_planet_url: "http://127.0.0.1:9/planet.osm.pbf".to_string(),
             qrank_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
             osmviews_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
+            nsi_resolve_url: "http://127.0.0.1:9/resolved".to_string(),
+            nsi_cdn_url: "http://127.0.0.1:9/npm".to_string(),
         }
     }
 
@@ -187,6 +210,8 @@ mod tests {
             ("qrank.meta.json", "qrank.meta.json"),
             ("osmviews.tiff", "osmviews.tiff"),
             ("osmviews.meta.json", "osmviews.meta.json"),
+            ("nsi.json", "nsi.json"),
+            ("nsi.meta.json", "nsi.meta.json"),
         ] {
             symlink(fixture(src), workdir.path().join(dst))?;
         }
@@ -216,6 +241,8 @@ mod tests {
         assert_eq!(inputs.qrank.metadata.version, "2026-10-11");
         assert_eq!(inputs.osmviews.path, workdir.path().join("osmviews.tiff"));
         assert_eq!(inputs.osmviews.metadata.version, "2026-10-18");
+        assert_eq!(inputs.nsi.path, workdir.path().join("nsi.json"));
+        assert_eq!(inputs.nsi.metadata.version, "8.0.20261101");
         Ok(())
     }
 
@@ -234,6 +261,8 @@ mod tests {
             "qrank.meta.json",
             "osmviews.tiff",
             "osmviews.meta.json",
+            "nsi.json",
+            "nsi.meta.json",
         ] {
             symlink(fixture(name), workdir.path().join(name))?;
         }
@@ -279,13 +308,15 @@ mod tests {
             }
         });
 
-        // QRank and OSMViews are already there, so only the other two get fetched.
+        // QRank, OSMViews and NSI are already there, so only the other two get fetched.
         let workdir = tempfile::tempdir()?;
         for name in [
             "qrank.csv.gz",
             "qrank.meta.json",
             "osmviews.tiff",
             "osmviews.meta.json",
+            "nsi.json",
+            "nsi.meta.json",
         ] {
             symlink(fixture(name), workdir.path().join(name))?;
         }
@@ -294,6 +325,8 @@ mod tests {
             osm_planet_url: format!("http://{planet_addr}/planet.osm.pbf"),
             qrank_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
             osmviews_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
+            nsi_resolve_url: "http://127.0.0.1:9/resolved".to_string(),
+            nsi_cdn_url: "http://127.0.0.1:9/npm".to_string(),
         };
         let result = tokio::time::timeout(
             Duration::from_secs(30),

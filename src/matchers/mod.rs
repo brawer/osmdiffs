@@ -12,6 +12,7 @@ use wkb::reader::read_wkb;
 
 mod address;
 pub mod brand_domains;
+pub mod brand_names;
 pub mod contact;
 pub(crate) mod former_brands;
 mod infrastructure_matcher;
@@ -482,8 +483,11 @@ pub fn create_matcher<'a>(
     place: &'a Place,
     nondescript: &contact::Nondescript,
     brand_domains: &'a brand_domains::BrandDomains,
+    nsi: &brand_names::NsiNames,
 ) -> Option<Box<dyn Matcher + 'a>> {
-    if let Some(matcher) = poi_matcher::PoiMatcher::for_place(place, nondescript, brand_domains) {
+    if let Some(matcher) =
+        poi_matcher::PoiMatcher::for_place(place, nondescript, brand_domains, nsi)
+    {
         Some(Box::new(matcher))
     } else if let Some(matcher) = transit_matcher::TransitMatcher::for_place(place) {
         Some(Box::new(matcher))
