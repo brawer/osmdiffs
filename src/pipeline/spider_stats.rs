@@ -21,13 +21,16 @@ use super::conflate::diagnostics::{self, SpiderDiagnostics};
 use super::conflate::evidence::{compared_tags, has_compared_tag};
 use super::wikidata_ids::WIKIDATA_KEYS;
 use crate::make_progress_bar;
-use crate::matchers::{contact::main_category, parse_wikidata_ids};
+use crate::matchers::contact::{main_category, normalize_email, normalize_url, parse_phone_number};
+use crate::matchers::parse_wikidata_ids;
 use crate::utils::countries::{Country, country};
+use crate::utils::opening_hours;
 use crate::utils::parquet::{get_binary, get_string, get_struct, get_tags, get_u64};
 use anyhow::{Context, Result};
 use arrow::array::{
-    Array, ArrayRef, Float32Array, Float32Builder, ListArray, ListBuilder, MapBuilder,
-    MapFieldNames, RecordBatch, StringArray, StringBuilder, StructBuilder, UInt64Builder,
+    Array, ArrayBuilder, ArrayRef, Float32Array, Float32Builder, ListArray, ListBuilder,
+    MapBuilder, MapFieldNames, RecordBatch, StringArray, StringBuilder, StructBuilder,
+    UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use geo::Centroid;
@@ -53,6 +56,52 @@ const FILENAME: &str = "spider-stats.parquet";
 /// Spiders per row group: few, so that a web page fetching one spider
 /// with HTTP range requests reads little more than that spider.
 const ROWS_PER_GROUP: usize = 64;
+
+/// The ATP tag keys whose values [Spider] checks, for the `values` of
+/// `spider-stats.parquet`: the keys of [compared_tags], and dates.
+/// Left out are keys whose values are unique to a feature by nature,
+/// such as `addr:housenumber` and `ref`: we can't read them, nor does
+/// their most common value say anything, and counting their values
+/// would take memory for each feature.
+const VALUE_KEYS: [&str; 11] = [
+    "name",
+    "brand",
+    "phone",
+    "email",
+    "website",
+    "opening_hours",
+    "addr:street",
+    "addr:postcode",
+    "addr:city",
+    "start_date",
+    "end_date",
+];
+
+/// Whether `value` of `key` is one that we can't read, or `None` if we
+/// have no reader for `key`. AllThePlaces writes phone numbers in
+/// international format, and dates as `YYYY`, `YYYY-MM` or
+/// `YYYY-MM-DD`, so a local number or a timestamp counts as unparsed.
+fn unparsed(key: &str, value: &str) -> Option<bool> {
+    let parts = || value.split(';').map(str::trim).filter(|p| !p.is_empty());
+    Some(match key {
+        "opening_hours" => opening_hours::parse(value).is_none(),
+        "phone" => parts().any(|p| parse_phone_number(p).is_none()),
+        "email" => parts().any(|p| normalize_email(p).is_none()),
+        "website" => parts().any(|p| normalize_url(p).is_none()),
+        "start_date" | "end_date" => !is_date(value.trim()),
+        _ => return None,
+    })
+}
+
+/// Whether `value` is a date as `YYYY`, `YYYY-MM` or `YYYY-MM-DD`.
+fn is_date(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('-').collect();
+    parts.len() <= 3
+        && parts
+            .iter()
+            .zip([4, 2, 2])
+            .all(|(p, len)| p.len() == len && p.bytes().all(|b| b.is_ascii_digit()))
+}
 
 /// Upper bounds, in meters, of the bins of the `distance_m` histogram;
 /// the last bin has no upper bound.
@@ -110,6 +159,12 @@ pub fn compute_spider_stats(
         conflated_rows = stats.rows,
         deletion_candidates = stats.deletions.values().sum::<u64>(),
         name_deletion_candidates = stats.name_candidates,
+        distinct_values = stats
+            .spiders
+            .values()
+            .flat_map(|s| &s.values)
+            .map(|v| v.counts.len())
+            .sum::<usize>(),
         bytes = std::fs::metadata(&out)?.len();
         "compute_spider_stats: done"
     );
@@ -138,8 +193,13 @@ struct RowInfo {
     names: Vec<String>,
     category: Option<String>,
     /// For each tag of [compared_tags] that the ATP feature has, its
-    /// position there and how it compares with OSM.
-    tags: Vec<(usize, TagState)>,
+    /// position there, how it compares with OSM, and for some tags,
+    /// the kind of agreement or difference, such as `small`.
+    tags: Vec<(usize, TagState, Option<&'static str>)>,
+    /// For each key of [VALUE_KEYS] that the ATP feature has, its
+    /// position there, a hash of the value, and whether it is
+    /// [unparsed].
+    values: Vec<(usize, u64, Option<bool>)>,
     opening_hours: Option<String>,
     /// The OSM feature of a `same` row, as `id * 4 + type`.
     osm_ref: Option<u64>,
@@ -186,6 +246,23 @@ struct Brand {
     locations: Vec<(f64, f64)>,
 }
 
+/// What we count for one key of [VALUE_KEYS] of a spider.
+#[derive(Debug, Default)]
+struct Values {
+    features: u64,
+    /// `None` if we can't tell for the key.
+    unparsed: Option<u64>,
+    /// Features by the hash of their value.
+    counts: HashMap<u64, u32>,
+}
+
+impl Values {
+    /// The features with the most common value.
+    fn top(&self) -> u64 {
+        self.counts.values().copied().max().map_or(0, u64::from)
+    }
+}
+
 /// What we count for one spider from `conflated.parquet`.
 #[derive(Debug, Default)]
 struct Spider {
@@ -201,6 +278,11 @@ struct Spider {
     /// Per tag of [compared_tags]: ATP features with the tag, and how
     /// many of them agree, differ, or have no such tag in OSM.
     tags: Vec<[u64; 4]>,
+    /// Rows by tag of [compared_tags] and kind of agreement or
+    /// difference.
+    tag_kinds: HashMap<(usize, &'static str), u64>,
+    /// Per key of [VALUE_KEYS], over all rows.
+    values: Vec<Values>,
     opening_hours: HashMap<String, u64>,
     osm_refs: HashMap<u64, u64>,
     /// Like `osm_refs` and `positions`, but per [kind]: features of
@@ -240,7 +322,10 @@ impl Spider {
         if self.tags.is_empty() {
             self.tags = vec![[0; 4]; compared_tags().count()];
         }
-        for (i, state) in row.tags {
+        for (i, state, kind) in row.tags {
+            if let Some(kind) = kind {
+                *self.tag_kinds.entry((i, kind)).or_default() += 1;
+            }
             let t = &mut self.tags[i];
             t[0] += 1;
             match state {
@@ -248,6 +333,17 @@ impl Spider {
                 TagState::Differing => t[2] += 1,
                 TagState::MissingInOsm => t[3] += 1,
             }
+        }
+        if self.values.is_empty() {
+            self.values = (0..VALUE_KEYS.len()).map(|_| Values::default()).collect();
+        }
+        for (i, hash, unparsed) in row.values {
+            let v = &mut self.values[i];
+            v.features += 1;
+            if let Some(unparsed) = unparsed {
+                *v.unparsed.get_or_insert(0) += u64::from(unparsed);
+            }
+            *v.counts.entry(hash).or_default() += 1;
         }
         if let Some(oh) = row.opening_hours {
             *self.opening_hours.entry(oh).or_default() += 1;
@@ -587,9 +683,27 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
             } else {
                 TagState::MissingInOsm
             };
-            tags.push((i, state));
+            let kind = if name == "opening_hours" && state != TagState::MissingInOsm {
+                opening_hours_kind(&atp_tags, &osm_tags)
+            } else {
+                None
+            };
+            tags.push((i, state, kind));
         }
     }
+    let values = VALUE_KEYS
+        .iter()
+        .enumerate()
+        .filter_map(|(i, key)| {
+            let (_, value) = atp_tags.iter().find(|(k, _)| k == key)?;
+            if value.trim().is_empty() {
+                return None;
+            }
+            let mut hasher = std::hash::DefaultHasher::new();
+            value.hash(&mut hasher);
+            Some((i, hasher.finish(), unparsed(key, value)))
+        })
+        .collect();
     let (osm_ref, offset) = if relation == Relation::Same {
         let kind = match get_string(osm, "type", row)?.as_str() {
             "node" => 1,
@@ -615,6 +729,7 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
         names: atp_names(atp_tag_refs()),
         category: main_category(atp_tag_refs()),
         tags,
+        values,
         opening_hours: atp_tag_refs()
             .find(|(k, _)| *k == "opening_hours")
             .map(|(_, v)| v.to_string()),
@@ -623,6 +738,19 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
         position: Some(position),
         location,
     })
+}
+
+/// How the `opening_hours` of `atp` and `osm` agree or differ, as
+/// [opening_hours::difference] says, or `None` if they are the same
+/// text or one of them has none.
+fn opening_hours_kind(atp: &[(String, String)], osm: &[(String, String)]) -> Option<&'static str> {
+    let value = |tags: &[(String, String)]| {
+        tags.iter()
+            .find(|(k, _)| k == "opening_hours")
+            .map(|(_, v)| v.clone())
+    };
+    let (a, o) = (value(atp)?, value(osm)?);
+    opening_hours::difference(&a, &o).map(opening_hours::Difference::as_str)
 }
 
 /// How far the centroid of `atp` lies east and north of the centroid
@@ -788,6 +916,23 @@ fn tag_fields() -> Fields {
         u64_field("agreeing"),
         u64_field("differing"),
         u64_field("missing_in_osm"),
+        Field::new("kinds", list_of(kind_fields()), false),
+    ])
+}
+
+fn kind_fields() -> Fields {
+    Fields::from(vec![
+        Field::new("kind", DataType::Utf8, false),
+        u64_field("rows"),
+    ])
+}
+
+fn value_fields() -> Fields {
+    Fields::from(vec![
+        Field::new("key", DataType::Utf8, false),
+        u64_field("atp"),
+        Field::new("unparsed", DataType::UInt64, true),
+        u64_field("top_value_atp"),
     ])
 }
 
@@ -871,6 +1016,7 @@ pub(super) fn schema() -> Schema {
         Field::new("opening_hours_top_value", DataType::Utf8, true),
         Field::new("rules", list_of(rule_fields()), false),
         Field::new("tags", list_of(tag_fields()), false),
+        Field::new("values", list_of(value_fields()), false),
         Field::new("brands", list_of(brand_fields()), false),
     ])
 }
@@ -965,6 +1111,7 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
     };
     let mut rules = struct_list(rule_fields());
     let mut tags = struct_list(tag_fields());
+    let mut values = struct_list(value_fields());
     let mut brands = struct_list(brand_fields());
 
     for row in rows {
@@ -1062,9 +1209,55 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
                     .unwrap()
                     .append_value(*n);
             }
+            let mut kinds: Vec<(&str, u64)> = s
+                .tag_kinds
+                .iter()
+                .filter(|((tag, _), _)| *tag == i)
+                .map(|((_, kind), n)| (*kind, *n))
+                .collect();
+            kinds.sort_unstable();
+            let k = b
+                .field_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(5)
+                .unwrap();
+            let kb = k
+                .values()
+                .as_any_mut()
+                .downcast_mut::<StructBuilder>()
+                .unwrap();
+            for (kind, n) in kinds {
+                kb.field_builder::<StringBuilder>(0)
+                    .unwrap()
+                    .append_value(kind);
+                kb.field_builder::<UInt64Builder>(1)
+                    .unwrap()
+                    .append_value(n);
+                kb.append(true);
+            }
+            k.append(true);
             b.append(true);
         }
         tags.append(true);
+
+        let b = values.values();
+        for (i, v) in s.values.iter().enumerate() {
+            if v.features == 0 {
+                continue;
+            }
+            b.field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value(VALUE_KEYS[i]);
+            b.field_builder::<UInt64Builder>(1)
+                .unwrap()
+                .append_value(v.features);
+            b.field_builder::<UInt64Builder>(2)
+                .unwrap()
+                .append_option(v.unparsed);
+            b.field_builder::<UInt64Builder>(3)
+                .unwrap()
+                .append_value(v.top());
+            b.append(true);
+        }
+        values.append(true);
 
         let mut keys: Vec<&(Option<Country>, u64)> = s.brands.keys().collect();
         keys.sort_by_key(|(c, id)| (c.map(|c| c.code_bytes()), *id));
@@ -1172,6 +1365,7 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         Arc::new(oh_value.finish()),
         Arc::new(rules.finish()),
         Arc::new(tags.finish()),
+        Arc::new(values.finish()),
         Arc::new(brands.finish()),
     ];
     Ok(RecordBatch::try_new(schema.clone(), columns)?)
@@ -1193,7 +1387,11 @@ mod tests {
             wikidata: vec![379911],
             names: vec!["denner".into()],
             category: Some("shop=supermarket".into()),
-            tags: vec![(0, TagState::Agreeing), (1, TagState::Differing)],
+            tags: vec![
+                (0, TagState::Agreeing, None),
+                (1, TagState::Differing, None),
+            ],
+            values: vec![(0, 1, None), (2, osm_ref, Some(false))],
             opening_hours: Some("Mo-Sa 08:00-20:00".into()),
             osm_ref: Some(osm_ref),
             offset: Some((distance_m, -1.0)),
@@ -1220,6 +1418,12 @@ mod tests {
         assert_eq!(s.rules["brand_wikidata"], 4);
         assert_eq!(s.tags[0], [4, 4, 0, 0]);
         assert_eq!(s.tags[1], [4, 0, 4, 0]);
+        // All four have the same name, and phones by OSM feature.
+        assert_eq!((s.values[0].features, s.values[0].top()), (4, 4));
+        assert_eq!(s.values[0].unparsed, None);
+        assert_eq!((s.values[2].features, s.values[2].top()), (4, 2));
+        assert_eq!(s.values[2].unparsed, Some(0));
+        assert_eq!(s.values[3].features, 0);
         assert_eq!(s.shared_osm_features(), 2);
         assert_eq!(s.shared_positions(), 2);
         assert_eq!(median_offset(&s.offsets), Some((24.9, -1.0)));
@@ -1235,6 +1439,105 @@ mod tests {
         assert_eq!(s.shared_positions_same_kind(), 2);
         assert_eq!(s.opening_hours_top(), Some(("Mo-Sa 08:00-20:00", 4)));
         assert_eq!(Spider::default().opening_hours_top(), None);
+    }
+
+    #[test]
+    fn test_opening_hours_kind() {
+        let tags = |v: &str| vec![("opening_hours".to_string(), v.to_string())];
+        let kind = |a, o| opening_hours_kind(&tags(a), &tags(o));
+        assert_eq!(kind("24/7", "24/7"), None);
+        assert_eq!(kind("24/7", "Mo-Su 00:00-24:00"), Some("same_schedule"));
+        assert_eq!(
+            kind("Mo-Fr 08:00-18:00", "Mo-Fr 08:00-20:00"),
+            Some("over_60_min")
+        );
+        assert_eq!(opening_hours_kind(&tags("24/7"), &[]), None);
+    }
+
+    #[test]
+    fn test_unparsed() {
+        let cases = [
+            ("opening_hours", "Mo-Fr 08:00-18:00", Some(false)),
+            ("opening_hours", "Até 22:00 hs", Some(true)),
+            ("phone", "+41 44 417 77 77; +41 44 417 77 78", Some(false)),
+            ("phone", "+41 44 417 77 77; 044 417 77 78", Some(true)),
+            ("email", "info@example.ch", Some(false)),
+            ("email", "info at example.ch", Some(true)),
+            ("website", "https://www.denner.ch/de/filialen/", Some(false)),
+            ("website", "not a url", Some(true)),
+            ("start_date", "2015", Some(false)),
+            ("start_date", "2015-12-10", Some(false)),
+            // Kaufland, tigota_it and cutters write timestamps.
+            ("start_date", "2015-12-10T00:00:00.000Z", Some(true)),
+            ("end_date", "next spring", Some(true)),
+            ("name", "Denner", None),
+        ];
+        for (key, value, want) in cases {
+            assert_eq!(unparsed(key, value), want, "{key}={value}");
+        }
+    }
+
+    #[test]
+    fn test_opening_hours_kinds() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let out = dir.path().join(FILENAME);
+        let oh = compared_tags()
+            .position(|t| t == "opening_hours")
+            .context("opening_hours")?;
+        let mut stats = Spider::default();
+        for (state, kind) in [
+            (TagState::Agreeing, None),
+            (TagState::Agreeing, Some("same_schedule")),
+            (TagState::Differing, Some("small")),
+            (TagState::Differing, Some("small")),
+            (TagState::Differing, Some("other_days")),
+            (TagState::MissingInOsm, None),
+        ] {
+            stats.add(RowInfo {
+                tags: vec![(oh, state, kind)],
+                ..same("x", 3.0, 1)
+            });
+        }
+        assert_eq!(stats.tags[oh], [6, 2, 3, 1]);
+        let rows = [Row {
+            spider: "x",
+            counts: None,
+            run_stats: None,
+            diagnostics: None,
+            stats: &stats,
+        }];
+        let (osm_brands, names, deletions, name_deletions) = Default::default();
+        let lookups = Lookups {
+            osm_brands: &osm_brands,
+            names: &names,
+            deletions: &deletions,
+            name_deletions: &name_deletions,
+        };
+        write(&rows, &lookups, &out)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&out)?)?.build()?;
+        let batch = reader.into_iter().next().context("no batch")??;
+        let tags = batch.column_by_name("tags").unwrap();
+        let tags = tags.as_any().downcast_ref::<ListArray>().unwrap().value(0);
+        let tags = tags.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(tags.len(), 1);
+        let kinds = tags.column_by_name("kinds").unwrap();
+        let kinds = kinds.as_any().downcast_ref::<ListArray>().unwrap().value(0);
+        let kinds = kinds.as_any().downcast_ref::<StructArray>().unwrap();
+        let kind = kinds
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let n = kinds
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let got: Vec<(&str, u64)> = (0..kinds.len())
+            .map(|i| (kind.value(i), n.value(i)))
+            .collect();
+        assert_eq!(got, [("other_days", 1), ("same_schedule", 1), ("small", 2)]);
+        Ok(())
     }
 
     #[test]
@@ -1500,6 +1803,31 @@ mod tests {
                 .unwrap()
                 .value(0)
         };
+        let values = batch.column_by_name("values").unwrap();
+        let values = values.as_any().downcast_ref::<ListArray>().unwrap();
+        let denner = values.value(0);
+        let denner = denner.as_any().downcast_ref::<StructArray>().unwrap();
+        let key = denner
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!((key.value(0), key.value(1)), ("name", "phone"));
+        let column = |i: usize| {
+            denner
+                .column(i)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .clone()
+        };
+        // Two features with the same name, and different phones.
+        assert_eq!((column(1).value(0), column(3).value(0)), (2, 2));
+        assert_eq!((column(1).value(1), column(3).value(1)), (2, 1));
+        assert!(column(2).is_null(0));
+        assert_eq!(column(2).value(1), 0);
+        assert_eq!(values.value(1).len(), 0);
+
         // Only the supermarkets count, since the spider has no cafes.
         assert_eq!(field("osm_features"), 7);
         assert_eq!(field("deletion_candidates"), 2);
