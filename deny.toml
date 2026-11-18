@@ -23,6 +23,11 @@ ignore = [
   # only `--target all` shows it). Drop this line once postcard moves to
   # heapless 0.8, or phonenumber stops using postcard.
   "RUSTSEC-2023-0089",
+  # chrono is unmaintained, not vulnerable. It comes in via arrow and
+  # parquet (Apache Arrow) and via piz; osmdiffs doesn't use it directly.
+  # Drop this line once those move to jiff or time; see
+  # https://github.com/brawer/osmdiffs/issues/997.
+  "RUSTSEC-2026-0543",
 ]
 
 # ── licenses: only accept licenses we've reviewed as OK to redistribute ─────
