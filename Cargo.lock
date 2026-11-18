@@ -2014,6 +2014,7 @@ dependencies = [
  "geo",
  "geo-traits",
  "geojson",
+ "icu_properties",
  "idna",
  "indicatif",
  "libc",

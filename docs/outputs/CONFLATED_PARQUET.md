@@ -146,8 +146,10 @@ scores lower than one matched by its ID, even when both are right.
 |---|---|---|
 | `same` | `official_id` | same official ID, such as a French school's UAI or the National Register number of a US historic place |
 | `same` | `brand_wikidata` | same `brand:wikidata` |
+| `same` | `former_brand` | OSM `brand:wikidata` is a brand that the ATP brand replaced in that country, such as Idemitsu for apollostation in Japan |
 | `same` | `contact` | same phone number or email address |
-| `same` | `brand_name` | same `brand`, `operator` or `network` name |
+| `same` | `brand_name` | same `brand`, `operator` or `network` name, also by a name from the name-suggestion-index |
+| `same` | `brand_in_name` | OSM feature without a brand whose `name` begins with the ATP brand, operator or network, such as `ローソン能美寺井店` for Lawson |
 | `same` | `brand_domain` | website on a domain of the brand |
 | `same` | `address` | same street address, with a name that fits |
 | `same` | `same_id` | transit stop with the same IFOPT ID or `uic_ref` |

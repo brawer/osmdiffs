@@ -7,7 +7,8 @@
 
 use super::s2_util::MergedCellRanges;
 use crate::matchers::{
-    OsmCandidate, brand_domains::BrandDomains, contact::Nondescript, create_matcher, match_distance,
+    OsmCandidate, brand_domains::BrandDomains, brand_names::NsiNames, contact::Nondescript,
+    create_matcher, match_distance,
 };
 use crate::pipeline::spider_stats::DISTANCE_BINS_M;
 use crate::places::{Place, PlaceReader};
@@ -260,6 +261,7 @@ pub(super) fn chance_pairs(
     osm: &OsmFeatures,
     nondescript: &Nondescript,
     brand_domains: &BrandDomains,
+    nsi: &NsiNames,
     diagnostics: &mut Diagnostics,
 ) -> Result<()> {
     let coverer = s2::region::RegionCoverer {
@@ -284,7 +286,7 @@ pub(super) fn chance_pairs(
                     return Ok(None);
                 }
                 let moved = shifted(atp, seed);
-                let Some(matcher) = create_matcher(&moved, nondescript, brand_domains) else {
+                let Some(matcher) = create_matcher(&moved, nondescript, brand_domains, nsi) else {
                     return Ok(None);
                 };
                 let covering = {

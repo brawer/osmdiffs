@@ -35,6 +35,7 @@ impl Country {
     pub const ITALY: Country = Country(*b"IT");
     /// Mainland China; Hong Kong, Macau and Taiwan have their own codes.
     pub const CHINA: Country = Country(*b"CN");
+    pub const JAPAN: Country = Country(*b"JP");
 
     /// The two-letter code, such as `CH`.
     pub fn code(&self) -> &str {
@@ -68,6 +69,26 @@ static ALL: LazyLock<Vec<Country>> = LazyLock::new(|| {
 /// Every country that [country] can return, sorted by code.
 pub fn all() -> &'static [Country] {
     &ALL
+}
+
+static REGIONS: LazyLock<std::collections::HashSet<&'static str>> = LazyLock::new(|| {
+    let world = BoundingBox::new(-90.0, -180.0, 90.0, 179.999_999).expect("valid bounds");
+    BOUNDARIES.intersecting_ids(world)
+});
+
+/// Whether [regions] can return `id`, such as `CH` or `US-TX`.
+pub fn is_region(id: &str) -> bool {
+    REGIONS.contains(id)
+}
+
+/// The regions that (`lng`, `lat`), in degrees, lies in, from the
+/// smallest to the largest: a subdivision such as `US-TX` for some
+/// countries, then the country, such as `US`. Empty in the open sea.
+pub fn regions(lng: f64, lat: f64) -> Vec<&'static str> {
+    match LatLon::new(lat, lng) {
+        Ok(position) => BOUNDARIES.ids(position),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// The country that (`lng`, `lat`), in degrees, lies in, or `None` if
@@ -121,6 +142,16 @@ mod tests {
 
         assert_eq!(code(-30.0, 40.0), None); // Atlantic
         assert_eq!(code(0.0, 91.0), None); // invalid
+    }
+
+    #[test]
+    fn test_regions() {
+        assert_eq!(regions(-97.0, 33.0), vec!["US-TX", "US"]); // Texas
+        assert_eq!(regions(8.5402, 47.3782), vec!["CH"]); // Zürich HB
+        assert!(regions(-30.0, 40.0).is_empty()); // Atlantic
+        assert!(is_region("US-TX"));
+        assert!(is_region("JP"));
+        assert!(!is_region("ZZ"));
     }
 
     #[test]
