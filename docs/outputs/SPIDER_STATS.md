@@ -91,6 +91,7 @@ brands                   LIST<STRUCT> non-null
   missing_in_osm         UINT64   non-null
   osm_features           UINT64   nullable — OSM features with this ID in this country
   deletion_candidates    UINT64   nullable — deletion candidates with this ID in this country
+  deletion_candidates_by_name UINT64 nullable — deletion candidates without an ID, by name, see below
   offset_east_m          FLOAT    nullable — like offset_east_m above, for this brand and country
   offset_north_m         FLOAT    nullable
   bbox                   STRUCT   nullable — like bbox above, for this brand and country
@@ -296,6 +297,21 @@ supermarkets in a country and OpenStreetMap 500, either the spider
 misses some or OpenStreetMap has some that closed.
 `deletion_candidates` counts the `deletion_candidate` rows with the
 same ID in the country. Both are null for features without an ID.
+
+`deletion_candidates_by_name` counts the `deletion_candidate` rows
+with rule `name`: OpenStreetMap features without `brand:wikidata`,
+`operator:wikidata` or `network:wikidata` whose `brand`, `operator` or
+`network` is a name that ATP has in the country. Such a candidate
+counts for a brand if any of the spider's features of that brand in
+the country carries the same name, compared without regard to case
+and spacing, so it also counts in the row with a null `wikidata_id`.
+Like `deletion_candidates`, a candidate shared by several spiders
+counts for each, and once per brand, even if it matches the brand by
+more than one name. The field is null if none of the brand's features
+has a name. The rows that the two fields count are disjoint, so their
+sum is all deletion candidates of the brand; but the kind of feature
+is not compared, so a spider with restaurants of a brand also gets
+the brand's shops that are candidates by name.
 
 ## Example
 
