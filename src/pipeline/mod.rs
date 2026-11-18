@@ -45,6 +45,7 @@ mod nsi;
 mod osm;
 mod osm_views;
 mod packaged;
+mod previous_release;
 mod provenance;
 mod qrank;
 mod spider_stats;
@@ -375,8 +376,14 @@ fn run_pipeline_steps(
         upload::upload_conflated_tiles(&conflated_tiles_out, &date, progress)
     })?);
 
+    // Named in the file's metadata, so that a page can show the change
+    // from last week (#999).
+    let previous_spider_stats = inputs
+        .previous
+        .as_ref()
+        .and_then(|p| p.spider_stats_before(&anchor.date().to_string()));
     let spider_stats = run_step("compute_spider_stats", || {
-        spider_stats::compute_spider_stats(&conflated, progress, workdir)
+        spider_stats::compute_spider_stats(&conflated, previous_spider_stats, progress, workdir)
     })?;
     published.push(run_step("upload_spider_stats", || {
         upload::upload_spider_stats(&spider_stats, &date, progress)

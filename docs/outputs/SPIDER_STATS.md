@@ -25,6 +25,20 @@ All numbers are counts, never shares (with one exception,
 `opening_hours_top_share`). That way, you can add them up across
 spiders, countries or brands before you divide.
 
+## Change from last week
+
+The file's key-value metadata `osmdiffs:previous` names the
+`spider-stats.parquet` published before it, such as
+`spider-stats-20261109-a1b2c3d4.parquet`. The name resolves next to
+the file itself, in the same `data/` directory, and carries that
+file's date; usually it is a week earlier, but more if a weekly run
+failed. The very first file names none. To show how a spider changed,
+fetch both files and compare their counts, for example `atp_features`,
+`dump_features`, `atp_errors`, `rows`, or the match rate
+(`same + located_in`, divided by `rows`). A spider whose feature count
+halves, or whose match rate drops, most likely broke at its source or
+in its conversion. A spider missing from the previous file is new.
+
 The list includes every spider that AllThePlaces lists in its run
 statistics, has a file in its dump, or has a row in `conflated.parquet`.
 A spider that AllThePlaces lists but that has no file in the dump has

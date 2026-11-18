@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use super::nsi::{self, NsiMetadata};
 use super::osm_views;
 use super::packaged::{PackagedMetadata, fetch_packaged};
+use super::previous_release::{self, PreviousRelease};
 use super::qrank;
 use super::{AtpMetadata, OsmMetadata, atp, osm};
 
@@ -54,6 +55,10 @@ pub(crate) struct Inputs {
     pub qrank: Input<PackagedMetadata>,
     pub osmviews: Input<PackagedMetadata>,
     pub nsi: Input<NsiMetadata>,
+
+    /// What we published last time, if we could find out; not an input
+    /// to the data, so never a reason to fail. See [`previous_release`].
+    pub previous: Option<PreviousRelease>,
 }
 
 /// Where to fetch the pipeline's inputs from. Only ever not the
@@ -76,6 +81,9 @@ pub(crate) struct Sources {
 
     /// The CDN to download the name-suggestion-index from.
     pub nsi_cdn_url: String,
+
+    /// Our own `datapackage.json`, which lists what we published last.
+    pub previous_datapackage_url: String,
 }
 
 impl Default for Sources {
@@ -87,13 +95,16 @@ impl Default for Sources {
             osmviews_datapackage_url: osm_views::OSMVIEWS_DATAPACKAGE_URL.to_string(),
             nsi_resolve_url: nsi::NSI_RESOLVE_URL.to_string(),
             nsi_cdn_url: nsi::NSI_CDN_URL.to_string(),
+            previous_datapackage_url: previous_release::DATAPACKAGE_URL.to_string(),
         }
     }
 }
 
 /// Fetches every input in parallel, each logged as its own sub-step
 /// (`fetch_inputs.atp`, `fetch_inputs.osm`, `fetch_inputs.qrank`,
-/// `fetch_inputs.osmviews`, `fetch_inputs.nsi`). If any fetch fails, the
+/// `fetch_inputs.osmviews`, `fetch_inputs.nsi`), along with what we
+/// published last (`fetch_inputs.previous`, which never fails the
+/// pipeline; see [`previous_release`]). If any fetch fails, the
 /// others are cancelled right away (a cancelled planet download leaves a
 /// `.part` file that the next attempt resumes), and the error is
 /// returned. See the module documentation for when a cached input is
@@ -104,7 +115,7 @@ pub(crate) async fn fetch_inputs(
     workdir: &Path,
     sources: &Sources,
 ) -> Result<Inputs> {
-    let (atp, osm, qrank, osmviews, nsi) = futures_util::future::try_join5(
+    let inputs = futures_util::future::try_join5(
         super::run_step_async(
             "fetch_inputs.atp",
             atp::fetch_atp(&sources.atp_history_url, http_client, progress, workdir),
@@ -143,14 +154,24 @@ pub(crate) async fn fetch_inputs(
                 workdir,
             ),
         ),
-    )
-    .await?;
+    );
+    let previous = super::run_step_async(
+        "fetch_inputs.previous",
+        previous_release::fetch_previous_release(
+            &sources.previous_datapackage_url,
+            http_client,
+            workdir,
+        ),
+    );
+    let ((atp, osm, qrank, osmviews, nsi), previous) =
+        futures_util::future::try_join(inputs, previous).await?;
     Ok(Inputs {
         atp,
         osm,
         qrank,
         osmviews,
         nsi,
+        previous,
     })
 }
 
@@ -191,6 +212,7 @@ mod tests {
             osmviews_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
             nsi_resolve_url: "http://127.0.0.1:9/resolved".to_string(),
             nsi_cdn_url: "http://127.0.0.1:9/npm".to_string(),
+            previous_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
         }
     }
 
@@ -212,6 +234,7 @@ mod tests {
             ("osmviews.meta.json", "osmviews.meta.json"),
             ("nsi.json", "nsi.json"),
             ("nsi.meta.json", "nsi.meta.json"),
+            ("previous-release.json", "previous-release.json"),
         ] {
             symlink(fixture(src), workdir.path().join(dst))?;
         }
@@ -243,6 +266,10 @@ mod tests {
         assert_eq!(inputs.osmviews.metadata.version, "2026-10-18");
         assert_eq!(inputs.nsi.path, workdir.path().join("nsi.json"));
         assert_eq!(inputs.nsi.metadata.version, "8.0.20261101");
+        assert_eq!(
+            inputs.previous.and_then(|p| p.spider_stats),
+            Some("spider-stats-20251229-a1b2c3d4.parquet".to_string())
+        );
         Ok(())
     }
 
@@ -327,6 +354,7 @@ mod tests {
             osmviews_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
             nsi_resolve_url: "http://127.0.0.1:9/resolved".to_string(),
             nsi_cdn_url: "http://127.0.0.1:9/npm".to_string(),
+            previous_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
         };
         let result = tokio::time::timeout(
             Duration::from_secs(30),

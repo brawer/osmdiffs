@@ -49,6 +49,9 @@ fn run_pipeline_on_fixtures(extra_args: &[&str]) -> Result<TempDir> {
         "osmviews.meta.json",
         "nsi.json",
         "nsi.meta.json",
+        // What the published manifest listed, so the run names a
+        // previous spider-stats.parquet without asking the server.
+        "previous-release.json",
     ] {
         symlink(fixture(name), workdir.path().join(name))?;
     }
@@ -182,6 +185,12 @@ fn assert_spider_stats(path: &Path) -> Result<()> {
         kv.iter().any(|e| e.key == "osmdiffs:distance_bins_m"
             && e.value.as_deref() == Some("1,10,25,50,100,250,1000")),
         "distance bins missing from {kv:?}"
+    );
+    // The fixture's previous release is older than its inputs.
+    assert!(
+        kv.iter().any(|e| e.key == "osmdiffs:previous"
+            && e.value.as_deref() == Some("spider-stats-20251229-a1b2c3d4.parquet")),
+        "previous file missing from {kv:?}"
     );
     let batches = builder.build()?.collect::<Result<Vec<_>, _>>()?;
     let batch = arrow::compute::concat_batches(&batches[0].schema(), &batches)?;

@@ -110,9 +110,12 @@ pub(in crate::pipeline) const DISTANCE_BINS_M: [f32; 7] =
 
 /// Computes the stats of every spider from `conflated` and the side
 /// files in `workdir`, and writes them to `workdir/spider-stats.parquet`,
-/// unless that is already newer than `conflated`.
+/// unless that is already newer than `conflated`. `previous` is the
+/// basename of the last published file, if any, which the new file
+/// names in its key-value metadata ([PREVIOUS_KEY]).
 pub fn compute_spider_stats(
     conflated: &Path,
+    previous: Option<&str>,
     progress: &MultiProgress,
     workdir: &Path,
 ) -> Result<PathBuf> {
@@ -153,9 +156,10 @@ pub fn compute_spider_stats(
         deletions: &stats.deletions,
         name_deletions: &stats.name_deletions,
     };
-    write(&rows, &lookups, &out)?;
+    write(&rows, &lookups, previous, &out)?;
     log::info!(
         spiders = rows.len(),
+        previous,
         conflated_rows = stats.rows,
         deletion_candidates = stats.deletions.values().sum::<u64>(),
         name_deletion_candidates = stats.name_candidates,
@@ -1021,20 +1025,28 @@ pub(super) fn schema() -> Schema {
     ])
 }
 
-fn write(rows: &[Row], lookups: &Lookups, out: &Path) -> Result<()> {
+/// Key-value metadata naming the previous week's file: a basename, which
+/// resolves next to this one in `data/`. Missing in the first file.
+pub(in crate::pipeline) const PREVIOUS_KEY: &str = "osmdiffs:previous";
+
+fn write(rows: &[Row], lookups: &Lookups, previous: Option<&str>, out: &Path) -> Result<()> {
     let schema = Arc::new(schema());
     let bins = DISTANCE_BINS_M
         .iter()
         .map(|b| b.to_string())
         .collect::<Vec<_>>()
         .join(",");
+    let mut metadata = vec![KeyValue::new("osmdiffs:distance_bins_m".to_string(), bins)];
+    if let Some(previous) = previous {
+        metadata.push(KeyValue::new(
+            PREVIOUS_KEY.to_string(),
+            previous.to_string(),
+        ));
+    }
     let properties = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(9)?))
         .set_max_row_group_row_count(Some(ROWS_PER_GROUP))
-        .set_key_value_metadata(Some(vec![KeyValue::new(
-            "osmdiffs:distance_bins_m".to_string(),
-            bins,
-        )]))
+        .set_key_value_metadata(Some(metadata))
         .build();
     let mut tmp = out.to_path_buf();
     tmp.add_extension("tmp");
@@ -1513,7 +1525,7 @@ mod tests {
             deletions: &deletions,
             name_deletions: &name_deletions,
         };
-        write(&rows, &lookups, &out)?;
+        write(&rows, &lookups, None, &out)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&out)?)?.build()?;
         let batch = reader.into_iter().next().context("no batch")??;
         let tags = batch.column_by_name("tags").unwrap();
@@ -1730,9 +1742,25 @@ mod tests {
             deletions: &deletions,
             name_deletions: &name_deletions,
         };
-        write(&rows, &lookups, &out)?;
+        write(
+            &rows,
+            &lookups,
+            Some("spider-stats-20261109-a1b2c3d4.parquet"),
+            &out,
+        )?;
 
-        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&out)?)?.build()?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&out)?)?;
+        let kv = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .context("no key-value metadata")?;
+        assert!(
+            kv.iter().any(|e| e.key == PREVIOUS_KEY
+                && e.value.as_deref() == Some("spider-stats-20261109-a1b2c3d4.parquet")),
+            "{kv:?}"
+        );
+        let reader = builder.build()?;
         let batch = reader.into_iter().next().context("no batch")??;
         assert_eq!(batch.schema().as_ref(), &schema());
         assert_eq!(batch.num_rows(), 2);
