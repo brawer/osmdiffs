@@ -62,7 +62,7 @@ macro_rules! info_with_memory {
     }};
 }
 
-mod deletion;
+pub(super) mod deletion;
 pub(super) mod diagnostics;
 pub(super) mod evidence;
 mod local_coverage;

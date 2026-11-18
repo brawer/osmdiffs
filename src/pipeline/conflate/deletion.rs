@@ -684,6 +684,35 @@ fn brand_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> Opt
     Some(BrandTags { ids, names, kind })
 }
 
+/// The [normalize_name]d `brand`, `network` and `operator` names that
+/// [deletion_reason] looks up in [AtpCoverage] for [Reason::Name], of
+/// an OSM feature with `tags`: sorted, without duplicates, and empty
+/// for a feature with Wikidata IDs. `spider_stats` attributes a
+/// candidate by name to the spiders whose features have one of them.
+pub(in crate::pipeline) fn candidate_names<'a>(
+    tags: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+) -> Vec<String> {
+    let mut names = brand_tags(tags).map(|b| b.names).unwrap_or_default();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The [normalize_name]d `brand`, `network` and `operator` names of an
+/// ATP feature with `tags`, as [AtpCoverage::add] collects them:
+/// sorted, without duplicates.
+pub(in crate::pipeline) fn atp_names<'a>(
+    tags: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Vec<String> {
+    let mut names: Vec<String> = tags
+        .filter(|(key, _)| NAME_KEYS.contains(key))
+        .flat_map(|(_, value)| split_values(value).map(normalize_name))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 /// The [LocalKey]s of a matched OSM feature with `tags`, for counting
 /// it in [super::local_coverage::LocalCoverage]. These are the keys
 /// that [deletion_reason] would consider for an unmatched one.
@@ -1197,6 +1226,49 @@ mod tests {
         assert_eq!(
             deletion_reason(old_code.iter().copied(), &atp, None, || None),
             None
+        );
+    }
+
+    #[test]
+    fn test_candidate_names() {
+        let names = |tags: &[(&str, &str)]| candidate_names(tags.iter().copied());
+        assert_eq!(
+            names(&[
+                ("shop", "bakery"),
+                ("brand", "Beck Bäck"),
+                ("operator", "beck  BÄCK")
+            ]),
+            vec!["beck bäck".to_string()]
+        );
+        // A Wikidata ID says better which brand is meant.
+        assert!(
+            names(&[
+                ("shop", "bakery"),
+                ("brand", "Beck"),
+                ("brand:wikidata", "Q1")
+            ])
+            .is_empty()
+        );
+        // A list of what a shop sells names no brand of its own.
+        assert!(
+            names(&[
+                ("shop", "bicycle"),
+                ("brand", "Trek;Cube;Scott;Specialized")
+            ])
+            .is_empty()
+        );
+        assert_eq!(
+            atp_names(
+                [
+                    ("brand", "Migros"),
+                    ("operator", "Genossenschaft Migros Zürich;Migros")
+                ]
+                .into_iter()
+            ),
+            vec![
+                "genossenschaft migros zürich".to_string(),
+                "migros".to_string()
+            ]
         );
     }
 

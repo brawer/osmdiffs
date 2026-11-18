@@ -16,6 +16,7 @@
 
 use super::atp::{run_stats, spider_counts};
 use super::brand_totals;
+use super::conflate::deletion::{atp_names, candidate_names};
 use super::conflate::diagnostics::{self, SpiderDiagnostics};
 use super::conflate::evidence::{compared_tags, has_compared_tag};
 use super::wikidata_ids::WIKIDATA_KEYS;
@@ -101,12 +102,14 @@ pub fn compute_spider_stats(
         osm_brands: &osm_brands,
         names: &names,
         deletions: &stats.deletions,
+        name_deletions: &stats.name_deletions,
     };
     write(&rows, &lookups, &out)?;
     log::info!(
         spiders = rows.len(),
         conflated_rows = stats.rows,
         deletion_candidates = stats.deletions.values().sum::<u64>(),
+        name_deletion_candidates = stats.name_candidates,
         bytes = std::fs::metadata(&out)?.len();
         "compute_spider_stats: done"
     );
@@ -129,6 +132,10 @@ struct RowInfo {
     /// The brand, operator and network IDs of the ATP feature, or for a
     /// deletion candidate, of the OSM one.
     wikidata: Vec<u64>,
+    /// The normalized brand, operator and network names of the ATP
+    /// feature, or for a deletion candidate by name, of the OSM one;
+    /// see [atp_names] and [candidate_names].
+    names: Vec<String>,
     category: Option<String>,
     /// For each tag of [compared_tags] that the ATP feature has, its
     /// position there and how it compares with OSM.
@@ -172,6 +179,9 @@ struct Brand {
     /// The main categories of the ATP features, so that the OSM total
     /// counts features of the same kinds only.
     categories: HashSet<String>,
+    /// The normalized brand, operator and network names of the ATP
+    /// features, to attribute deletion candidates by name.
+    names: HashSet<String>,
     offsets: Vec<(f32, f32)>,
     locations: Vec<(f64, f64)>,
 }
@@ -275,6 +285,11 @@ impl Spider {
                 && !brand.categories.contains(c)
             {
                 brand.categories.insert(c.clone());
+            }
+            for name in &row.names {
+                if !brand.names.contains(name) {
+                    brand.names.insert(name.clone());
+                }
             }
             if let Some(offset) = row.offset {
                 brand.offsets.push(offset);
@@ -442,12 +457,19 @@ fn round_up(v: f64) -> f32 {
     if f64::from(f) < v { f.next_up() } else { f }
 }
 
+/// Deletion candidates by name, as numbers from 0, by country and
+/// normalized name. A candidate with several names appears under each.
+type NameDeletions = HashMap<Option<Country>, HashMap<String, Vec<u32>>>;
+
 #[derive(Debug, Default)]
 struct Scanned {
     rows: u64,
     spiders: HashMap<String, Spider>,
     /// Deletion candidates by country and Wikidata ID.
     deletions: HashMap<(Option<Country>, u64), u64>,
+    /// How many deletion candidates by name there are.
+    name_candidates: u32,
+    name_deletions: NameDeletions,
 }
 
 impl Scanned {
@@ -456,6 +478,13 @@ impl Scanned {
         if row.relation == Relation::DeletionCandidate {
             for &id in &row.wikidata {
                 *self.deletions.entry((row.country, id)).or_default() += 1;
+            }
+            if !row.names.is_empty() {
+                let by_name = self.name_deletions.entry(row.country).or_default();
+                for name in row.names {
+                    by_name.entry(name).or_default().push(self.name_candidates);
+                }
+                self.name_candidates += 1;
             }
             return;
         }
@@ -516,10 +545,18 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
 
     if relation == Relation::DeletionCandidate {
         let geometry = get_binary(batch, "osm_geometry", row)?;
+        // Only candidates by name: the Swiss transit signals don't go
+        // by name, though their stops often have an operator.
+        let names = if rule.as_deref() == Some("name") {
+            candidate_names(osm_tag_refs())
+        } else {
+            Vec::new()
+        };
         return Ok(RowInfo {
             relation,
             country: wkb_country(&geometry),
             wikidata: wikidata_ids(osm_tag_refs()),
+            names,
             ..Default::default()
         });
     }
@@ -575,6 +612,7 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
         camera_corrected,
         country: location.and_then(|(x, y)| country(x, y)),
         wikidata: wikidata_ids(atp_tag_refs()),
+        names: atp_names(atp_tag_refs()),
         category: main_category(atp_tag_refs()),
         tags,
         opening_hours: atp_tag_refs()
@@ -676,6 +714,31 @@ struct Lookups<'a> {
     osm_brands: &'a brand_totals::OsmFeatureCounts,
     names: &'a HashMap<u64, String>,
     deletions: &'a HashMap<(Option<Country>, u64), u64>,
+    name_deletions: &'a NameDeletions,
+}
+
+impl Lookups<'_> {
+    /// The deletion candidates by name in `country` that have any of
+    /// `names`, each counted once; `None` if there are no `names`.
+    fn name_deletions(&self, country: Option<Country>, names: &HashSet<String>) -> Option<u64> {
+        if names.is_empty() {
+            return None;
+        }
+        let Some(by_name) = self.name_deletions.get(&country) else {
+            return Some(0);
+        };
+        let lists: Vec<&Vec<u32>> = names.iter().filter_map(|n| by_name.get(n)).collect();
+        Some(match lists.as_slice() {
+            [] => 0,
+            [list] => list.len() as u64,
+            _ => lists
+                .iter()
+                .copied()
+                .flatten()
+                .collect::<HashSet<_>>()
+                .len() as u64,
+        })
+    }
 }
 
 fn u64_field(name: &str) -> Field {
@@ -693,6 +756,7 @@ fn brand_fields() -> Fields {
         u64_field("missing_in_osm"),
         Field::new("osm_features", DataType::UInt64, true),
         Field::new("deletion_candidates", DataType::UInt64, true),
+        Field::new("deletion_candidates_by_name", DataType::UInt64, true),
         Field::new("offset_east_m", DataType::Float32, true),
         Field::new("offset_north_m", DataType::Float32, true),
         bbox_field(),
@@ -1051,15 +1115,18 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
             b.field_builder::<UInt64Builder>(8)
                 .unwrap()
                 .append_option(deletions);
+            b.field_builder::<UInt64Builder>(9)
+                .unwrap()
+                .append_option(lookups.name_deletions(country, &brand.names));
             let offset = median_offset(&brand.offsets);
-            b.field_builder::<Float32Builder>(9)
+            b.field_builder::<Float32Builder>(10)
                 .unwrap()
                 .append_option(offset.map(|o| o.0));
-            b.field_builder::<Float32Builder>(10)
+            b.field_builder::<Float32Builder>(11)
                 .unwrap()
                 .append_option(offset.map(|o| o.1));
             append_bbox(
-                b.field_builder::<StructBuilder>(11).unwrap(),
+                b.field_builder::<StructBuilder>(12).unwrap(),
                 trimmed_bbox(&brand.locations),
             );
             b.append(true);
@@ -1124,6 +1191,7 @@ mod tests {
             camera_corrected: false,
             country: Country::from_code(*b"CH"),
             wikidata: vec![379911],
+            names: vec!["denner".into()],
             category: Some("shop=supermarket".into()),
             tags: vec![(0, TagState::Agreeing), (1, TagState::Differing)],
             opening_hours: Some("Mo-Sa 08:00-20:00".into()),
@@ -1255,9 +1323,53 @@ mod tests {
             wikidata: vec![1, 2],
             ..Default::default()
         });
-        assert_eq!(scanned.rows, 2);
+        let ch = Country::from_code(*b"CH");
+        for names in [vec!["denner"], vec!["denner", "denner satellit"], vec![]] {
+            scanned.add(RowInfo {
+                relation: Relation::DeletionCandidate,
+                country: ch,
+                names: names.into_iter().map(String::from).collect(),
+                ..Default::default()
+            });
+        }
+        assert_eq!(scanned.rows, 5);
         assert_eq!(scanned.spiders["a"].rows, 1);
         assert_eq!(scanned.deletions.len(), 2);
+        // The candidate without names is by Wikidata ID or a Swiss
+        // signal, so it has no number.
+        assert_eq!(scanned.name_candidates, 2);
+        assert_eq!(scanned.name_deletions[&ch]["denner"], [0, 1]);
+        assert_eq!(scanned.name_deletions[&ch]["denner satellit"], [1]);
+    }
+
+    #[test]
+    fn test_lookups_name_deletions() {
+        let ch = Country::from_code(*b"CH");
+        let de = Country::from_code(*b"DE");
+        let name_deletions = NameDeletions::from([(
+            ch,
+            HashMap::from([
+                ("denner".to_string(), vec![0, 1]),
+                ("denner satellit".to_string(), vec![1, 2]),
+            ]),
+        )]);
+        let (osm_brands, names, deletions) = Default::default();
+        let lookups = Lookups {
+            osm_brands: &osm_brands,
+            names: &names,
+            deletions: &deletions,
+            name_deletions: &name_deletions,
+        };
+        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<HashSet<_>>();
+        assert_eq!(lookups.name_deletions(ch, &set(&[])), None);
+        assert_eq!(lookups.name_deletions(ch, &set(&["denner"])), Some(2));
+        // Candidate 1 has both names, but counts once.
+        assert_eq!(
+            lookups.name_deletions(ch, &set(&["denner", "denner satellit"])),
+            Some(3)
+        );
+        assert_eq!(lookups.name_deletions(ch, &set(&["migros"])), Some(0));
+        assert_eq!(lookups.name_deletions(de, &set(&["denner"])), Some(0));
     }
 
     #[test]
@@ -1307,10 +1419,13 @@ mod tests {
         ]);
         let names = HashMap::from([(379911, "Denner".to_string())]);
         let deletions = HashMap::from([((ch, 379911), 2)]);
+        let name_deletions =
+            NameDeletions::from([(ch, HashMap::from([("denner".to_string(), vec![0, 1, 2])]))]);
         let lookups = Lookups {
             osm_brands: &osm_brands,
             names: &names,
             deletions: &deletions,
+            name_deletions: &name_deletions,
         };
         write(&rows, &lookups, &out)?;
 
@@ -1388,6 +1503,7 @@ mod tests {
         // Only the supermarkets count, since the spider has no cafes.
         assert_eq!(field("osm_features"), 7);
         assert_eq!(field("deletion_candidates"), 2);
+        assert_eq!(field("deletion_candidates_by_name"), 3);
         assert_eq!(brands.value(1).len(), 0);
 
         let bbox_of = |array: &dyn Array, row: usize| {

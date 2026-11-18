@@ -331,6 +331,11 @@ fn assert_spider_stats(path: &Path) -> Result<()> {
         .downcast_ref::<UInt64Array>()
         .unwrap();
     assert_eq!(deletion_candidates.value(0), 1);
+    // That one has `brand:wikidata`, so it counts by ID, not by name.
+    let by_name = field("deletion_candidates_by_name");
+    let by_name = by_name.as_any().downcast_ref::<UInt64Array>().unwrap();
+    assert!(by_name.is_valid(0), "denner_ch has brand=Denner");
+    assert_eq!(by_name.value(0), 0);
     Ok(())
 }
 
