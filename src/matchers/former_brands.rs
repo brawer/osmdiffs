@@ -13,6 +13,7 @@
 //! some branches changed brand, and those would give wrong matches.
 //! Each entry holds for one country only, because a replaced brand
 //! can live on elsewhere: Shell is still Shell outside Japan.
+//! See `docs/notes/2026-11-18-former-brands.md` for the evaluation.
 
 use crate::utils::countries::Country;
 
