@@ -35,6 +35,84 @@ pub(crate) fn same_schedule(a: &str, b: &str) -> bool {
     }
 }
 
+/// How two `opening_hours` values differ, for the `kinds` of
+/// `spider-stats.parquet`; see brawer/osmdiffs#1000.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Difference {
+    /// Different text, same schedule: they agree, in other notation.
+    SameSchedule,
+    /// Open on the same days, and on each day the times differ by at
+    /// most [SMALL_MINUTES] in all.
+    Small,
+    /// Open on the same days, but on some day the times differ by more
+    /// than [SMALL_MINUTES].
+    Over60Min,
+    /// Open on some day in one value and closed in the other.
+    OtherDays,
+    /// One of them doesn't [parse].
+    Unparsed,
+}
+
+/// The most minutes a day by which a [Difference::Small] may differ,
+/// counting the minutes open in only one of the two values.
+pub(crate) const SMALL_MINUTES: u32 = 60;
+
+impl Difference {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Difference::SameSchedule => "same_schedule",
+            Difference::Small => "small",
+            Difference::Over60Min => "over_60_min",
+            Difference::OtherDays => "other_days",
+            Difference::Unparsed => "unparsed",
+        }
+    }
+}
+
+/// How `a` and `b` differ, or `None` if they are the same text,
+/// without regard to spaces. Values that [same_schedule] considers the
+/// same are [Difference::SameSchedule].
+pub(crate) fn difference(a: &str, b: &str) -> Option<Difference> {
+    let squash = |v: &str| v.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    if squash(a) == squash(b) {
+        return None;
+    }
+    let (Some(a), Some(b)) = (parse(a), parse(b)) else {
+        return Some(Difference::Unparsed);
+    };
+    if a == b {
+        return Some(Difference::SameSchedule);
+    }
+    if (0..7).any(|d| a.0[d].is_empty() != b.0[d].is_empty()) {
+        return Some(Difference::OtherDays);
+    }
+    let most = (0..7)
+        .map(|d| minutes_in_one(&a.0[d], &b.0[d]))
+        .max()
+        .unwrap_or(0);
+    Some(if most <= SMALL_MINUTES {
+        Difference::Small
+    } else {
+        Difference::Over60Min
+    })
+}
+
+/// The minutes that lie in exactly one of the sorted, non-overlapping
+/// ranges `a` and `b`.
+fn minutes_in_one(a: &[(u16, u16)], b: &[(u16, u16)]) -> u32 {
+    let total = |r: &[(u16, u16)]| r.iter().map(|&(s, e)| u32::from(e - s)).sum::<u32>();
+    let mut both = 0;
+    for &(s1, e1) in a {
+        for &(s2, e2) in b {
+            let (s, e) = (s1.max(s2), e1.min(e2));
+            if s < e {
+                both += u32::from(e - s);
+            }
+        }
+    }
+    total(a) + total(b) - 2 * both
+}
+
 /// Whether an `opening_hours` value says more than AllThePlaces can,
 /// such as public or school holidays, dates, months, comments or times
 /// relative to sunrise. Replacing such a value with AllThePlaces' would
@@ -240,6 +318,42 @@ mod tests {
         ];
         for (a, b) in different {
             assert!(!same_schedule(a, b), "{a:?} and {b:?} should differ");
+        }
+    }
+
+    #[test]
+    fn test_difference() {
+        use Difference::*;
+        let cases = [
+            ("Mo-Fr 08:00-18:00", " Mo-Fr 08:00-18:00", None),
+            ("24/7", "Mo-Su 00:00-24:00", Some(SameSchedule)),
+            ("Mo-Fr 08:00-18:00", "Mo-Fr 08:30-18:30", Some(Small)),
+            // An hour in all, on one day.
+            (
+                "Mo-Fr 08:00-18:00",
+                "Mo-Fr 08:00-18:00; Fr 08:00-19:00",
+                Some(Small),
+            ),
+            ("Mo-Fr 08:00-18:00", "Mo-Fr 07:30-18:31", Some(Over60Min)),
+            (
+                "Mo-Fr 09:00-18:00",
+                "Mo-Fr 09:00-12:30,13:30-18:00",
+                Some(Small),
+            ),
+            ("Mo-Sa 09:00-21:00", "Mo-Su 09:00-21:00", Some(OtherDays)),
+            ("Mo-Fr 08:00-18:00", "Até 22:00 hs", Some(Unparsed)),
+        ];
+        for (a, b, want) in cases {
+            assert_eq!(difference(a, b), want, "{a:?} and {b:?}");
+            assert_eq!(difference(b, a), want, "{b:?} and {a:?}");
+        }
+        // Whatever differs is no longer the same schedule.
+        for (a, b) in [
+            ("Mo-Sa 09:00-21:00", "Mo-Su 09:00-21:00"),
+            ("24/7", "Mo-Su 06:00-22:00"),
+        ] {
+            assert!(!same_schedule(a, b));
+            assert_ne!(difference(a, b), Some(SameSchedule));
         }
     }
 

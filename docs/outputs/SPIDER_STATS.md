@@ -81,6 +81,14 @@ tags                     LIST<STRUCT> non-null
   agreeing               UINT64   non-null — ... and OSM agrees
   differing              UINT64   non-null — ... and OSM has a different value
   missing_in_osm         UINT64   non-null — ... and OSM has none
+  kinds                  LIST<STRUCT> non-null — how they agree or differ, see below
+    kind                 UTF8     non-null — "same_schedule", "small", ...
+    rows                 UINT64   non-null
+values                   LIST<STRUCT> non-null — value quality over all rows, see below
+  key                    UTF8     non-null — "phone", "start_date", ...
+  atp                    UINT64   non-null — rows whose ATP feature has the key
+  unparsed               UINT64   nullable — ... whose value we can't read
+  top_value_atp          UINT64   non-null — ... with the most common value
 brands                   LIST<STRUCT> non-null
   country                UTF8     nullable — ISO 3166-1 alpha-2 code
   wikidata_id            UTF8     nullable — "Q379911"; null for features without one
@@ -277,6 +285,52 @@ tag; these then split into `agreeing`, `differing` and `missing_in_osm`.
 Tags no feature of the spider has are not listed. Phone numbers, email
 addresses and websites count under `phone`, `email` and `website`
 whichever key they're under, such as `contact:phone`.
+
+`kinds` says how they agree or differ, for tags where we tell kinds
+apart; for the others, it is empty. For now, that is `opening_hours`,
+compared as weekly schedules:
+
+- `same_schedule`: the values differ as text but describe the same
+  week, such as `24/7` and `Mo-Su 00:00-24:00`. These rows are among
+  `agreeing`; the other agreeing rows have the same text.
+- `small`: open on the same days, and on each day, the minutes open
+  in only one of the two add up to 60 or less, such as
+  `Mo-Fr 08:00-18:00` and `Mo-Fr 08:30-18:30`.
+- `over_60_min`: open on the same days, but on some day by more than
+  60 minutes differently.
+- `other_days`: open on some day in one value and closed in the other.
+- `unparsed`: one of the values uses syntax we don't read, such as
+  months or comments.
+
+The last four add up to `differing`. Files from before
+brawer/osmdiffs#1000 lack `kinds`.
+
+### Value quality
+
+`values` looks at the values of the spider's features themselves, in
+all rows, whether they matched or not: for each key of `name`,
+`brand`, `phone`, `email`, `website`, `opening_hours`, `addr:street`,
+`addr:postcode`, `addr:city`, `start_date` and `end_date` that any of
+them has. Keys whose values are unique to a feature by nature, such
+as `addr:housenumber` or `ref`, are left out. Unlike
+`tags`, it goes by the key as written, so `contact:phone` doesn't
+count under `phone`.
+
+- `unparsed` counts values we can't read: `opening_hours` beyond the
+  simple syntax that AllThePlaces writes, phone numbers not in
+  international format (`+41 44 417 77 77`), email addresses and
+  websites that don't look like any, and dates other than `YYYY`,
+  `YYYY-MM` or `YYYY-MM-DD`, such as the timestamps that some spiders
+  write into `start_date`. For keys without a reader, such as `name`,
+  it is null.
+- `top_value_atp` counts the rows with the most common value, so that
+  `top_value_atp / atp` is its share, as `opening_hours_top_share` is
+  for `opening_hours`. A share near 1 is expected for `name` or
+  `brand`, but for `phone` or `opening_hours` it suggests that the
+  spider writes the same value, such as its head office's, for every
+  feature.
+
+Files from before brawer/osmdiffs#1000 lack `values`.
 
 ### Brands
 

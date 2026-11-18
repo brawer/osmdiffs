@@ -27,11 +27,11 @@ mod urls;
 
 #[cfg(test)]
 pub(crate) use emails::email_hash;
-pub(crate) use emails::{is_email_key, parse_emails};
+pub(crate) use emails::{is_email_key, normalize_email, parse_emails};
 pub(crate) use phones::{is_phone_key, parse_phone_number, parse_phone_numbers};
 #[cfg(test)]
 pub(crate) use urls::url_hash;
-pub(crate) use urls::{is_website_key, parse_urls, parse_website_domains};
+pub(crate) use urls::{is_website_key, normalize_url, parse_urls, parse_website_domains};
 
 /// Score factor of a contact match whose main categories are equal.
 /// Below 1.0, so a `brand:wikidata` match at the same distance wins.
