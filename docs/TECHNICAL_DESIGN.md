@@ -180,12 +180,14 @@ graph TD
     OSM_SRC@{ shape: cloud, label: "OpenStreetMap planet" }
     QRANK_SRC@{ shape: cloud, label: "QRank" }
     OSMVIEWS_SRC@{ shape: cloud, label: "OSMViews" }
+    NSI_SRC@{ shape: cloud, label: "name-suggestion-index" }
 
     subgraph INPUTS [Inputs]
         ATP_SRC
         OSM_SRC
         QRANK_SRC
         OSMVIEWS_SRC
+        NSI_SRC
     end
     INPUTS --> FETCH_INPUTS("fetch_inputs<br/>(all in parallel)")
     FETCH_INPUTS --> ATP_ZIP[alltheplaces.zip]
@@ -193,6 +195,7 @@ graph TD
     FETCH_INPUTS --> OSM_PBF[planet-latest.osm.pbf]
     FETCH_INPUTS --> QRANK_CSV[qrank.csv.gz]
     FETCH_INPUTS --> OSMVIEWS_TIFF[osmviews.tiff]
+    FETCH_INPUTS --> NSI_JSON[nsi.json]
 
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
     OSM_INDEX --> IMPORT_ATP
@@ -223,6 +226,7 @@ graph TD
     NONDESCRIPT_EMAILS --> CONFLATE
     NONDESCRIPT_WEBSITES --> CONFLATE
     BRAND_DOMAINS --> CONFLATE
+    NSI_JSON --> CONFLATE
     OSMVIEWS_TIFF --> CONFLATE
     OSMVIEWS_R --> CONFLATE
     QRANK_Q --> CONFLATE
@@ -314,7 +318,13 @@ fetch away.
   [OSMViews](https://osmviews.brawer.ch/) raster
   (`fetch_inputs.osmviews`, about 560 MB). Both are discovered through
   their publisher's `datapackage.json` and checked against the SHA-256
-  listed there ([`packaged.rs`](../src/pipeline/packaged.rs)). Each input is hashed (SHA-256) while it streams in,
+  listed there ([`packaged.rs`](../src/pipeline/packaged.rs)). The
+  latest [name-suggestion-index](https://nsi.guide) release
+  (`fetch_inputs.nsi`, about 12 MB) comes from jsDelivr's npm CDN,
+  checked against the SHA-256 in jsDelivr's package listing
+  ([`nsi.rs`](../src/pipeline/nsi.rs)); matching takes the names of
+  brands, operators and networks from it
+  ([`brand_names.rs`](../src/matchers/brand_names.rs)). Each input is hashed (SHA-256) while it streams in,
   and its provenance written to a `*.meta.json` sidecar. A broken or
   stalled connection, or a 5xx/408/429 answer, is retried with
   exponential backoff, and a download that broke off partway resumes

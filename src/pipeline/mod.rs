@@ -41,6 +41,7 @@ mod importance;
 mod inputs;
 mod logging;
 mod memstats;
+mod nsi;
 mod osm;
 mod osm_views;
 mod packaged;
