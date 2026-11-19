@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.19](https://github.com/brawer/osmdiffs/compare/v0.8.18...v0.8.19) (2026-11-19)
+
+
+### 🐞 Bug Fixes
+
+* **download:** retry 404 for a file the server already served ([#1008](https://github.com/brawer/osmdiffs/issues/1008)) ([0d1fcbc](https://github.com/brawer/osmdiffs/commit/0d1fcbcf5f5af4d984b3b5022fd799fb9506b363)), closes [#1007](https://github.com/brawer/osmdiffs/issues/1007)
+
 ## [0.8.18](https://github.com/brawer/osmdiffs/compare/v0.8.17...v0.8.18) (2026-11-18)
 
 
