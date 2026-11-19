@@ -19,8 +19,14 @@
 //! stalls (see [`STALL_TIMEOUT`]), a body that ends before its
 //! announced length, and the HTTP statuses that say "try again later"
 //! (408, 429 and any 5xx). Any other HTTP error, such as a 404, fails
-//! right away, as does a failure writing to the local disk. Every
-//! attempt and every failure is logged with its URL.
+//! right away, as does a failure writing to the local disk; so a
+//! missing input still fails fast. The exception is a file that the
+//! server already served successfully, in this run or in an earlier
+//! one whose `.part` file is being resumed: a later 404 or 410 for it,
+//! or any 4xx answer to a `Range` request, is most likely a CDN glitch
+//! and is retried with a longer backoff (see [`GLITCH_BACKOFF`] and
+//! <https://github.com/brawer/osmdiffs/issues/1007>). Every attempt and
+//! every failure is logged with its URL.
 
 use crate::make_download_bar;
 use crate::utils::to_hex;
@@ -45,6 +51,18 @@ pub(crate) const MAX_ATTEMPTS: u32 = 5;
 /// How long to wait before the second attempt; doubled for each
 /// further one (10s, 20s, 40s, 80s).
 const INITIAL_BACKOFF: Duration = Duration::from_secs(10);
+
+/// How long to wait after the first, second, ... failure in a row when
+/// the server claimed that a file it had already served was gone, as a
+/// Bunny CDN edge briefly did in #1007; the last entry repeats. Longer
+/// than [`INITIAL_BACKOFF`]'s schedule, so that the glitch has a chance
+/// to clear up within [`MAX_ATTEMPTS`].
+const GLITCH_BACKOFF: [Duration; 4] = [
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+];
 
 /// How long a request may wait for the response headers, or for the
 /// next chunk of the body, before the attempt counts as failed. Not a
@@ -148,6 +166,9 @@ fn sidecar_path(part_path: &Path) -> PathBuf {
 /// Why an attempt failed: whether trying again could help.
 enum Failure {
     Retry(anyhow::Error),
+    /// Worth retrying, but after a longer wait: the server said that a
+    /// file it had already served was gone (see [`glitch_status`]).
+    Glitch(anyhow::Error),
     Fatal(anyhow::Error),
 }
 
@@ -162,6 +183,15 @@ fn retryable_status(status: StatusCode) -> bool {
     status.is_server_error()
         || status == StatusCode::REQUEST_TIMEOUT
         || status == StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Whether an HTTP error status, for a file that the server already
+/// served successfully, is more likely a passing glitch than a real
+/// answer: a 404 or 410, or any 4xx to a `Range` request (`ranged`).
+fn glitch_status(status: StatusCode, ranged: bool) -> bool {
+    status == StatusCode::NOT_FOUND
+        || status == StatusCode::GONE
+        || (ranged && status.is_client_error())
 }
 
 /// Classifies a request that failed before any response arrived: a
@@ -185,6 +215,15 @@ fn backoff(failures: u32) -> Duration {
     INITIAL_BACKOFF * 2u32.pow(failures.saturating_sub(1))
 }
 
+/// Like [`backoff`], but for a [`Failure::Glitch`].
+fn glitch_backoff(failures: u32) -> Duration {
+    if cfg!(test) {
+        return Duration::from_millis(1);
+    }
+    let i = (failures.saturating_sub(1) as usize).min(GLITCH_BACKOFF.len() - 1);
+    GLITCH_BACKOFF[i]
+}
+
 /// Downloads `download.url` to `download.part_path`, retrying and
 /// resuming as described in the module documentation. Returns the
 /// SHA-256 and size of the whole file, hashed while streaming; on a
@@ -204,33 +243,37 @@ pub(crate) async fn download_file(
     let mut failures = 0;
     loop {
         let before = state.downloaded;
-        match state.attempt(client, progress, download).await {
+        let (err, glitch) = match state.attempt(client, progress, download).await {
             Ok(()) => break,
             Err(Failure::Fatal(err)) => return Err(err),
-            Err(Failure::Retry(err)) => {
-                if state.downloaded > before {
-                    failures = 0;
-                }
-                failures += 1;
-                if failures >= MAX_ATTEMPTS {
-                    return Err(err.context(format!(
-                        "Giving up on {} after {failures} failed attempts in a row, \
-                         with {} bytes downloaded",
-                        state.url, state.downloaded
-                    )));
-                }
-                let wait = backoff(failures);
-                log::warn!(
-                    url = state.url.as_str(),
-                    bytes_downloaded = state.downloaded,
-                    attempt = failures;
-                    "Download of {} failed after {} bytes, retrying in {wait:?}: {err:#}",
-                    state.url,
-                    state.downloaded
-                );
-                tokio::time::sleep(wait).await;
-            }
+            Err(Failure::Retry(err)) => (err, false),
+            Err(Failure::Glitch(err)) => (err, true),
+        };
+        if state.downloaded > before {
+            failures = 0;
         }
+        failures += 1;
+        if failures >= MAX_ATTEMPTS {
+            return Err(err.context(format!(
+                "Giving up on {} after {failures} failed attempts in a row, \
+                 with {} bytes downloaded",
+                state.url, state.downloaded
+            )));
+        }
+        let wait = if glitch {
+            glitch_backoff(failures)
+        } else {
+            backoff(failures)
+        };
+        log::warn!(
+            url = state.url.as_str(),
+            bytes_downloaded = state.downloaded,
+            attempt = failures;
+            "Download of {} failed after {} bytes, retrying in {wait:?}: {err:#}",
+            state.url,
+            state.downloaded
+        );
+        tokio::time::sleep(wait).await;
     }
     state
         .file
@@ -270,6 +313,12 @@ struct DownloadState {
     /// response said.
     validators: Option<Validators>,
 
+    /// Whether the server has already served this file successfully,
+    /// in this run or in the earlier one that left the part file
+    /// behind. If so, a later 404 or the like is retried as a
+    /// [`Failure::Glitch`] instead of failing the download.
+    served: bool,
+
     /// What to request next: `FileDownload::url` at first, then the URL
     /// the server redirected it to, so that a retry continues the same
     /// file even if the redirect would by now point somewhere else
@@ -293,6 +342,7 @@ impl DownloadState {
             .map(|m| m.len())
             .unwrap_or(0);
         let resume = validators.is_some() && existing > 0;
+        // The sidecar is written only once a `200 OK` arrived.
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -304,6 +354,7 @@ impl DownloadState {
             downloaded: existing,
             hasher: None,
             validators,
+            served: resume,
             url: download.url.to_owned(),
             bar: None,
         };
@@ -492,6 +543,7 @@ impl DownloadState {
                         validators.total = total;
                     }
                     self.url = response.url().to_string();
+                    self.served = true;
                     return Ok(response);
                 }
             }
@@ -503,6 +555,11 @@ impl DownloadState {
             let err = anyhow!("{} returned HTTP status {status}", self.url);
             return Err(if retryable_status(status) {
                 Failure::Retry(err)
+            } else if self.served && glitch_status(status, resume_from > 0) {
+                Failure::Glitch(err.context(format!(
+                    "{} was served before, so this is likely a temporary glitch",
+                    self.url
+                )))
             } else {
                 Failure::Fatal(err)
             });
@@ -519,6 +576,7 @@ impl DownloadState {
             .with_context(|| format!("Failed to write {}", sidecar.display()))?;
         self.validators = Some(validators);
         self.url = response.url().to_string();
+        self.served = true;
         Ok(())
     }
 }
@@ -610,7 +668,7 @@ pub(crate) async fn get_bytes(client: &Client, url: &str, timeout: Duration) -> 
         match attempt.await {
             Ok(body) => return Ok(body),
             Err(Failure::Fatal(err)) => return Err(err),
-            Err(Failure::Retry(err)) => {
+            Err(Failure::Retry(err) | Failure::Glitch(err)) => {
                 failures += 1;
                 if failures >= MAX_ATTEMPTS {
                     return Err(err.context(format!(
@@ -967,6 +1025,144 @@ mod tests {
         Ok(())
     }
 
+    /// A server that answers its `i`-th connection with `responses[i]`,
+    /// a response head (status line and headers) and a body, which may
+    /// be shorter than the head announces, then hangs up. Returns the
+    /// server's URL and the requests it saw.
+    async fn scripted_server(
+        responses: Vec<(String, Vec<u8>)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (head, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let n = socket.read(&mut buf).await.unwrap();
+                requests.push(String::from_utf8_lossy(&buf[..n]).to_lowercase());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+                let _ = socket.flush().await;
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    fn ok_head(len: usize) -> String {
+        format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\netag: \"v1\"\r\n\r\n")
+    }
+
+    fn partial_head(from: usize, len: usize) -> String {
+        format!(
+            "HTTP/1.1 206 Partial Content\r\ncontent-length: {}\r\n\
+             content-range: bytes {from}-{}/{len}\r\netag: \"v1\"\r\n\r\n",
+            len - from,
+            len - 1
+        )
+    }
+
+    fn not_found_head() -> String {
+        "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_owned()
+    }
+
+    #[tokio::test]
+    async fn test_download_retries_not_found_after_partial_download() -> Result<()> {
+        // #1007: the connection broke off, and the CDN briefly answered
+        // the resumed request with a 404 for a file it had just served.
+        let full = body(80_000);
+        let cut = 30_000;
+        let (url, server) = scripted_server(vec![
+            (ok_head(full.len()), full[..cut].to_vec()),
+            (not_found_head(), Vec::new()),
+            (not_found_head(), Vec::new()),
+            (partial_head(cut, full.len()), full[cut..].to_vec()),
+        ])
+        .await;
+        let dir = tempfile::tempdir()?;
+        let part = dir.path().join("file.part");
+
+        let got = download_file(
+            &test_client(),
+            &hidden_progress(),
+            &file_download(&url, &part),
+        )
+        .await?;
+
+        assert_eq!(got.sha256, sha256(&full));
+        assert_eq!(std::fs::read(&part)?, full);
+        let requests = server.await?;
+        assert_eq!(requests.len(), 4);
+        assert!(
+            requests[3].contains(&format!("range: bytes={cut}-")),
+            "{}",
+            requests[3]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_retries_not_found_when_resuming_earlier_run() -> Result<()> {
+        // The 200 that started the download came in an earlier run,
+        // which left the part file and its sidecar behind.
+        let full = body(50_000);
+        let split = 20_000;
+        let (url, server) = scripted_server(vec![
+            (not_found_head(), Vec::new()),
+            (partial_head(split, full.len()), full[split..].to_vec()),
+        ])
+        .await;
+        let dir = tempfile::tempdir()?;
+        let part = dir.path().join("file.part");
+        std::fs::write(&part, &full[..split])?;
+        std::fs::write(
+            sidecar_path(&part),
+            serde_json::to_vec(&Validators {
+                etag: Some("\"v1\"".to_owned()),
+                last_modified: None,
+                total: Some(full.len() as u64),
+            })?,
+        )?;
+
+        let got = download_file(
+            &test_client(),
+            &hidden_progress(),
+            &file_download(&url, &part),
+        )
+        .await?;
+
+        assert_eq!(got.sha256, sha256(&full));
+        assert_eq!(server.await?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_gives_up_on_lasting_not_found_after_partial_download() -> Result<()> {
+        // The first failure (the broken connection) made progress, so
+        // only the 404s after it count towards MAX_ATTEMPTS.
+        let full = body(10_000);
+        let mut responses = vec![(ok_head(full.len()), full[..4_000].to_vec())];
+        for _ in 1..MAX_ATTEMPTS {
+            responses.push((not_found_head(), Vec::new()));
+        }
+        let (url, server) = scripted_server(responses).await;
+        let dir = tempfile::tempdir()?;
+        let part = dir.path().join("file.part");
+
+        let err = download_file(
+            &test_client(),
+            &hidden_progress(),
+            &file_download(&url, &part),
+        )
+        .await
+        .expect_err("should give up");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("Giving up") && msg.contains("404"), "{msg}");
+        assert_eq!(server.await?.len(), MAX_ATTEMPTS as usize);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_get_bytes_retries() -> Result<()> {
         let mut server = Server::new_async().await;
@@ -1046,5 +1242,15 @@ mod tests {
             ..Validators::default()
         }));
         assert_eq!(backoff(1), Duration::from_millis(1)); // cfg!(test)
+        assert_eq!(glitch_backoff(1), Duration::from_millis(1)); // cfg!(test)
+    }
+
+    #[test]
+    fn test_glitch_status() {
+        assert!(glitch_status(StatusCode::NOT_FOUND, false));
+        assert!(glitch_status(StatusCode::GONE, false));
+        assert!(!glitch_status(StatusCode::FORBIDDEN, false));
+        assert!(glitch_status(StatusCode::FORBIDDEN, true));
+        assert!(!glitch_status(StatusCode::OK, true));
     }
 }

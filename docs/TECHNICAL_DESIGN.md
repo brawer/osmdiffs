@@ -336,8 +336,13 @@ fetch away.
   with an HTTP `Range` request guarded by `If-Range`, so it starts over
   only if the file changed on the server in the meantime
   ([`download.rs`](../src/pipeline/download.rs),
-  [#960](https://github.com/brawer/osmdiffs/issues/960)); every attempt
-  and failure is logged with its URL. A download gives up after five
+  [#960](https://github.com/brawer/osmdiffs/issues/960)). A 404 for a
+  file that is not there fails right away, but once the server has
+  served a file, a later 404/410 for it (or any 4xx to a `Range`
+  request) counts as a CDN glitch and is retried with a longer backoff
+  of 10s, 30s, 60s, 120s
+  ([#1007](https://github.com/brawer/osmdiffs/issues/1007)); every
+  attempt and failure is logged with its URL. A download gives up after five
   failed attempts in a row without progress; then the other downloads
   are cancelled and the run aborts, and the next run resumes from the
   `.part` file left on disk. An input already in `--workdir` is reused rather than
