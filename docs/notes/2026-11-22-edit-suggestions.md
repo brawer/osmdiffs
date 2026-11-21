@@ -43,27 +43,73 @@ osm_id          UINT64
 osm_version     UINT32    the version the edit was computed against
 kind            UTF8      "add" | "change" | "rebrand", see below
 category        UTF8      "shops" | "infrastructure" | "trees"
-changes         LIST<STRUCT<key UTF8, old UTF8 nullable, new UTF8>>
-spider          UTF8
-conflated_row   UINT64    ordinal in conflated.parquet, like `fid`
-rule            UTF8      the row's match.evidence.rule
-competitors     UINT32    other ATP features that matched this OSM feature
-importance      FLOAT
+changes         LIST<STRUCT<
+  key           UTF8
+  old           UTF8      nullable, OSM's value
+  new           UTF8
+  sources       LIST<UINT32>  indexes into `sources` that propose `new`
+>>
+conflicts       LIST<STRUCT<
+  key           UTF8
+  values        LIST<STRUCT<value UTF8, sources LIST<UINT32>>>
+>>                        keys left out of `changes`, see below
+sources         LIST<STRUCT<
+  spider        UTF8
+  conflated_row UINT64    ordinal in conflated.parquet, like `fid`
+  relation      UTF8      "same" | "located_in"
+  rule          UTF8      the row's match.evidence.rule
+>>
+importance      FLOAT     the highest of its sources'
 geometry        BINARY    WKB point, the OSM centroid (GeoParquet)
 ```
 
 The category becomes a column, so the three channels and three
 external sorts in `write_edits` go away.
 
-When several ATP features match one OSM feature, the winner is the
-one with the highest `importance`, then the lowest `conflated_row`,
-so that the choice is the same on every run. `competitors` keeps the
-count, since conflicting values are worth showing to a reviewer.
+### Several matches on one OSM feature
+
+One OSM feature often has several AllThePlaces features on it, and
+they should become one edit, not compete for it:
+
+- **Several spiders describe the same place.** A car dealership can
+  appear in the spiders of each brand it sells, and a fuel station
+  in both the oil company's spider and the convenience store's.
+- **Services inside a host.** Western Union counters, ATMs, parcel
+  lockers and postal services offered by a shop are `located_in`
+  rows whose OSM feature is the host.
+
+`suggest_edits` therefore collects every row for an OSM feature,
+asks each one's suggester for changes, and merges them per key:
+
+- If all sources that propose a key agree, it becomes one change
+  listing all of them in `sources`. "Agree" means the same value as
+  the key's own comparison sees it, such as `same_schedule` for
+  `opening_hours`, so `Mo-Su 00:00-24:00` and `24/7` merge.
+- If they disagree, the key goes to `conflicts` with each value and
+  who proposed it, and stays out of `changes`. A dealership's brand
+  spiders may give sales hours and service hours under the same key;
+  picking one would be a guess. A reviewer can still see the
+  conflict, and once the rules below exist, a key that only one
+  trusted source proposes wins over sources that aren't trusted for
+  it.
+- A few keys take a list rather than one value, such as `brand` and
+  `brand:wikidata` for a dealership of several brands. Those merge
+  into a `;`-separated value in a fixed order. Which keys these are
+  is an allowlist, starting empty.
+
+Rows of the second kind need their own suggester, since they don't
+copy tags from AllThePlaces onto the host: a Western Union counter
+in a shop suggests something like `money_transfer=western_union` on
+the shop, a postal counter `post_office=post_partner` with its
+`post_office:brand`. Edits come only from `same` rows today, so this
+is new work, and each such mapping should be checked with the OSM
+tagging that is actually in use before it is suggested.
 
 The file is sorted by S2 cell, like `conflated.parquet`, for spatial
-chunking. Picking a winner needs the rows by `osm_id` first, so this
-is two passes: the existing external sort by `osm_id` with the winner
-picked during the merge, then a sort by cell. At ~20 seconds for the
+chunking. Merging needs the rows by OSM feature first, so this is two
+passes: the existing external sort by `osm_id` (by `osm_type` too,
+since a node and a way can share an id), with the merge done while
+reading it back, then a sort by cell. At ~20 seconds for the
 whole step today, a second sort shouldn't matter, but measure it.
 
 ## One PMTiles file
@@ -91,7 +137,9 @@ same rows of `conflated.parquet` anyway:
    [`TECHNICAL_DESIGN.md`](../TECHNICAL_DESIGN.md)).
 4. Detail features of the OSM side get `edit:kind` and one
    `edit:<key>` property per changed key, holding the new value, so a
-   click shows what would change.
+   click shows what would change. Keys in conflict are listed in
+   `edit:conflicts`, `;`-separated, with the values left to
+   `edits.parquet`.
 
 `render_tiles` for `diffed-places.pmtiles`, and `upload_tiles`, then
 go away. The cost is that the conflated tile steps wait for
@@ -201,12 +249,14 @@ different kind of review from changing its tags.
 
 ## Order of work
 
-1. `edits.parquet`, with the schema above, replacing the GeoJSON
-   Lines; `render_tiles` reads a layer extracted from it, so the map
-   is unchanged.
+1. `edits.parquet`, with the schema above and the merge of `same`
+   rows, replacing the GeoJSON Lines; `render_tiles` reads a layer
+   extracted from it, so the map is unchanged.
 2. `edit: true` and `edit:*` in `conflated.pmtiles`; drop
    `diffed-places.pmtiles`.
 3. Measure the OSM tags' share of the detail archive, then decide.
 4. Edit kinds and per-spider trust, with a before/after diff of
    `edits.parquet` on a planet run for each.
 5. Freshness, stability and the new keys, one at a time.
+6. Edits on hosts from `located_in` rows, one kind of service at a
+   time.
