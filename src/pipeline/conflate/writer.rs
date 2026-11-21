@@ -87,7 +87,7 @@ pub struct ParquetWriter {
 }
 
 /// A builder for a list of non-null strings, such as
-/// `match.evidence.agreeing`.
+/// `match.evidence.agreeing_tags`.
 fn list_of_strings() -> ListBuilder<StringBuilder> {
     ListBuilder::new(StringBuilder::new()).with_field(Field::new(
         "item",
@@ -1106,12 +1106,12 @@ mod schema {
                 ),
                 Field::new("distance_m", DataType::Float32, NULLABLE),
                 Field::new_list(
-                    "agreeing",
+                    "agreeing_tags",
                     Field::new("item", DataType::Utf8, NOT_NULLABLE),
                     NOT_NULLABLE,
                 ),
                 Field::new_list(
-                    "disagreeing",
+                    "disagreeing_tags",
                     Field::new("item", DataType::Utf8, NOT_NULLABLE),
                     NOT_NULLABLE,
                 ),

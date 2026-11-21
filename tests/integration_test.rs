@@ -610,7 +610,7 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
             .context("'rule' is not a string")?
             .clone();
         // `match.evidence.rules` holds the deciding rule, and
-        // `disagreeing` no tag that `agreeing` has.
+        // `disagreeing_tags` no tag that `agreeing_tags` has.
         let evidence = get_child_struct(matching, "evidence")?;
         let list = |name: &str, row: usize| -> Result<Vec<String>> {
             let values = evidence
@@ -636,8 +636,8 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
                     "{all_rules:?}"
                 );
             }
-            let agreeing = list("agreeing", row)?;
-            let disagreeing = list("disagreeing", row)?;
+            let agreeing = list("agreeing_tags", row)?;
+            let disagreeing = list("disagreeing_tags", row)?;
             assert!(
                 disagreeing.iter().all(|t| !agreeing.contains(t)),
                 "{agreeing:?} {disagreeing:?}"

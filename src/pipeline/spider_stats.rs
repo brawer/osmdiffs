@@ -630,7 +630,7 @@ fn row_info(batch: &RecordBatch, row: usize) -> Result<RowInfo> {
     let evidence = get_struct(m, "evidence")?;
     let rule = string_or_null(evidence, "rule", row)?;
     let distance_m = f32_or_null(evidence, "distance_m", row)?;
-    let agreeing = string_list(evidence, "agreeing", row)?;
+    let agreeing = string_list(evidence, "agreeing_tags", row)?;
     // Not in files from before the camera correction.
     let camera_corrected = evidence.column_by_name("position").is_some()
         && string_or_null(evidence, "position", row)?.as_deref() == Some("google_camera_coords");

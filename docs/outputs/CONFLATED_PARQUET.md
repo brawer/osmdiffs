@@ -52,8 +52,8 @@ match                                        STRUCT, non-null
     rule        UTF8                         nullable — which rule decided, see below
     rules       LIST<UTF8>                   non-null — rule and every other rule that agrees, empty if rule is null
     distance_m  FLOAT                        nullable — null unless both atp and osm are present
-    agreeing    LIST<UTF8>                   non-null, may be empty
-    disagreeing LIST<UTF8>                   non-null, may be empty — tags on both sides whose values differ
+    agreeing_tags LIST<UTF8>                 non-null, may be empty — tags on both sides whose values agree
+    disagreeing_tags LIST<UTF8>              non-null, may be empty — tags on both sides whose values differ
     local_share FLOAT                        nullable — only for deletion candidates by brand
     position    UTF8                         nullable — "google_camera_coords" if atp_geometry was corrected, see below
     position_shift_deg FLOAT                 nullable — how far atp_geometry was moved east, in degrees
@@ -171,7 +171,7 @@ scores lower than one matched by its ID, even when both are right.
 
 `match.evidence.distance_m` is the shortest distance in meters between
 the two geometries: 0 when the AllThePlaces point lies inside the
-OpenStreetMap building. `match.evidence.agreeing` lists the tags whose
+OpenStreetMap building. `match.evidence.agreeing_tags` lists the tags whose
 values agree on both sides, such as `phone` or `opening_hours`,
 compared without regard to case and spacing. Phone numbers, email
 addresses and websites are compared as the matchers compare them:
@@ -180,7 +180,7 @@ phone numbers in their international form, so `+41 44 123 45 67` and
 `www.` or tracking parameters. Opening hours are compared as weekly
 schedules, so `24/7` and `Mo-Su 00:00-24:00` agree; rules for public
 or school holidays are left out of the comparison.
-`match.evidence.disagreeing` lists the tags of the same kinds that
+`match.evidence.disagreeing_tags` lists the tags of the same kinds that
 both sides have but whose values don't agree, so a tag that is in
 neither list is missing on at least one side. A value that can't be
 compared, such as a phone number that doesn't parse, counts as
@@ -241,8 +241,8 @@ SELECT rule,
        round(avg(list_contains(agreeing, 'phone')::INT), 3) AS phone_agrees
 FROM (
   SELECT list_filter(match.evidence.rules, lambda r: r <> 'contact')[1] AS rule,
-         match.evidence.agreeing AS agreeing,
-         match.evidence.disagreeing AS disagreeing
+         match.evidence.agreeing_tags AS agreeing,
+         match.evidence.disagreeing_tags AS disagreeing
   FROM read_parquet('conflated.parquet')
   WHERE match.relation = 'same'
 )
@@ -266,7 +266,7 @@ agree, and 60% of `brand_name` rows, then about 0.6 / 0.8 = 75% of
 `brand_name` matches are right. That holds as long as the rows with
 phones on both sides are like the other rows of their rule, and as
 long as wrong matches seldom share a phone number. Unlike the
-matchers, `agreeing` doesn't leave out numbers that many places share,
+matchers, `agreeing_tags` doesn't leave out numbers that many places share,
 such as a brand's hotline, which agree for any two places of the brand;
 for a brand with such a number, look at its rows apart. Without
 `contact`, the matcher might also have chosen another OpenStreetMap
