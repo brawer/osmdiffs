@@ -402,6 +402,10 @@ fn process_geojson<T: Read>(
         // Handle individual features.
         let place = match make_place(trimmed, &counts.spider, collection_time) {
             std::result::Result::Ok(place) => place,
+            Err(Skip::NoGeometry) => {
+                counts.no_geometry += 1;
+                continue;
+            }
             Err(Skip::BadGeometry) => {
                 counts.bad_geometry += 1;
                 continue;
@@ -561,7 +565,9 @@ fn is_usable_for_osm(fc: &geojson::FeatureCollection) -> bool {
 /// Why [make_place] left a feature out; counted in [spider_counts::SpiderCounts].
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Skip {
-    /// No geometry we understand, or not a GeoJSON feature at all.
+    /// No geometry at all.
+    NoGeometry,
+    /// A geometry we can't use, or not a GeoJSON feature at all.
     BadGeometry,
     /// No tag that says what kind of place it is.
     NoKind,
@@ -577,6 +583,9 @@ fn make_place(
     timestamp: time::UtcDateTime,
 ) -> std::result::Result<Place, Skip> {
     let parsed = geojson.parse::<GeoJson>().map_err(|_| Skip::BadGeometry)?;
+    if matches!(&parsed, GeoJson::Feature(f) if f.geometry.is_none()) {
+        return Err(Skip::NoGeometry);
+    }
     // Borrows `parsed`, so it's still available for the by-value
     // destructure below.
     let shape = parse_geometry(&parsed).ok_or(Skip::BadGeometry)?;
@@ -825,6 +834,23 @@ mod tests {
         let point = r#"{"type":"Point","coordinates":[8.5,47.4]}"#;
         assert_eq!(
             make("null", r#"{"shop":"bakery"}"#).err(),
+            Some(Skip::NoGeometry)
+        );
+        assert_eq!(
+            super::make_place(
+                r#"{"type":"Feature","properties":{"shop":"bakery"}}"#,
+                "s",
+                UtcDateTime::now()
+            )
+            .err(),
+            Some(Skip::NoGeometry)
+        );
+        assert_eq!(
+            make(
+                r#"{"type":"Point","coordinates":[]}"#,
+                r#"{"shop":"bakery"}"#
+            )
+            .err(),
             Some(Skip::BadGeometry)
         );
         assert_eq!(
@@ -1194,11 +1220,12 @@ mod tests {
             (
                 c.spider.as_str(),
                 c.features,
+                c.no_geometry,
                 c.bad_geometry,
                 c.no_kind,
                 c.unknown_kind
             ),
-            ("s", 5, 1, 1, 1)
+            ("s", 5, 1, 0, 1, 1)
         );
         assert_eq!(c.written(), 2);
 

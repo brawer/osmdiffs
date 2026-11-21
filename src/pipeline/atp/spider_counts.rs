@@ -13,10 +13,10 @@ use super::run_stats::SpiderRunStats;
 /// Filename, within `workdir`, of the counts that `import_atp` writes.
 const FILENAME: &str = "alltheplaces.spider-counts.tsv";
 
-const HEADER: &str = "spider\tfeatures\tnot_for_osm\tbad_geometry\tno_kind\tunknown_kind\tin_china\tdatum\tdataset_attributes\texact_coords_hits\tgoogle_camera_coords_hits\tgoogle_camera_coords_control\tgoogle_camera_coords_offset";
+const HEADER: &str = "spider\tfeatures\tnot_for_osm\tno_geometry\tbad_geometry\tno_kind\tunknown_kind\tin_china\tdatum\tdataset_attributes\texact_coords_hits\tgoogle_camera_coords_hits\tgoogle_camera_coords_control\tgoogle_camera_coords_offset";
 
 /// The headers of earlier versions: before `invalid` was split into
-/// `bad_geometry`, `no_kind` and `unknown_kind`, before the file had the
+/// `no_geometry`, `bad_geometry`, `no_kind` and `unknown_kind`, before the file had the
 /// camera counts, and before it had `dataset_attributes`. [read] still
 /// reads such files, with what they lack as zero or empty, and
 /// [is_current] tells `import_atp` to count again where it can. Their
@@ -44,9 +44,13 @@ pub(in crate::pipeline) struct SpiderCounts {
     /// in OpenStreetMap.
     pub not_for_osm: u64,
 
-    /// Features left out because they have no geometry we understand:
-    /// none at all, one that doesn't parse, or coordinates out of range.
-    /// Also counts feature lines that aren't valid GeoJSON.
+    /// Features left out because AllThePlaces gives no geometry for
+    /// them (`"geometry": null`, or none at all).
+    pub no_geometry: u64,
+
+    /// Features left out because their geometry is bad: it doesn't
+    /// parse, or its coordinates are out of range. Also counts feature
+    /// lines that aren't valid GeoJSON.
     pub bad_geometry: u64,
 
     /// Features left out because none of their tags says what kind of
@@ -98,7 +102,12 @@ pub(in crate::pipeline) struct SpiderCounts {
 impl SpiderCounts {
     /// Features that went into `alltheplaces.parquet`.
     pub fn written(&self) -> u64 {
-        self.features - self.not_for_osm - self.bad_geometry - self.no_kind - self.unknown_kind
+        self.features
+            - self.not_for_osm
+            - self.no_geometry
+            - self.bad_geometry
+            - self.no_kind
+            - self.unknown_kind
     }
 }
 
@@ -120,10 +129,11 @@ pub(super) fn write(counts: &mut [SpiderCounts], out: &Path) -> Result<()> {
             .collect();
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             c.spider,
             c.features,
             c.not_for_osm,
+            c.no_geometry,
             c.bad_geometry,
             c.no_kind,
             c.unknown_kind,
@@ -148,7 +158,7 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
     let file = std::fs::File::open(path).with_context(|| format!("could not open {path:?}"))?;
     let mut lines = BufReader::new(file).lines();
     let (num_cols, split) = match lines.next().transpose()?.as_deref() {
-        Some(HEADER) => (13, true),
+        Some(HEADER) => (14, true),
         Some(HEADER_11) => (11, false),
         Some(HEADER_7) => (7, false),
         Some(OLD_HEADER) => (6, false),
@@ -163,13 +173,16 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
         }
         // The columns of the split counts, taken out so that the rest
         // are where the older versions had them.
-        let (no_kind, unknown_kind) = if split {
-            let unknown_kind = cols.remove(5);
-            (Some(cols.remove(4)), Some(unknown_kind))
+        // The old `invalid` column, where `no_geometry` is now, is read
+        // as `bad_geometry`.
+        let (bad_geometry, no_kind, unknown_kind) = if split {
+            let unknown_kind = cols.remove(6);
+            let no_kind = cols.remove(5);
+            (Some(cols.remove(4)), Some(no_kind), Some(unknown_kind))
         } else {
-            (None, None)
+            (None, None, None)
         };
-        let [spider, features, not_for_osm, bad_geometry, in_china, datum] = cols[..6] else {
+        let [spider, features, not_for_osm, no_geometry, in_china, datum] = cols[..6] else {
             unreachable!("checked the number of columns");
         };
         let dataset_attributes = match cols.get(6) {
@@ -186,7 +199,8 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
             spider: spider.to_string(),
             features: num(features)?,
             not_for_osm: num(not_for_osm)?,
-            bad_geometry: num(bad_geometry)?,
+            no_geometry: if split { num(no_geometry)? } else { 0 },
+            bad_geometry: num(bad_geometry.unwrap_or(no_geometry))?,
             no_kind: no_kind.map_or(Ok(0), num)?,
             unknown_kind: unknown_kind.map_or(Ok(0), num)?,
             in_china: num(in_china)?,
@@ -253,6 +267,7 @@ pub(super) struct Summary {
     pub spiders: u64,
     pub features: u64,
     pub not_for_osm: u64,
+    pub no_geometry: u64,
     pub bad_geometry: u64,
     pub no_kind: u64,
     pub unknown_kind: u64,
@@ -284,6 +299,7 @@ pub(super) fn summarize(
         s.spiders += 1;
         s.features += c.features;
         s.not_for_osm += c.not_for_osm;
+        s.no_geometry += c.no_geometry;
         s.bad_geometry += c.bad_geometry;
         s.no_kind += c.no_kind;
         s.unknown_kind += c.unknown_kind;
@@ -330,6 +346,7 @@ pub(super) fn log_summary(s: &Summary, has_run_stats: bool) {
         spiders = s.spiders,
         features = s.features,
         not_for_osm = s.not_for_osm,
+        no_geometry = s.no_geometry,
         bad_geometry = s.bad_geometry,
         no_kind = s.no_kind,
         unknown_kind = s.unknown_kind,
@@ -368,6 +385,7 @@ mod tests {
                 spider: "zara".into(),
                 features: 10,
                 not_for_osm: 0,
+                no_geometry: 1,
                 bad_geometry: 1,
                 no_kind: 2,
                 unknown_kind: 3,
@@ -388,7 +406,7 @@ mod tests {
         assert_eq!(written[0].spider, "crashed");
         assert_eq!(read(&out)?, written);
         assert!(is_current(&out)?);
-        assert_eq!(written[1].written(), 4);
+        assert_eq!(written[1].written(), 3);
         Ok(())
     }
 
@@ -414,8 +432,14 @@ mod tests {
         )?;
         let c = &read(&out)?[0];
         assert_eq!(
-            (c.bad_geometry, c.no_kind, c.unknown_kind, c.in_china),
-            (1, 0, 0, 4)
+            (
+                c.no_geometry,
+                c.bad_geometry,
+                c.no_kind,
+                c.unknown_kind,
+                c.in_china
+            ),
+            (0, 1, 0, 0, 4)
         );
         assert_eq!(
             (c.exact_coords_hits, c.google_camera_coords_control),
