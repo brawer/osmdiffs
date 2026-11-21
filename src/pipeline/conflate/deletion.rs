@@ -13,9 +13,15 @@
 //!   shop of a chain whose shops ATP lists. The kind matters, since
 //!   ATP may list the supermarkets of a chain but not its restaurants;
 //!   and so does the country, since ATP may list a chain's shops in
-//!   one country but not in another. For street infrastructure, the
-//!   kind is finer than the match mask: ATP's post boxes of Swiss Post
-//!   say nothing about its cameras.
+//!   one country but not in another. The kind is the match mask, and
+//!   also the main category ([main_category]): ATP's Walmart
+//!   supermarkets say nothing about the Walmart pharmacies and garden
+//!   centres that OSM maps on their own, nor do Shell's fuel stations
+//!   about the shops at them. Categories that one business often has
+//!   on either side, such as `amenity=pharmacy` and `shop=chemist`,
+//!   count as the same ([categories_agree]). For street
+//!   infrastructure, the kind is finer than the match mask: ATP's post
+//!   boxes of Swiss Post say nothing about its cameras.
 //! - [Reason::Name]: it has no such Wikidata IDs, but its `brand`,
 //!   `network` or `operator` names one for which ATP has features of
 //!   the same kind in the same country. Names are compared without
@@ -70,6 +76,7 @@
 //! locations in a country; see [super::local_coverage].
 
 use super::local_coverage::{LocalKey, Radii, SpacingBuilder, table_bytes};
+use crate::matchers::category::{categories_agree, main_category};
 use crate::matchers::{
     IFOPT_KEYS, MatchMask, infrastructure_kind, is_transit_stop, normalize_name,
     parse_wikidata_ids, split_values, swiss_uic,
@@ -227,15 +234,22 @@ impl Reason {
 pub(super) struct AtpCoverage {
     /// For each Wikidata ID in ATP's `brand:wikidata`,
     /// `network:wikidata` and `operator:wikidata` tags, and each
-    /// country with ATP features that carry it, the union of the match
-    /// masks of those features. A feature in no country, such as on an
-    /// oil rig at sea, counts for `None`.
-    wikidata: HashMap<(u64, Option<Country>), MatchMask>,
+    /// country with ATP features that carry it, the kinds of those
+    /// features. A feature in no country, such as on an oil rig at
+    /// sea, counts for `None`.
+    wikidata: HashMap<(u64, Option<Country>), Kinds>,
 
     /// Like `wikidata`, but for the [normalize_name]d values of ATP's
     /// `brand`, `network` and `operator` tags, with the number of ATP
     /// features that have them.
-    names: HashMap<(String, Option<Country>), (MatchMask, u32)>,
+    names: HashMap<(String, Option<Country>), (Kinds, u32)>,
+
+    /// The main categories in [Kinds::categories], which holds their
+    /// indexes in `category_names`.
+    category_names: Vec<String>,
+
+    /// The index of each category in `category_names`.
+    category_ids: HashMap<String, u32>,
 
     /// Like `wikidata`, but for street infrastructure such as post
     /// boxes, by its kind ([infrastructure_kind]) instead of its match
@@ -303,6 +317,12 @@ impl AtpCoverage {
             place.mask,
             place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())),
         );
+        let mut category = None;
+        if infrastructure.is_none()
+            && let Some(c) = main_category(place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        {
+            category = Some(self.category_id(c));
+        }
         let spider = {
             let mut hasher = std::hash::DefaultHasher::new();
             place.spider.hash(&mut hasher);
@@ -325,8 +345,8 @@ impl AtpCoverage {
                     if let Some(kind) = infrastructure {
                         self.infrastructure_wikidata.insert((id, country, kind));
                     } else {
-                        let mask = self.wikidata.entry((id, country)).or_default();
-                        *mask = MatchMask(mask.0 | place.mask.0);
+                        let kinds = self.wikidata.entry((id, country)).or_default();
+                        kinds.add(place.mask, category);
                     }
                 }
             } else if NAME_KEYS.contains(&key.as_str()) {
@@ -343,8 +363,8 @@ impl AtpCoverage {
                             .entry((name, country, kind))
                             .or_default() += 1;
                     } else {
-                        let (mask, count) = self.names.entry((name, country)).or_default();
-                        *mask = MatchMask(mask.0 | place.mask.0);
+                        let (kinds, count) = self.names.entry((name, country)).or_default();
+                        kinds.add(place.mask, category);
                         *count += 1;
                     }
                 }
@@ -363,6 +383,35 @@ impl AtpCoverage {
             let cell = CellID(place.s2_cell_id).parent(SWISS_CELL_LEVEL);
             self.swiss_cells.insert(cell.0);
         }
+    }
+
+    /// The index of `category` in [AtpCoverage::category_names].
+    fn category_id(&mut self, category: String) -> u32 {
+        if let Some(&id) = self.category_ids.get(&category) {
+            return id;
+        }
+        let id = self.category_names.len() as u32;
+        self.category_names.push(category.clone());
+        self.category_ids.insert(category, id);
+        id
+    }
+
+    /// Whether `kinds` covers an OSM feature with match mask `mask`
+    /// and main category `category`: if the masks intersect, and the
+    /// categories agree. An OSM feature without a main category, or
+    /// ATP features without any, are judged by the mask alone.
+    fn kinds_cover(&self, kinds: &Kinds, mask: MatchMask, category: Option<&str>) -> bool {
+        if !kinds.mask.intersects(&mask) {
+            return false;
+        }
+        let Some(category) = category else {
+            return true;
+        };
+        kinds.categories.is_empty()
+            || kinds
+                .categories
+                .iter()
+                .any(|&id| categories_agree(&self.category_names[id as usize], category))
     }
 
     /// Computes the radius of [super::local_coverage] for each brand
@@ -392,13 +441,25 @@ impl AtpCoverage {
         let strings = |names: &mut dyn Iterator<Item = &String>| -> usize {
             names.map(|s| s.capacity()).sum()
         };
+        let categories = |kinds: &mut dyn Iterator<Item = &Kinds>| -> usize {
+            kinds
+                .map(|k| k.categories.capacity() * size_of::<u32>())
+                .sum()
+        };
         table_bytes(
             self.wikidata.capacity(),
-            size_of::<((u64, Option<Country>), MatchMask)>(),
-        ) + table_bytes(
-            self.names.capacity(),
-            size_of::<((String, Option<Country>), (MatchMask, u32))>(),
-        ) + strings(&mut self.names.keys().map(|(s, _)| s))
+            size_of::<((u64, Option<Country>), Kinds)>(),
+        ) + categories(&mut self.wikidata.values())
+            + table_bytes(
+                self.names.capacity(),
+                size_of::<((String, Option<Country>), (Kinds, u32))>(),
+            )
+            + categories(&mut self.names.values().map(|(k, _)| k))
+            + strings(&mut self.names.keys().map(|(s, _)| s))
+            + strings(&mut self.category_names.iter())
+            + self.category_names.capacity() * size_of::<String>()
+            + table_bytes(self.category_ids.capacity(), size_of::<(String, u32)>())
+            + strings(&mut self.category_ids.keys())
             + table_bytes(
                 self.infrastructure_wikidata.capacity(),
                 size_of::<(u64, Option<Country>, &'static str)>(),
@@ -428,13 +489,19 @@ impl AtpCoverage {
     }
 
     /// Whether ATP has features of kind `kind` with Wikidata ID `id`
-    /// in `country`.
-    fn covers_wikidata(&self, id: u64, country: Option<Country>, kind: Kind) -> bool {
+    /// in `country`, see [AtpCoverage::kinds_cover].
+    fn covers_wikidata(
+        &self,
+        id: u64,
+        country: Option<Country>,
+        kind: Kind,
+        category: Option<&str>,
+    ) -> bool {
         match kind {
             Kind::Mask(mask) => self
                 .wikidata
                 .get(&(id, country))
-                .is_some_and(|m| m.intersects(&mask)),
+                .is_some_and(|k| self.kinds_cover(k, mask, category)),
             Kind::Infrastructure(kind) => {
                 self.infrastructure_wikidata.contains(&(id, country, kind))
             }
@@ -446,16 +513,21 @@ impl AtpCoverage {
         self.names.len()
     }
 
-    /// Whether ATP has features of kind `mask` with the
+    /// Whether ATP has features of kind `kind` with the
     /// [normalize_name]d brand, network or operator `name` in
-    /// `country`, and at least [MIN_NAME_FEATURES] features with that
-    /// name in `country`.
-    fn covers_name(&self, name: String, country: Option<Country>, kind: Kind) -> bool {
+    /// `country` (see [AtpCoverage::kinds_cover]), and at least
+    /// [MIN_NAME_FEATURES] features with that name in `country`.
+    fn covers_name(
+        &self,
+        name: String,
+        country: Option<Country>,
+        kind: Kind,
+        category: Option<&str>,
+    ) -> bool {
         match kind {
-            Kind::Mask(mask) => self
-                .names
-                .get(&(name, country))
-                .is_some_and(|(m, count)| m.intersects(&mask) && *count >= MIN_NAME_FEATURES),
+            Kind::Mask(mask) => self.names.get(&(name, country)).is_some_and(|(k, count)| {
+                self.kinds_cover(k, mask, category) && *count >= MIN_NAME_FEATURES
+            }),
             Kind::Infrastructure(kind) => self
                 .infrastructure_names
                 .get(&(name, country, kind))
@@ -473,6 +545,29 @@ impl AtpCoverage {
                 .all_neighbors(SWISS_CELL_LEVEL)
                 .iter()
                 .any(|n| self.swiss_cells.contains(&n.0))
+    }
+}
+
+/// The kinds of the ATP features of one brand, network or operator in
+/// one country, for [AtpCoverage].
+#[derive(Debug, Default)]
+struct Kinds {
+    /// The union of their match masks.
+    mask: MatchMask,
+    /// Their distinct main categories ([main_category]), as indexes
+    /// into [AtpCoverage::category_names]. Features without a main
+    /// category add none.
+    categories: Vec<u32>,
+}
+
+impl Kinds {
+    fn add(&mut self, mask: MatchMask, category: Option<u32>) {
+        self.mask = MatchMask(self.mask.0 | mask.0);
+        if let Some(c) = category
+            && !self.categories.contains(&c)
+        {
+            self.categories.push(c);
+        }
     }
 }
 
@@ -574,7 +669,7 @@ pub(super) fn deletion_reason<'a>(
     let keys: Vec<LocalKey> = brand
         .ids
         .iter()
-        .filter(|&&id| atp.covers_wikidata(id, country, brand.kind))
+        .filter(|&&id| atp.covers_wikidata(id, country, brand.kind, brand.category.as_deref()))
         .map(|&id| LocalKey::wikidata(id, local_kind))
         .collect();
     if !keys.is_empty() {
@@ -587,7 +682,9 @@ pub(super) fn deletion_reason<'a>(
     let keys: Vec<LocalKey> = brand
         .names
         .into_iter()
-        .filter(|name| atp.covers_name(name.clone(), country, brand.kind))
+        .filter(|name| {
+            atp.covers_name(name.clone(), country, brand.kind, brand.category.as_deref())
+        })
         .map(|name| LocalKey::name(&name, local_kind))
         .collect();
     (!keys.is_empty()).then_some(Candidate {
@@ -630,6 +727,8 @@ struct BrandTags {
     /// better which brand is meant than its name.
     names: Vec<String>,
     kind: Kind,
+    /// The [main_category], such as `shop=supermarket`.
+    category: Option<String>,
 }
 
 impl BrandTags {
@@ -667,6 +766,9 @@ fn brand_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> Opt
     for (key, value) in tags.clone() {
         mask.add_tag(key, value);
     }
+    // A vacant shop that still has its brand is no other kind of
+    // thing: whatever ATP lists of the brand, the brand is gone here.
+    let category = main_category(tags.clone()).filter(|c| c != "shop=vacant");
     let kind = if mask.has_only(MatchMask::STREET_FURNITURE) {
         // Street furniture we can't match, such as a camera, says
         // nothing: ATP has none of its kind.
@@ -681,7 +783,12 @@ fn brand_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> Opt
     } else {
         Kind::Mask(mask)
     };
-    Some(BrandTags { ids, names, kind })
+    Some(BrandTags {
+        ids,
+        names,
+        kind,
+        category,
+    })
 }
 
 /// The [normalize_name]d `brand`, `network` and `operator` names that
@@ -966,6 +1073,64 @@ mod tests {
         // A stop of a network whose stops ATP only has in Switzerland.
         let stop = [("highway", "bus_stop"), ("network:wikidata", "Q3")];
         assert_eq!(reason(&atp, &stop, SINGEN), None);
+    }
+
+    #[test]
+    fn test_wikidata_category() {
+        let mut atp = AtpCoverage::default();
+        let walmart =
+            |category: (&'static str, &'static str)| [category, ("brand:wikidata", "Q483551")];
+        add(&mut atp, &place(&walmart(("shop", "supermarket")), SINGEN));
+        let wikidata = Some(Reason::Wikidata);
+        let osm = |atp: &AtpCoverage, category| reason(atp, &walmart(category), SINGEN);
+        assert_eq!(osm(&atp, ("shop", "supermarket")), wikidata);
+        // A pair of categories that one business often has.
+        assert_eq!(osm(&atp, ("shop", "department_store")), wikidata);
+        // Departments mapped on their own: ATP lists none of them.
+        assert_eq!(osm(&atp, ("amenity", "pharmacy")), None);
+        assert_eq!(osm(&atp, ("shop", "garden_centre")), None);
+        assert_eq!(osm(&atp, ("shop", "car_repair")), None);
+        // A vacant shop that still has the brand stays a candidate.
+        assert_eq!(osm(&atp, ("shop", "vacant")), wikidata);
+
+        // Once ATP has pharmacies of the brand, chemists count too.
+        add(&mut atp, &place(&walmart(("amenity", "pharmacy")), SINGEN));
+        assert_eq!(osm(&atp, ("amenity", "pharmacy")), wikidata);
+        assert_eq!(osm(&atp, ("shop", "chemist")), wikidata);
+        assert_eq!(osm(&atp, ("shop", "garden_centre")), None);
+
+        // ATP's fuel stations say nothing about the shops at them.
+        let shell =
+            |category: (&'static str, &'static str)| [category, ("brand:wikidata", "Q110716465")];
+        add(&mut atp, &place(&shell(("amenity", "fuel")), SINGEN));
+        assert_eq!(reason(&atp, &shell(("amenity", "fuel")), SINGEN), wikidata);
+        assert_eq!(reason(&atp, &shell(("shop", "convenience")), SINGEN), None);
+
+        // Without a main category on either side, the mask decides.
+        add(
+            &mut atp,
+            &place(
+                &[("brand:wikidata", "Q5"), ("public_transport", "station")],
+                SINGEN,
+            ),
+        );
+        let station = [("brand:wikidata", "Q5"), ("public_transport", "station")];
+        assert_eq!(reason(&atp, &station, SINGEN), wikidata);
+    }
+
+    #[test]
+    fn test_name_category() {
+        let mut atp = AtpCoverage::default();
+        for _ in 0..MIN_NAME_FEATURES {
+            add(
+                &mut atp,
+                &place(&[("amenity", "fuel"), ("brand", "Tankstelle")], SINGEN),
+            );
+        }
+        let name = Some(Reason::Name);
+        let osm = |k, v| reason(&atp, &[(k, v), ("brand", "Tankstelle")], SINGEN);
+        assert_eq!(osm("amenity", "fuel"), name);
+        assert_eq!(osm("shop", "convenience"), None);
     }
 
     #[test]

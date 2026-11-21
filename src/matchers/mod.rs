@@ -13,6 +13,7 @@ use wkb::reader::read_wkb;
 mod address;
 pub mod brand_domains;
 pub mod brand_names;
+pub mod category;
 pub mod contact;
 pub(crate) mod former_brands;
 mod infrastructure_matcher;

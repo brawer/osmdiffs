@@ -3,6 +3,11 @@
 
 """Infers which category pairs may match through a phone or email.
 
+With `--evidence=brand_wikidata`, it reads the matches by equal
+`brand:wikidata` of an ordinary production run instead, since the
+matcher doesn't look at the category for those (see the end of this
+comment).
+
 Reads `conflated.parquet` from a run with contact matching and no
 category check (`OSMDIFFS_CONTACT_MATCH=both OSMDIFFS_CONTACT_CATEGORY=any`),
 keeps the rows whose match rests on a shared phone number or email
@@ -27,9 +32,17 @@ names still join two features at one site, such as a Western Union
 counter and the supermarket it sits in. The checked-in file keeps
 the removed pairs as comments, with the reason.
 
+Equal `brand:wikidata` within a few meters is a second source that
+needs no experimental branch. Since such matches don't depend on the
+category, any production `conflated.parquet` will do. They have the
+same problem with features at one site: a pharmacy counter inside a
+supermarket of the same brand. The same name check handles it.
+
 Usage:
   uv run infer_contact_category_pairs.py conflated.parquet \\
       --min-name-agree 20 > new_pairs.tsv 2> dropped.txt
+  uv run infer_contact_category_pairs.py conflated.parquet \\
+      --evidence=brand_wikidata --min-name-agree 20 > new_pairs.tsv 2> dropped.txt
 """
 
 import argparse
@@ -90,6 +103,33 @@ def wikidata(tags):
     return {q.strip() for q in tags.get("brand:wikidata", "").split(";") if q.strip()}
 
 
+def contact_rows(conflated):
+    """The ATP and OSM tags of rows where both sides have a phone or
+    email key. At planet scale, this keeps the Python loop small."""
+    has_contact = (
+        "len(list_filter(map_keys({}), lambda k: k IN ({}) OR k = 'email' "
+        "OR k = 'contact:pec' OR k LIKE '%:email')) > 0"
+    )
+    keys = ", ".join(f"'{k}'" for k in sorted(PHONE_KEYS))
+    return duckdb.sql(
+        "SELECT map_from_entries(map_entries(atp.tags)), map_from_entries(map_entries(osm.tags)) "
+        f"FROM read_parquet('{conflated}') WHERE osm IS NOT NULL "
+        f"AND {has_contact.format('atp.tags', keys)} AND {has_contact.format('osm.tags', keys)}"
+    ).fetchall()
+
+
+def brand_wikidata_rows(conflated, max_distance):
+    """The ATP and OSM tags of rows matched by equal brand:wikidata, at
+    most `max_distance` meters apart. The matcher doesn't look at the
+    category for these, so their category pairs are unbiased."""
+    return duckdb.sql(
+        "SELECT map_from_entries(map_entries(atp.tags)), map_from_entries(map_entries(osm.tags)) "
+        f"FROM read_parquet('{conflated}') WHERE osm IS NOT NULL "
+        "AND match.relation = 'same' AND match.evidence.rule = 'brand_wikidata' "
+        f"AND match.evidence.distance_m <= {float(max_distance)}"
+    ).fetchall()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("conflated")
@@ -97,30 +137,28 @@ def main():
                     help="minimum contact matches with agreeing names per pair")
     ap.add_argument("--min-ratio", type=float, default=0.5,
                     help="minimum name agreement, relative to equal categories")
+    ap.add_argument("--evidence", choices=["contact", "brand_wikidata"], default="contact",
+                    help="which matches to count: shared phones and emails, or equal "
+                    "brand:wikidata in a production run")
+    ap.add_argument("--max-distance", type=float, default=25.0,
+                    help="for --evidence=brand_wikidata, the farthest match in meters")
     args = ap.parse_args()
 
-    # Only rows where both sides have a phone or email key; at planet
-    # scale, this keeps the Python loop below small.
-    has_contact = (
-        "len(list_filter(map_keys({}), lambda k: k IN ({}) OR k = 'email' "
-        "OR k = 'contact:pec' OR k LIKE '%:email')) > 0"
-    )
-    keys = ", ".join(f"'{k}'" for k in sorted(PHONE_KEYS))
-    rows = duckdb.sql(
-        "SELECT map_from_entries(map_entries(atp.tags)), map_from_entries(map_entries(osm.tags)) "
-        f"FROM read_parquet('{args.conflated}') WHERE osm IS NOT NULL "
-        f"AND {has_contact.format('atp.tags', keys)} AND {has_contact.format('osm.tags', keys)}"
-    ).fetchall()
+    if args.evidence == "brand_wikidata":
+        rows = brand_wikidata_rows(args.conflated, args.max_distance)
+    else:
+        rows = contact_rows(args.conflated)
 
     pairs = collections.Counter()
     pairs_named = collections.Counter()
     same = same_named = 0
     for atp, osm in rows:
         atp, osm = dict(atp), dict(osm)
-        if wikidata(atp) & wikidata(osm):
-            continue
-        if not (phones(atp) & phones(osm) or emails(atp) & emails(osm)):
-            continue
+        if args.evidence == "contact":
+            if wikidata(atp) & wikidata(osm):
+                continue
+            if not (phones(atp) & phones(osm) or emails(atp) & emails(osm)):
+                continue
         a, o = main_category(atp), main_category(osm)
         if not a or not o:
             continue
@@ -134,13 +172,13 @@ def main():
         pairs_named[key] += named
 
     base = same_named / same if same else 0.0
+    what = "contact" if args.evidence == "contact" else "brand:wikidata"
     print("# Pairs of main categories (key=value) that one business often has in")
-    print("# AllThePlaces and OpenStreetMap. A contact match (shared phone or email)")
-    print("# between them counts; see src/matchers/contact/mod.rs. Generated by")
-    print("# scripts/infer_contact_category_pairs.py from contact matches whose names")
+    print("# AllThePlaces and OpenStreetMap; see src/matchers/category.rs. Generated by")
+    print(f"# scripts/infer_contact_category_pairs.py from {what} matches whose names")
     print(f"# agree; with equal categories, names agree in {same_named}/{same} ({base:.0%}).")
     print(f"# Kept: >= {args.min_name_agree} name agreements and >= {args.min_ratio:.0%} of that rate.")
-    print("# Columns: category, category, contact matches, of which names agree.")
+    print(f"# Columns: category, category, {what} matches, of which names agree.")
     for key, n in pairs.most_common():
         k = pairs_named[key]
         keep = k >= args.min_name_agree and k / n >= args.min_ratio * base

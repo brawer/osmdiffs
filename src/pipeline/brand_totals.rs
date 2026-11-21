@@ -7,7 +7,7 @@
 //! [super::wikidata_ids::collect_wikidata_ids] fills them in, since it
 //! visits the same features anyway.
 
-use crate::matchers::{contact::main_category, parse_wikidata_ids};
+use crate::matchers::{category::main_category, parse_wikidata_ids};
 use crate::utils::countries::Country;
 use anyhow::{Context, Result};
 use std::collections::HashMap;

@@ -48,7 +48,7 @@ For each OSM candidate within 400 m:
 3. Otherwise, a descriptive phone or email agrees: 0.98 × category
    factor × distance score. The category factor is 1.0 for equal main
    categories, 0.95 for a pair in
-   [`category_pairs.tsv`](../../src/matchers/contact/category_pairs.tsv),
+   [`category_pairs.tsv`](../../src/matchers/category_pairs.tsv),
    and 0 otherwise. Beyond 150 m, the OSM street and house number must
    also appear in the ATP address.
 

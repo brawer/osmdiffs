@@ -1,6 +1,7 @@
 use super::brand_domains::BrandDomains;
 use super::brand_names::{self, NsiNames};
-use super::contact::{AtpContacts, CONTACT_FACTOR, Nondescript, category_factor, main_category};
+use super::category::{category_factor, main_category};
+use super::contact::{AtpContacts, CONTACT_FACTOR, Nondescript};
 use super::former_brands;
 use super::official_id::{self, IdEvidence};
 use super::{

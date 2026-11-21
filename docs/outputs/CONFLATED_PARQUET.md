@@ -72,7 +72,9 @@ A few things worth calling out that aren’t obvious from the above:
   AllThePlaces would list it if it still existed: its
   `brand:wikidata`, `network:wikidata` or `operator:wikidata` names a
   brand, network or operator whose features of the same kind
-  AllThePlaces lists in that country; or, without such Wikidata IDs,
+  AllThePlaces lists in that country (the kind includes the main
+  category, so the pharmacy in a Walmart store is no candidate just
+  because AllThePlaces lists Walmart supermarkets); or, without such Wikidata IDs,
   its `brand`, `network` or `operator` has a name for which
   AllThePlaces lists such features; or it is a public transport stop
   in Switzerland or Liechtenstein, or in the enclaves of Büsingen and
