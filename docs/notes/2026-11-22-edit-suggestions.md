@@ -151,33 +151,10 @@ same rows of `conflated.parquet` anyway:
 go away. The cost is that the conflated tile steps wait for
 `suggest_edits`, and the overview grows by one attribute.
 
-## Fewer OSM tags in the tiles
-
-The detail layers carry the full `osm:*` tag set twice for each
-matched row: on the OSM shape and again on the connector line. The
-web app could fetch OSM tags when a feature is clicked, from
-`/api/0.6/{type}/{id}` (or `/{type}/{id}/full` for a way's nodes).
-That is one request of a few hundred milliseconds per click, which
-the OSM API usage policy allows for interactive use. It also shows
-the feature as it is now: if the current version is newer than
-`osm_version`, someone has edited it since, and the app can say that
-the suggestion may be stale.
-
-The plan:
-
-- Keep on the OSM side only what the map style needs without a
-  request: `osm:type`, `osm:id`, `osm:version`, `osm:name` and the
-  key that says what kind of place it is.
-- Keep all `atp:*` tags; AllThePlaces has no per-feature API to
-  fetch them from later.
-- Drop all tags from connector lines; `fid` already groups them with
-  their two ends.
-- Keep the `edit:*` properties from the previous section.
-
-Whether this is worth doing depends on how much of the ~1 GB detail
-archive the OSM tags take up, which we don't know. Before changing
-anything, build the detail pass once with and once without `osm:*`
-tags on a planet `conflated.parquet` and compare sizes.
+Slimming the `osm:*` tags in the detail layers, with the web app
+fetching them from the OSM API on click, is separate and goes first:
+see brawer/osmdiffs#1026 and brawer/osmdiffs-app#45. The `edit:*`
+properties above are meant to stay in the tiles either way.
 
 ## Which edits to suggest
 
@@ -265,9 +242,8 @@ different kind of review from changing its tags.
    is unchanged.
 2. `edit: true` and `edit:*` in `conflated.pmtiles`; drop
    `diffed-places.pmtiles`.
-3. Measure the OSM tags' share of the detail archive, then decide.
-4. Edit kinds and per-spider trust, with a before/after diff of
+3. Edit kinds and per-spider trust, with a before/after diff of
    `edits.parquet` on a planet run for each.
-5. Freshness, stability and the new keys, one at a time.
-6. Edits on hosts from `located_in` rows, one kind of service at a
+4. Freshness, stability and the new keys, one at a time.
+5. Edits on hosts from `located_in` rows, one kind of service at a
    time.
