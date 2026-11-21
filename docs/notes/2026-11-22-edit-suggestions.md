@@ -36,7 +36,7 @@ a consumer such as MapRoulette (#696) needs it, it gets a page in
 `docs/outputs/` and goes public.
 
 It does go to the internal bucket, like the run's log, as
-`edits/<YYYYMMDD>-<hash8>.parquet`. That way, tuning a suggester means
+`edits/<YYYYMMDD>.parquet`, named by the release date. That way, tuning a suggester means
 comparing this week's file with last week's in DuckDB, without a
 planet run of our own, and the stability rule below can read last
 week's edits.
@@ -223,9 +223,13 @@ MapRoulette challenges would split along these lines, so that an
   `osm.modified` and `atp.fetched` are in `conflated.parquet`.
 - Suggest a value only when the spider reported it in two weekly runs
   in a row. This reads last week's `edits.parquet` from the internal
-  bucket. `previous_release` finds published files through
-  `datapackage.json`, which doesn't list it, so this needs a lookup
-  of its own: the newest `edits/` key older than this run.
+  bucket, found the same way as everything else from last week:
+  `previous_release` reads `version` from the public
+  `datapackage.json`, and the internal key follows from it. That is
+  why the key carries the date but no hash. There is only one place
+  that says which run came before, and the manifest goes up last, so a
+  run it lists has uploaded its edits too. If the file is missing
+  anyway, the rule is skipped for that week, and a warning logged.
 
 ### Keys
 
