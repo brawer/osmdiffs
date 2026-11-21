@@ -20,6 +20,9 @@
 //! - An ATP feature with `located_in:wikidata` or `located_in`, which
 //!   some spiders set, such as `starbucks_us` for its cafés in Target
 //!   stores.
+//! - A charge point (`man_made=charge_point`) that OSM doesn't map on
+//!   its own, in the OSM charging station that contains it or is within
+//!   [CHARGING_STATION_METERS]; see [charging_station_host].
 //!
 //! See `docs/notes/2026-11-09-departments.md`.
 
@@ -141,6 +144,16 @@ pub(super) const DEPARTMENT_METERS: f64 = 75.0;
 /// matter.
 pub(super) const HOST_SEARCH_METERS: f64 = 300.0;
 
+/// How far from a charge point we look for its OSM charging station,
+/// unless a station's outline contains it. In the Netherlands,
+/// Denmark, Luxembourg and Colorado, 9–17% of ChargePoint's devices
+/// have an OSM station within 30 m, and another 2–5% within 30–50 m;
+/// beyond, the nearest station is more often another one. Electrify
+/// America gives each charge point its station's position, and 89% of
+/// them in Colorado have an OSM station within 50 m. See
+/// `docs/notes/2026-11-21-charge-points.md`.
+pub(super) const CHARGING_STATION_METERS: f64 = 50.0;
+
 /// S2 level for grouping features in [find_departments], about 1 km.
 const GROUP_LEVEL: u64 = 13;
 
@@ -165,6 +178,10 @@ pub(super) enum Host {
         name: Option<String>,
         own: Option<String>,
     },
+    /// The charging station of a charge point, whatever its operator:
+    /// a station's operator often differs from the network that lists
+    /// the charge point.
+    ChargingStation,
 }
 
 impl Host {
@@ -174,6 +191,7 @@ impl Host {
         match self {
             Host::Department { .. } => "department",
             Host::LocatedIn { .. } => "located_in",
+            Host::ChargingStation => "charging_station",
         }
     }
 
@@ -189,7 +207,28 @@ impl Host {
             }
             // The host may be anything, such as a fuel station.
             Host::LocatedIn { .. } => MatchMask(u16::MAX),
+            Host::ChargingStation => {
+                let mut mask = MatchMask::default();
+                mask.add_tag("amenity", "charging_station");
+                mask
+            }
         }
+    }
+
+    /// How far from the ATP feature [super::find_host] looks for the
+    /// host, in meters.
+    pub(super) fn search_meters(&self) -> f64 {
+        match self {
+            Host::ChargingStation => CHARGING_STATION_METERS,
+            _ => HOST_SEARCH_METERS,
+        }
+    }
+
+    /// Whether a host whose outline contains the ATP feature wins over
+    /// a nearer centroid. A large car park's charging station may have
+    /// its centroid farther away than [CHARGING_STATION_METERS].
+    pub(super) fn prefers_enclosing(&self) -> bool {
+        matches!(self, Host::ChargingStation)
     }
 
     /// Whether the OSM feature with `tags` is the host. A host is never
@@ -235,6 +274,8 @@ impl Host {
                 tags.filter(|(k, _)| *k == "brand" || *k == "name")
                     .any(|(_, v)| same_business_name(&normalize_name(v), name))
             }
+            Host::ChargingStation => main_category(tags)
+                .is_some_and(|c| category_values(&c).any(|c| c == "amenity=charging_station")),
         }
     }
 
@@ -255,8 +296,20 @@ impl Host {
                 !same_kind && (HOST_CATEGORIES.contains(&c) || DEPARTMENT_CATEGORIES.contains(&c))
             }),
             Host::LocatedIn { .. } => self.is_host(tags),
+            // The charge point matcher only takes charge points anyway.
+            Host::ChargingStation => false,
         }
     }
+}
+
+/// The host of a charge point (`man_made=charge_point`): the OSM
+/// charging station around it. `None` for anything else.
+pub(super) fn charging_station_host(place: &Place) -> Option<Host> {
+    place
+        .tags
+        .iter()
+        .any(|(k, v)| k == "man_made" && v == "charge_point")
+        .then_some(Host::ChargingStation)
 }
 
 /// Whether `category` is in [NAMED_HOST_CATEGORIES]. A category with
@@ -719,6 +772,55 @@ mod tests {
                 own: Some("shop=keys".into()),
             })
         );
+    }
+
+    #[test]
+    fn test_charging_station_host() {
+        let host = Host::ChargingStation;
+        let station = [("amenity", "charging_station"), ("operator", "Ionity")];
+        assert!(host.is_host(station.iter().copied()));
+        assert!(host.is_host([("amenity", "fuel;charging_station")].into_iter()));
+        assert!(!host.is_host([("amenity", "fuel")].into_iter()));
+        assert!(!host.is_host([("man_made", "charge_point")].into_iter()));
+        assert!(!host.excludes(station.iter().copied()));
+        assert_eq!(host.rule(), "charging_station");
+        assert_eq!(host.search_meters(), CHARGING_STATION_METERS);
+        assert!(host.prefers_enclosing());
+        assert!(
+            !Host::LocatedIn {
+                ids: vec![1],
+                name: None,
+                own: None
+            }
+            .prefers_enclosing()
+        );
+
+        let place = |tags: &[(&str, &str)], mask| {
+            let coord = geo::Coord { x: 5.1, y: 52.1 };
+            Place::new(
+                &coord,
+                "electrify_america_us".to_string(),
+                mask,
+                tags.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                &geo::Point::from(coord).into(),
+                crate::utils::UtcTimestamp(
+                    time::UtcDateTime::from_unix_timestamp(1_770_000_000).unwrap(),
+                ),
+            )
+            .unwrap()
+        };
+        let charge_point = place(
+            &[("man_made", "charge_point"), ("ref", "110106-01")],
+            MatchMask::STREET_FURNITURE,
+        );
+        assert_eq!(
+            charging_station_host(&charge_point),
+            Some(Host::ChargingStation)
+        );
+        let station = place(&[("amenity", "charging_station")], MatchMask::FUEL);
+        assert_eq!(charging_station_host(&station), None);
     }
 
     #[test]

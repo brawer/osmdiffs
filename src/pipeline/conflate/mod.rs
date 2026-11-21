@@ -72,7 +72,10 @@ mod writer;
 use deletion::{AtpCoverage, Candidate, Reason, deletion_reason, local_keys, place_country};
 use diagnostics::{Diagnostics, Missing};
 use local_coverage::{LocalCoverage, LocalKey, MIN_LOCAL_SHARE};
-use located_in::{Host, department_brands, enclosing_host, find_departments, located_in_tag};
+use located_in::{
+    Host, charging_station_host, department_brands, enclosing_host, find_departments,
+    located_in_tag,
+};
 use s2_util::MergedCellRanges;
 use writer::{MatchInfo, ParquetRow, ParquetWriter};
 
@@ -380,6 +383,7 @@ fn produce_rows(
                     .get(&ordinal)
                     .cloned()
             })
+            .or_else(|| charging_station_host(atp))
     };
     let located_in_rows = AtomicU64::new(0);
     // Sends the row of an ATP feature without a match, and returns
@@ -1038,7 +1042,12 @@ fn find_host(atp: &Place, host: &Host, osm: &OsmFeatures) -> Result<Option<Local
         level_mod: 1,
     };
     let center = s2::cell::Cell::from(s2::cellid::CellID(atp.s2_cell_id)).center();
-    let radius = crate::matchers::meters_to_chord_angle(located_in::HOST_SEARCH_METERS);
+    let radius = crate::matchers::meters_to_chord_angle(host.search_meters());
+    let max_rad = host.search_meters() / 6_371_000.0;
+    let point = {
+        let ll = s2::latlng::LatLng::from(s2::cellid::CellID(atp.s2_cell_id));
+        geo::Point::new(ll.lng.deg(), ll.lat.deg())
+    };
     let cap = s2::cap::Cap::from_center_chordangle(&center, &radius);
     let mut best: Option<(f64, LocalFeatureRef)> = None;
     for (lo, hi) in MergedCellRanges::new(coverer.covering(&cap)) {
@@ -1051,11 +1060,23 @@ fn find_host(atp: &Place, host: &Host, osm: &OsmFeatures) -> Result<Option<Local
             if !host.is_host(candidate.tags()) {
                 continue;
             }
-            let Some(centroid) = candidate.geometry().ok().and_then(|g| g.centroid()) else {
+            let Result::Ok(geometry) = candidate.geometry() else {
+                continue;
+            };
+            let Some(centroid) = geometry.centroid() else {
                 continue;
             };
             let ll = s2::latlng::LatLng::from_degrees(centroid.y(), centroid.x());
-            let d = center.distance(&s2::point::Point::from(ll)).rad();
+            let d = if host.prefers_enclosing() && geo::Contains::contains(&geometry, &point) {
+                0.0
+            } else {
+                center.distance(&s2::point::Point::from(ll)).rad()
+            };
+            // The covering reaches farther than the search radius, and
+            // a charge point's station must really be close.
+            if host.prefers_enclosing() && d > max_rad {
+                continue;
+            }
             if best.is_none_or(|(b, _)| d < b) {
                 best = Some((d, r));
             }

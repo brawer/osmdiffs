@@ -37,6 +37,7 @@ mod conflated_tiles;
 mod datapackage;
 mod download;
 mod edits;
+mod held_back;
 mod importance;
 mod inputs;
 mod logging;

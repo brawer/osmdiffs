@@ -779,6 +779,13 @@ fn brand_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> Opt
         if kind == "public_bookcase" {
             return None;
         }
+        // Nor does a charge point, for now. Spiders such as
+        // `electrify_america_us` give every charge point of a station
+        // the station's position, so the OSM charge points around it
+        // that no ATP feature took aren't gone.
+        if kind == "charge_point" {
+            return None;
+        }
         Kind::Infrastructure(kind)
     } else {
         Kind::Mask(mask)
@@ -1182,6 +1189,20 @@ mod tests {
             add(&mut atp, &place(&bookcase, ZURICH_HB));
         }
         assert_eq!(reason(&atp, &bookcase, ZURICH_NORTH), None);
+    }
+
+    #[test]
+    fn test_charge_point_never_flagged() {
+        let mut atp = AtpCoverage::default();
+        let charge_point = [
+            ("man_made", "charge_point"),
+            ("operator", "Electrify America"),
+            ("operator:wikidata", "Q59773555"),
+        ];
+        for _ in 0..MIN_NAME_FEATURES {
+            add(&mut atp, &place(&charge_point, ZURICH_HB));
+        }
+        assert_eq!(reason(&atp, &charge_point, ZURICH_NORTH), None);
     }
 
     #[test]

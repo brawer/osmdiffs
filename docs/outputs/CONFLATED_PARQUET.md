@@ -161,6 +161,7 @@ scores lower than one matched by its ID, even when both are right.
 | `same` | `kind` | street furniture of the same kind close by |
 | `located_in` | `department` | a department of a store of the same brand, such as a Publix pharmacy in a Publix supermarket |
 | `located_in` | `located_in` | the host named by the `located_in` or `located_in:wikidata` tags, such as a Starbucks in a Target |
+| `located_in` | `charging_station` | a charge point that OSM doesn't map on its own, in the OSM charging station that contains it or is within 50 m |
 | `deletion_candidate` | `wikidata` | brand, network or operator by Wikidata ID |
 | `deletion_candidate` | `name` | brand, network or operator by name |
 | `deletion_candidate` | `swiss_transit_id` | Swiss stop whose ID the register doesn't know |

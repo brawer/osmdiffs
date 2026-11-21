@@ -1,7 +1,8 @@
 //! Matches street infrastructure: post boxes, defibrillators (AEDs),
 //! benches, fire hydrants, public bookcases, bicycle parking, waste
-//! baskets, fountains, toilets and bike-share stations for now, with
-//! street lamps and the like to follow.
+//! baskets, fountains, toilets, bike-share stations and the charge
+//! points of charging stations for now, with street lamps and the like
+//! to follow.
 //!
 //! Such features have no brand and rarely a name, and many of them
 //! stand close together, so the match rests on position. Each kind has
@@ -63,6 +64,10 @@ enum Kind {
     /// takes them from GBFS feeds; not rental shops
     /// (`bicycle_rental=shop`).
     BikeShare,
+    /// One charging device (`man_made=charge_point`), which may have
+    /// several sockets. A charge point that OSM lacks is `located_in`
+    /// the OSM charging station around it; see `pipeline::conflate`.
+    ChargePoint,
 }
 
 impl Kind {
@@ -95,6 +100,7 @@ impl Kind {
             ("man_made", "drinking_fountain") => Some(Kind::Fountain),
             ("amenity", "toilets") => Some(Kind::Toilets),
             ("amenity", "bicycle_rental") => Some(Kind::BikeShare),
+            ("man_made", "charge_point") => Some(Kind::ChargePoint),
             _ => None,
         }
     }
@@ -111,6 +117,7 @@ impl Kind {
             Kind::Fountain => "fountain",
             Kind::Toilets => "toilets",
             Kind::BikeShare => "bicycle_rental",
+            Kind::ChargePoint => "charge_point",
         }
     }
 
@@ -139,6 +146,7 @@ impl Kind {
             // `capacity` agrees on only 30% of the pairs within 2 m in
             // Japan: docks get added and removed.
             Kind::BikeShare => &[],
+            Kind::ChargePoint => &[],
         }
     }
 
@@ -245,6 +253,10 @@ impl Settings {
             // In Japan, 12,183 of the 13,145 pairs within 20 m are
             // within 2 m; chance pairs catch up beyond 20 m.
             Kind::BikeShare => (20.0, RefRule::Ignore),
+            // In Denmark, where OSM maps charge points more than
+            // elsewhere, 3,134 of 26,883 ChargePoint devices have an
+            // OSM charge point within 15 m.
+            Kind::ChargePoint => (15.0, RefRule::Ignore),
         });
         Settings {
             max_meters,
@@ -866,6 +878,15 @@ mod tests {
         ("trough:material", "sandstone"),
     ];
 
+    const CHARGE_POINT: &[(&str, &str)] = &[
+        ("man_made", "charge_point"),
+        ("ref", "15997299"),
+        ("capacity", "1"),
+        ("brand", "ChargePoint"),
+        ("brand:wikidata", "Q5176149"),
+        ("operator:wikidata", "Q5176149"),
+    ];
+
     const CASES: &[Case] = &[
         Case {
             what: "Swiss post box, same spot",
@@ -1453,6 +1474,41 @@ mod tests {
             want: NO_MATCH,
         },
         Case {
+            what: "charge point, same spot",
+            spider: "chargepoint",
+            atp: CHARGE_POINT,
+            osm: &[("man_made", "charge_point")],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "charge point, another operator",
+            spider: "chargepoint",
+            atp: CHARGE_POINT,
+            osm: &[
+                ("man_made", "charge_point"),
+                ("operator:wikidata", "Q42717773"),
+            ],
+            meters: 5.0,
+            want: (0.5, 0.6),
+        },
+        Case {
+            what: "charge point beyond 15 m",
+            spider: "chargepoint",
+            atp: CHARGE_POINT,
+            osm: &[("man_made", "charge_point")],
+            meters: 20.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "charge point against its charging station",
+            spider: "chargepoint",
+            atp: CHARGE_POINT,
+            osm: &[("amenity", "charging_station")],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
             what: "default radius for an unknown AED spider",
             spider: "some_aed_spider",
             atp: &[("emergency", "defibrillator")],
@@ -1522,6 +1578,8 @@ mod tests {
         assert_eq!(kind(&[("amenity", "drinking_water")]), Some("fountain"));
         assert_eq!(kind(&[("man_made", "drinking_fountain")]), Some("fountain"));
         assert_eq!(kind(&[("amenity", "toilets")]), Some("toilets"));
+        assert_eq!(kind(&[("man_made", "charge_point")]), Some("charge_point"));
+        assert_eq!(kind(&[("amenity", "charging_station")]), None);
         assert_eq!(kind(&[("amenity", "waste_basket")]), Some("waste_basket"));
         assert_eq!(
             kind(&[("amenity", "bicycle_rental")]),
