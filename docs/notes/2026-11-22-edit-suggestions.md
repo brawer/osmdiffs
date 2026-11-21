@@ -31,9 +31,15 @@ is held back at ingestion until alltheplaces#20717 is fixed.
 ## `edits.parquet`
 
 `suggest_edits` writes `edits.parquet` instead of GeoJSON Lines. It
-stays in the work directory for now and isn't uploaded or listed in
-`datapackage.json`; once a consumer such as MapRoulette (#696) needs
-it, it gets a page in `docs/outputs/` and goes public.
+isn't public for now: it isn't listed in `datapackage.json`, and once
+a consumer such as MapRoulette (#696) needs it, it gets a page in
+`docs/outputs/` and goes public.
+
+It does go to the internal bucket, like the run's log, as
+`edits/<YYYYMMDD>-<hash8>.parquet`. That way, tuning a suggester means
+comparing this week's file with last week's in DuckDB, without a
+planet run of our own, and the stability rule below can read last
+week's edits.
 
 One row per OSM feature:
 
@@ -216,10 +222,10 @@ MapRoulette challenges would split along these lines, so that an
   `check_date`, after the spider collected its data. Both
   `osm.modified` and `atp.fetched` are in `conflated.parquet`.
 - Suggest a value only when the spider reported it in two weekly runs
-  in a row. `previous_release` already finds last week's published
-  files through `datapackage.json`; this needs last week's
-  `edits.parquet`, so it waits until that file is uploaded somewhere
-  the next run can read.
+  in a row. This reads last week's `edits.parquet` from the internal
+  bucket. `previous_release` finds published files through
+  `datapackage.json`, which doesn't list it, so this needs a lookup
+  of its own: the newest `edits/` key older than this run.
 
 ### Keys
 
@@ -250,8 +256,9 @@ different kind of review from changing its tags.
 ## Order of work
 
 1. `edits.parquet`, with the schema above and the merge of `same`
-   rows, replacing the GeoJSON Lines; `render_tiles` reads a layer
-   extracted from it, so the map is unchanged.
+   rows, replacing the GeoJSON Lines and uploaded to the internal
+   bucket; `render_tiles` reads a layer extracted from it, so the map
+   is unchanged.
 2. `edit: true` and `edit:*` in `conflated.pmtiles`; drop
    `diffed-places.pmtiles`.
 3. Measure the OSM tags' share of the detail archive, then decide.
