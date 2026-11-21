@@ -49,6 +49,7 @@ mod packaged;
 mod previous_release;
 mod provenance;
 mod qrank;
+mod spider_churn;
 mod spider_stats;
 
 // Only these re-exported at the pipeline level (rather than making all
@@ -385,6 +386,11 @@ fn run_pipeline_steps(
         .and_then(|p| p.spider_stats_before(&anchor.date().to_string()));
     let spider_stats = run_step("compute_spider_stats", || {
         spider_stats::compute_spider_stats(&conflated, previous_spider_stats, progress, workdir)
+    })?;
+    // What changed since last week, for whoever reviews the run (#1020).
+    run_step("summarize_spider_churn", || {
+        spider_churn::summarize(&spider_stats, previous_spider_stats, workdir);
+        Ok(())
     })?;
     published.push(run_step("upload_spider_stats", || {
         upload::upload_spider_stats(&spider_stats, &date, progress)

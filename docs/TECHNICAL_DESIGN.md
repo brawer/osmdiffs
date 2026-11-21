@@ -330,8 +330,9 @@ fetch away.
   reads our own published `datapackage.json` to learn which
   `spider-stats.parquet` came out last time (`fetch_inputs.previous`,
   [`previous_release.rs`](../src/pipeline/previous_release.rs)), kept
-  in `previous-release.json`; unlike the inputs, failing to read it only
-  logs a warning. For AllThePlaces spiders that are broken in the
+  in `previous-release.json`, and downloads that file into the workdir
+  for `summarize_spider_churn`; unlike the inputs, failing to read
+  either only logs a warning. For AllThePlaces spiders that are broken in the
   latest run, killed before they finished (a file in the dump, but no
   entry in `_results.json`) or down to fewer than half the features of
   their most recent healthy run, it fetches the spider's whole file from
@@ -594,6 +595,21 @@ fetch away.
   statistics. See
   [`docs/outputs/SPIDER_STATS.md`](outputs/SPIDER_STATS.md) for the
   schema. Uploaded by `upload_spider_stats`, like the files below.
+- **`summarize_spider_churn`**
+  ([`src/pipeline/spider_churn.rs`](../src/pipeline/spider_churn.rs))
+  — compares `spider-stats.parquet` with last week's and logs what
+  changed, for whoever reviews the run
+  ([#1020](https://github.com/brawer/osmdiffs/issues/1020)): one INFO
+  line with how many spiders are new, gone, down to 0 features, down
+  to fewer than half (both by `fallback::breakage`, the test that
+  picks spiders for older data), killed before they finished, still
+  broken, out of older data because their last healthy run is now
+  more than four weeks old, or back, plus which spiders use older
+  data; and one WARN line per spider that lost features and had at
+  least 100 last week, most lost first, and per spider whose match
+  rate, (`same` + `located_in`) / `rows`, dropped by 20 points or more
+  from at least 100 rows. Without last week's file, it logs that and
+  goes on.
 - **`suggest_edits`** ([`src/pipeline/edits.rs`](../src/pipeline/edits.rs))
   — scans `conflated.parquet` for matched rows and asks an
   [`edit_suggesters`](../src/edit_suggesters/) implementation what
