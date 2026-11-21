@@ -320,7 +320,7 @@ for where this comes from.
 
 ### How far tags agree
 
-`tags` compares the tags that `match.evidence.agreeing` compares, for
+`tags` compares the tags that `match.evidence.agreeing_tags` compares, for
 the `same` rows. `atp` counts rows whose AllThePlaces feature has the
 tag; these then split into `agreeing`, `differing` and `missing_in_osm`.
 Tags no feature of the spider has are not listed. Phone numbers, email

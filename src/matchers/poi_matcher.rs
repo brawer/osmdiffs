@@ -5,7 +5,7 @@ use super::contact::{AtpContacts, CONTACT_FACTOR, Nondescript};
 use super::former_brands;
 use super::official_id::{self, IdEvidence};
 use super::{
-    MatchMask, Matcher, OsmCandidate, address, geo_point_distance, geo_point_distance_score,
+    MatchMask, Matcher, OsmCandidate, Rules, address, geo_point_distance, geo_point_distance_score,
     meters_to_chord_angle, normalize_name, parse_wikidata_ids, split_values, street,
 };
 use crate::places::Place;
@@ -395,6 +395,47 @@ impl<'a> PoiMatcher<'a> {
         )
     }
 
+    /// Every rule of [Self::factor_and_rule] whose evidence agrees for
+    /// `candidate`, whichever of them decided: the same checks, but
+    /// without stopping at the first that fires. Like
+    /// [Self::factor_and_rule], this leaves out the distance limits
+    /// that [Matcher::score_osm_candidate] puts on `address` and on
+    /// far matches.
+    fn agreeing_rules(&self, candidate: &OsmCandidate) -> Rules {
+        let mut rules = Rules::default();
+        if official_id::compare(&self.official_ids, candidate.tags()) == IdEvidence::Same {
+            rules.insert("official_id");
+        }
+        let osm_brand: Vec<u64> = find_brand_wikidata(candidate.tags()).collect();
+        let osm_has_brand = !osm_brand.is_empty();
+        if osm_brand.iter().any(|id| self.brand_wikidata.contains(id)) {
+            rules.insert("brand_wikidata");
+        }
+        if !self.brand_wikidata.is_empty()
+            && osm_brand
+                .iter()
+                .any(|id| self.former_brand_wikidata.contains(id))
+        {
+            rules.insert("former_brand");
+        }
+        if !self.contacts.is_empty() && self.contacts.agrees(candidate.tags()) {
+            rules.insert("contact");
+        }
+        if self.brand_name_agrees(candidate) {
+            rules.insert("brand_name");
+        }
+        if !osm_has_brand && self.brand_in_name(candidate) {
+            rules.insert("brand_in_name");
+        }
+        if self.brand_domain_agrees(candidate, osm_has_brand) {
+            rules.insert("brand_domain");
+        }
+        if self.address_evidence(candidate, osm_has_brand) {
+            rules.insert("address");
+        }
+        rules
+    }
+
     /// Whether one of the OSM brand names ([find_osm_brand_names]) is
     /// one of [Self::name_keys].
     fn brand_name_agrees(&self, candidate: &OsmCandidate) -> bool {
@@ -522,6 +563,10 @@ impl Matcher for PoiMatcher<'_> {
     /// the order [PoiMatcher::factor_and_rule] tries them.
     fn rule(&self, candidate: &OsmCandidate) -> &'static str {
         self.factor_and_rule(candidate).1
+    }
+
+    fn rules(&self, candidate: &OsmCandidate) -> Rules {
+        self.agreeing_rules(candidate)
     }
 
     /// False if the ATP feature has nothing but an `operator:wikidata`
@@ -1136,6 +1181,118 @@ mod tests {
 
     /// Our brand at the start of an OSM name, from our own tags or from
     /// the name-suggestion-index, such as its `matchNames`.
+    #[test]
+    fn test_poi_matcher_rules() {
+        use crate::tables::{Feature, StringPool};
+        use s2::{cellid::CellID, latlng::LatLng};
+        use tempfile::TempDir;
+        use wkb::writer::{WriteOptions, write_point};
+
+        let dir = TempDir::new().expect("tempdir");
+        let strings = [
+            "amenity",
+            "brand",
+            "brand:wikidata",
+            "fuel",
+            "name",
+            "phone",
+            "Avia",
+            "Avia Tankstelle Baar",
+            "+41 41 760 00 00",
+            "+41 41 760 99 99",
+            "Q1",
+        ];
+        let pool = StringPool::create(
+            strings.iter().map(|s| s.to_string()),
+            dir.path(),
+            &dir.path().join("strings"),
+        )
+        .expect("StringPool::create");
+        let s2_cell_id = CH_CLOTHES_ATP.s2_cell_id;
+        let rules = |matcher: &PoiMatcher, tags: &[(&str, &str)]| {
+            let mut flat_tags = Vec::with_capacity(tags.len() * 2);
+            for (k, v) in tags {
+                flat_tags.push(pool.lookup(k).expect("key in pool") as u32);
+                flat_tags.push(pool.lookup(v).expect("value in pool") as u32);
+            }
+            let ll = LatLng::from(CellID(s2_cell_id));
+            let mut geometry_wkb = Vec::new();
+            write_point(
+                &mut geometry_wkb,
+                &geo::Point::new(ll.lng.deg(), ll.lat.deg()),
+                &WriteOptions {
+                    endianness: wkb::Endianness::LittleEndian,
+                },
+            )
+            .expect("wkb encode");
+            let feature = Feature {
+                id: 1,
+                tags: flat_tags,
+                geometry_wkb,
+                ..Default::default()
+            };
+            let candidate = OsmCandidate {
+                feature: &feature,
+                strings: &pool,
+            };
+            assert!(matcher.score_osm_candidate(&candidate) > 0.0);
+            (
+                matcher.rule(&candidate),
+                matcher.rules(&candidate).names().collect::<Vec<_>>(),
+            )
+        };
+        let place = Place {
+            s2_cell_id,
+            spider: String::from("test"),
+            mask: MatchMask::FUEL,
+            fetched: test_timestamp(),
+            shape_wkb: test_shape(s2_cell_id),
+            tags: tags(&[
+                ("amenity", "fuel"),
+                ("brand", "Avia"),
+                ("brand:wikidata", "Q1"),
+                ("phone", "+41 41 760 00 00"),
+            ]),
+        };
+        let m = PoiMatcher::for_place(&place, &Nondescript::none(), &NO_DOMAINS, &NO_NSI)
+            .expect("matcher");
+        let phone = ("phone", "+41 41 760 00 00");
+        let other_phone = ("phone", "+41 41 760 99 99");
+
+        // The contact decides, but the brand name agrees too.
+        assert_eq!(
+            rules(&m, &[("amenity", "fuel"), ("brand", "Avia"), phone]),
+            ("contact", vec!["contact", "brand_name"])
+        );
+        assert_eq!(
+            rules(&m, &[("amenity", "fuel"), ("brand", "Avia"), other_phone]),
+            ("brand_name", vec!["brand_name"])
+        );
+        assert_eq!(
+            rules(
+                &m,
+                &[("amenity", "fuel"), ("name", "Avia Tankstelle Baar"), phone]
+            ),
+            ("contact", vec!["contact", "brand_in_name"])
+        );
+        // Rules after `brand_wikidata` are checked too.
+        assert_eq!(
+            rules(
+                &m,
+                &[
+                    ("amenity", "fuel"),
+                    ("brand", "Avia"),
+                    ("brand:wikidata", "Q1"),
+                    phone
+                ]
+            ),
+            (
+                "brand_wikidata",
+                vec!["brand_wikidata", "contact", "brand_name"]
+            )
+        );
+    }
+
     #[test]
     fn test_poi_matcher_brand_in_name() {
         use crate::tables::{Feature, StringPool};

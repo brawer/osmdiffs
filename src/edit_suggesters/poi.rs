@@ -145,9 +145,9 @@ fn rebrand_edits(
 /// national format. Emails and websites are compared as
 /// [AtpContacts] compares them, websites without scheme, `www.` or
 /// tracking parameters. A value with several `;`-separated parts
-/// agrees if any part does, as in `match.evidence.agreeing`.
+/// agrees if any part does, as in `match.evidence.agreeing_tags`.
 ///
-/// Unlike `match.evidence.agreeing`, which pools `phone`, `fax` and
+/// Unlike `match.evidence.agreeing_tags`, which pools `phone`, `fax` and
 /// `mobile` because AllThePlaces mixes them up, this compares one key
 /// at a time: a phone number that agrees must not hide a fax number
 /// that doesn't.
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn fax_is_compared_on_its_own() {
         // The phone agrees, but the fax doesn't, so the fax is still
-        // suggested; `match.evidence.agreeing` pools the two.
+        // suggested; `match.evidence.agreeing_tags` pools the two.
         let atp = tags(&[("phone", "+1 919-932-7773"), ("fax", "+1 919-932-7774")]);
         let osm = tags(&[("phone", "+1-919-932-7773"), ("fax", "+1-919-932-0000")]);
         let edit = PoiEditSuggester

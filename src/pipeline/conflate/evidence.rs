@@ -86,6 +86,27 @@ pub(super) fn agreeing<'a>(
         .collect()
 }
 
+/// The tags of [AGREEING] that both `atp` and `osm` have
+/// ([has_compared_tag]) but that are not in `agreeing`, the result of
+/// [agreeing] for the same tags: those whose values differ. So a tag
+/// that is in neither list is missing on at least one side. A value
+/// that [agreeing] can't compare, such as a phone number that doesn't
+/// parse, counts as different.
+pub(super) fn disagreeing<'a>(
+    atp: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+    osm: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+    agreeing: &[String],
+) -> Vec<String> {
+    compared_tags()
+        .filter(|name| {
+            !agreeing.iter().any(|a| a == name)
+                && has_compared_tag(name, atp.clone())
+                && has_compared_tag(name, osm.clone())
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 static NONDESCRIPT: LazyLock<Nondescript> = LazyLock::new(Nondescript::none);
 
 type Normalize = fn(&str) -> Option<String>;
@@ -401,6 +422,31 @@ mod tests {
         );
         assert_eq!(split("Avenue A"), None);
         assert_eq!(split("札幌市中央区北1条西2丁目1-1"), None);
+    }
+
+    #[test]
+    fn test_disagreeing() {
+        let atp = [
+            ("name", "Migros"),
+            ("phone", "+41 44 000 00 00"),
+            ("addr:street", "Bahnhofstrasse 1"),
+            ("email", "info@example.ch"),
+        ];
+        let osm = [
+            ("name", "Migros"),
+            ("contact:phone", "+41 44 111 11 11"),
+            ("addr:street", "Bahnhofstrasse"),
+            ("addr:housenumber", "2"),
+            ("website", "https://example.ch/"),
+        ];
+        let agree = agreeing(atp.iter().copied(), osm.iter().copied(), None);
+        assert_eq!(agree, ["name", "addr:street"]);
+        // `email` and `website` are on one side only.
+        assert_eq!(
+            disagreeing(atp.iter().copied(), osm.iter().copied(), &agree),
+            ["phone", "addr:housenumber"]
+        );
+        assert!(disagreeing(atp.iter().copied(), std::iter::empty(), &[]).is_empty());
     }
 
     #[test]

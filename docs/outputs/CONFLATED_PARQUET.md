@@ -50,8 +50,10 @@ match                                        STRUCT, non-null
   score       FLOAT                          nullable — 0.0 to 1.0, null unless relation = "same"
   evidence                                   STRUCT, non-null
     rule        UTF8                         nullable — which rule decided, see below
+    rules       LIST<UTF8>                   non-null — rule and every other rule that agrees, empty if rule is null
     distance_m  FLOAT                        nullable — null unless both atp and osm are present
-    agreeing    LIST<UTF8>                   non-null, may be empty
+    agreeing_tags LIST<UTF8>                 non-null, may be empty — tags on both sides whose values agree
+    disagreeing_tags LIST<UTF8>              non-null, may be empty — tags on both sides whose values differ
     local_share FLOAT                        nullable — only for deletion candidates by brand
     position    UTF8                         nullable — "google_camera_coords" if atp_geometry was corrected, see below
     position_shift_deg FLOAT                 nullable — how far atp_geometry was moved east, in degrees
@@ -169,7 +171,7 @@ scores lower than one matched by its ID, even when both are right.
 
 `match.evidence.distance_m` is the shortest distance in meters between
 the two geometries: 0 when the AllThePlaces point lies inside the
-OpenStreetMap building. `match.evidence.agreeing` lists the tags whose
+OpenStreetMap building. `match.evidence.agreeing_tags` lists the tags whose
 values agree on both sides, such as `phone` or `opening_hours`,
 compared without regard to case and spacing. Phone numbers, email
 addresses and websites are compared as the matchers compare them:
@@ -178,6 +180,23 @@ phone numbers in their international form, so `+41 44 123 45 67` and
 `www.` or tracking parameters. Opening hours are compared as weekly
 schedules, so `24/7` and `Mo-Su 00:00-24:00` agree; rules for public
 or school holidays are left out of the comparison.
+`match.evidence.disagreeing_tags` lists the tags of the same kinds that
+both sides have but whose values don't agree, so a tag that is in
+neither list is missing on at least one side. A value that can't be
+compared, such as a phone number that doesn't parse, counts as
+different.
+
+`match.evidence.rules` lists `match.evidence.rule` together with every
+other rule whose evidence agrees for the matched OpenStreetMap
+feature, in the order of the table above. The matcher tries its rules
+in that order and the first that agrees decides, so a `brand_name`
+match whose phone numbers also agree has the rule `contact`; its
+`rules` are `[contact, brand_name]`. The rules that come after the one
+that decided are checked as they would be if it hadn't, except for the
+distance limits that only apply to the deciding rule: `address`
+matches only within 150 m (30 m for a shop without a name). For the
+transit, street furniture, `located_in` and deletion candidate rules,
+`rules` holds `rule` alone.
 `match.evidence.local_share` is, for deletion candidates by
 brand, the share of OpenStreetMap features of that brand nearby that
 AllThePlaces matched; it is at least 0.5, or the row wouldn't be here.
@@ -203,6 +222,56 @@ GROUP BY ALL ORDER BY 3 DESC;
 ```
 
 Some SQL engines reserve `MATCH` as a keyword; there, write `"match"`.
+
+### Estimating the precision of a rule
+
+Whether the phone numbers agree is a check on a match that the rule
+did not use, so the share of agreeing phones among the rows where a
+rule fires and both sides have a phone number says how often the rule
+is right. Since `contact` comes before the brand name and address
+rules, it takes most of their rows whose phones agree, and
+`match.evidence.rule` alone leaves these rules with mostly the rows
+whose phones differ. `match.evidence.rules` gives back the rows that a
+rule would have decided without `contact`:
+
+```sh
+duckdb -c "
+SELECT rule,
+       count(*) AS both_have_phone,
+       round(avg(list_contains(agreeing, 'phone')::INT), 3) AS phone_agrees
+FROM (
+  SELECT list_filter(match.evidence.rules, lambda r: r <> 'contact')[1] AS rule,
+         match.evidence.agreeing_tags AS agreeing,
+         match.evidence.disagreeing_tags AS disagreeing
+  FROM read_parquet('conflated.parquet')
+  WHERE match.relation = 'same'
+)
+WHERE rule IS NOT NULL
+  AND (list_contains(agreeing, 'phone') OR list_contains(disagreeing, 'phone'))
+GROUP BY rule
+ORDER BY both_have_phone DESC;
+"
+```
+
+`rule` here is the first rule other than `contact` that agrees, the
+one that decides when the phone numbers are left out. Rows matched by
+`contact` alone have none and are left out. (The `lambda` syntax needs
+DuckDB 1.3 or later; older versions write `r -> r <> 'contact'`.)
+
+Right matches have different phone numbers too, as about one in six
+right `brand_wikidata` matches do: one side has an old number, or a
+central one. So read the share next to that of `brand_wikidata` as a
+reference: if 80% of `brand_wikidata` rows with phones on both sides
+agree, and 60% of `brand_name` rows, then about 0.6 / 0.8 = 75% of
+`brand_name` matches are right. That holds as long as the rows with
+phones on both sides are like the other rows of their rule, and as
+long as wrong matches seldom share a phone number. Unlike the
+matchers, `agreeing_tags` doesn't leave out numbers that many places share,
+such as a brand's hotline, which agree for any two places of the brand;
+for a brand with such a number, look at its rows apart. Without
+`contact`, the matcher might also have chosen another OpenStreetMap
+feature for some of these rows. The same check works for `email` and
+`website`.
 
 ## Importance
 

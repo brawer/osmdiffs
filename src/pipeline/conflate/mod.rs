@@ -6,8 +6,8 @@ use super::last_modified;
 use crate::{
     make_progress_bar,
     matchers::{
-        OsmCandidate, brand_domains::BrandDomains, brand_names::NsiNames, contact::Nondescript,
-        create_matcher, match_distance,
+        OsmCandidate, Rules, brand_domains::BrandDomains, brand_names::NsiNames,
+        contact::Nondescript, create_matcher, match_distance,
     },
     pipeline::EXTERNAL_SORT_CHUNK_BYTES,
     places::{Place, PlaceReader},
@@ -258,8 +258,9 @@ struct ExclusiveCandidates {
     spider: u64,
     /// Score, OSM feature, whether the matcher allows other ATP
     /// features to match it too ([crate::matchers::Matcher::may_share]),
-    /// and the rule that matched ([crate::matchers::Matcher::rule]).
-    candidates: Vec<(f64, LocalFeatureRef, bool, &'static str)>,
+    /// the rule that matched ([crate::matchers::Matcher::rule]), and
+    /// all rules that agree ([crate::matchers::Matcher::rules]).
+    candidates: Vec<(f64, LocalFeatureRef, bool, &'static str, Rules)>,
     /// The ATP feature's position, for [Self::colocated_radius].
     s2_cell_id: u64,
     /// See [crate::matchers::Matcher::colocated_radius].
@@ -559,7 +560,13 @@ fn produce_rows(
                         Some(m) if via_corrected.contains(&r) => m,
                         _ => &matcher,
                     };
-                    candidates.push((score, r, m.may_share(&candidate), m.rule(&candidate)));
+                    candidates.push((
+                        score,
+                        r,
+                        m.may_share(&candidate),
+                        m.rule(&candidate),
+                        m.rules(&candidate),
+                    ));
                 }
                 let mut hasher = std::hash::DefaultHasher::new();
                 atp.spider.hash(&mut hasher);
@@ -608,14 +615,15 @@ fn produce_rows(
                 strings: &osm.strings,
             };
             let shift = shift.filter(|_| via_corrected.contains(&r));
-            let rule = match (&corrected_matcher, shift) {
-                (Some(m), Some(_)) => m.rule(&candidate),
-                _ => matcher.rule(&candidate),
+            let m = match (&corrected_matcher, shift) {
+                (Some(m), Some(_)) => m,
+                _ => &matcher,
             };
+            let (rule, rules) = (m.rule(&candidate), m.rules(&candidate));
             send_match(
                 atp,
                 r,
-                MatchInfo::same(score, rule),
+                MatchInfo::same(score, rule, rules),
                 shift,
                 osm,
                 signals,
@@ -665,19 +673,20 @@ fn produce_rows(
         + exclusive
             .iter()
             .map(|e| {
-                e.candidates.capacity() * size_of::<(f64, LocalFeatureRef, bool, &'static str)>()
+                e.candidates.capacity()
+                    * size_of::<(f64, LocalFeatureRef, bool, &'static str, Rules)>()
             })
             .sum::<usize>();
     let assigned = assign_exclusive(&exclusive);
-    // The score and rule of each assigned match.
-    let assigned: HashMap<u64, Option<(LocalFeatureRef, f64, &'static str)>> = exclusive
+    // The score and rules of each assigned match.
+    let assigned: HashMap<u64, Option<(LocalFeatureRef, f64, &'static str, Rules)>> = exclusive
         .iter()
         .map(|e| {
             let found = assigned[&e.ordinal].and_then(|r| {
                 e.candidates
                     .iter()
                     .find(|c| c.1 == r)
-                    .map(|&(score, r, _, rule)| (r, score, rule))
+                    .map(|&(score, r, _, rule, rules)| (r, score, rule, rules))
             });
             (e.ordinal, found)
         })
@@ -694,7 +703,7 @@ fn produce_rows(
         for atp in batch? {
             if let Some(&osm_match) = assigned.get(&ordinal) {
                 match osm_match {
-                    Some((r, score, rule)) => {
+                    Some((r, score, rule, rules)) => {
                         matched.insert(r);
                         let shift = camera_spiders
                             .get(&atp.spider)
@@ -703,7 +712,7 @@ fn produce_rows(
                         send_match(
                             &atp,
                             r,
-                            MatchInfo::same(score, rule),
+                            MatchInfo::same(score, rule, rules),
                             shift,
                             osm,
                             signals,
@@ -987,7 +996,7 @@ fn assign_exclusive(exclusive: &[ExclusiveCandidates]) -> HashMap<u64, Option<Lo
         .flat_map(|(i, e)| {
             e.candidates
                 .iter()
-                .map(move |&(score, r, share, _)| (score, i, r, share))
+                .map(move |&(score, r, share, _, _)| (score, i, r, share))
         })
         .collect();
     // Best score first; ties by ordinal and feature, so that runs are
@@ -1249,7 +1258,10 @@ mod tests {
         ExclusiveCandidates {
             ordinal,
             spider,
-            candidates: c.iter().map(|&(s, i)| (s, r(i), false, "test")).collect(),
+            candidates: c
+                .iter()
+                .map(|&(s, i)| (s, r(i), false, "test", Rules::default()))
+                .collect(),
             s2_cell_id: cell_at(0.0),
             colocated_radius: None,
         }
@@ -1288,7 +1300,7 @@ mod tests {
         let shared = |ordinal, score| ExclusiveCandidates {
             ordinal,
             spider: 7,
-            candidates: vec![(score, r(1), true, "test")],
+            candidates: vec![(score, r(1), true, "test", Rules::default())],
             s2_cell_id: cell_at(0.0),
             colocated_radius: None,
         };

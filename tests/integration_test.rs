@@ -609,6 +609,40 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
             .downcast_ref::<StringArray>()
             .context("'rule' is not a string")?
             .clone();
+        // `match.evidence.rules` holds the deciding rule, and
+        // `disagreeing_tags` no tag that `agreeing_tags` has.
+        let evidence = get_child_struct(matching, "evidence")?;
+        let list = |name: &str, row: usize| -> Result<Vec<String>> {
+            let values = evidence
+                .column_by_name(name)
+                .with_context(|| format!("evidence has no '{name}' field"))?
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .with_context(|| format!("'{name}' is not a list"))?
+                .value(row);
+            let values = values
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .with_context(|| format!("'{name}' is not a list of strings"))?;
+            Ok(values.iter().flatten().map(str::to_string).collect())
+        };
+        for row in 0..batch.num_rows() {
+            let all_rules = list("rules", row)?;
+            if rules.is_null(row) {
+                assert!(all_rules.is_empty(), "{all_rules:?}");
+            } else {
+                assert!(
+                    all_rules.iter().any(|r| r == rules.value(row)),
+                    "{all_rules:?}"
+                );
+            }
+            let agreeing = list("agreeing_tags", row)?;
+            let disagreeing = list("disagreeing_tags", row)?;
+            assert!(
+                disagreeing.iter().all(|t| !agreeing.contains(t)),
+                "{agreeing:?} {disagreeing:?}"
+            );
+        }
         for row in 0..batch.num_rows() {
             if osm.is_null(row) {
                 continue;
