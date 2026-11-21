@@ -96,8 +96,9 @@ pub struct AtpMetadata {
 
 /// Makes the latest usable AllThePlaces run available as a local input
 /// in `workdir`, downloading it (discovered via `url`, i.e.
-/// `history.json`) only if nothing in `workdir` can stand in for it. In
-/// order:
+/// `history.json`) only if nothing in `workdir` can stand in for it,
+/// together with its statistics and, for its broken spiders, their
+/// files from an older run (see [super::fallback]). In order:
 ///
 /// 1. `alltheplaces.zip` exists: reused, with the metadata read from its
 ///    sidecar -- a hard error if that sidecar is missing or unreadable,
@@ -116,6 +117,7 @@ pub async fn fetch_atp(
 ) -> Result<Input<AtpMetadata>> {
     let input = fetch_zip(url, client, progress, workdir).await?;
     fetch_stats(&input.metadata, client, workdir).await?;
+    super::fallback::fetch(&input, client, workdir).await;
     Ok(input)
 }
 
@@ -307,6 +309,22 @@ async fn fetch_latest_run(client: &Client, history_url: &str) -> Result<AtpMetad
             rejected.join("; ")
         }
     ))
+}
+
+/// Queries `history_url` (`history.json`) and returns every run in it
+/// that is complete and passes the sanity check of [fetch_latest_run],
+/// in no particular order.
+pub(super) async fn fetch_runs(client: &Client, history_url: &str) -> Result<Vec<AtpMetadata>> {
+    let body = download::get_bytes(client, history_url, Duration::from_secs(120)).await?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).with_context(|| format!("Failed to parse {history_url}"))?;
+    let entries = json
+        .as_array()
+        .ok_or_else(|| anyhow!("{} did not return a JSON array", history_url))?;
+    Ok(entries
+        .iter()
+        .filter_map(|entry| parse_run(entry, history_url).ok())
+        .collect())
 }
 
 /// The `start_time` of a `history.json` entry, if it has a valid one.

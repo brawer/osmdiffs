@@ -14,6 +14,9 @@
 //!   by the next run.
 //! - [`get_bytes`] fetches a small document (`history.json`,
 //!   `datapackage.json`, ...) into memory, with the same retries.
+//! - [`get_range`] fetches part of a file with a `Range` request, such
+//!   as one entry of an older AllThePlaces dump (see `atp::remote_zip`),
+//!   with the same retries.
 //!
 //! What gets retried: failing to connect, a connection that breaks or
 //! stalls (see [`STALL_TIMEOUT`]), a body that ends before its
@@ -640,15 +643,65 @@ fn hash_prefix(
 /// Fetches a small document at `url` into memory, retrying as described
 /// in the module documentation. `timeout` bounds each attempt.
 pub(crate) async fn get_bytes(client: &Client, url: &str, timeout: Duration) -> Result<Vec<u8>> {
+    Ok(get(client, url, None, timeout).await?.body)
+}
+
+/// Part of a file, as [`get_range`] fetched it.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Ranged {
+    /// Where [`Self::body`] starts in the file.
+    pub first: u64,
+
+    /// The length of the whole file.
+    pub total: u64,
+
+    pub body: Vec<u8>,
+}
+
+/// Fetches part of the file at `url` with an HTTP `Range` request,
+/// retrying like [`get_bytes`]. `range` is the header's value, such as
+/// `bytes=100-199`, or `bytes=-100` for the last 100 bytes. A server
+/// that answers with anything but `206 Partial Content` and a
+/// `Content-Range` with the file's length doesn't get its body read,
+/// since that might be the whole file, gigabytes of it: a `200 OK` is
+/// retried, as the AllThePlaces CDN sends one now and then, and a
+/// missing or bad `Content-Range` fails right away.
+pub(crate) async fn get_range(
+    client: &Client,
+    url: &str,
+    range: &str,
+    timeout: Duration,
+) -> Result<Ranged> {
+    let got = get(client, url, Some(range), timeout).await?;
+    let (first, total) = got
+        .range
+        .ok_or_else(|| anyhow!("{url} gave no Content-Range for {range}"))?;
+    let total = total.ok_or_else(|| anyhow!("{url} gave no file length for {range}"))?;
+    Ok(Ranged {
+        first,
+        total,
+        body: got.body,
+    })
+}
+
+/// What [`get`] received.
+struct Got {
+    body: Vec<u8>,
+    /// From the `Content-Range` header, for a ranged request.
+    range: Option<(u64, Option<u64>)>,
+}
+
+/// Fetches `url` into memory, or with `range`, the part that a `Range`
+/// header of that value asks for; see [`get_bytes`] and [`get_range`].
+async fn get(client: &Client, url: &str, range: Option<&str>, timeout: Duration) -> Result<Got> {
     let mut failures = 0;
     loop {
         let attempt = async {
-            let response = client
-                .get(url)
-                .timeout(timeout)
-                .send()
-                .await
-                .map_err(|err| send_failure(err, url))?;
+            let mut request = client.get(url).timeout(timeout);
+            if let Some(range) = range {
+                request = request.header(RANGE, range);
+            }
+            let response = request.send().await.map_err(|err| send_failure(err, url))?;
             let status = response.status();
             if !status.is_success() {
                 let err = anyhow!("{url} returned HTTP status {status}");
@@ -658,15 +711,34 @@ pub(crate) async fn get_bytes(client: &Client, url: &str, timeout: Duration) -> 
                     Failure::Fatal(err)
                 });
             }
+            let content_range = match range {
+                None => None,
+                Some(range) => {
+                    // Retried: the AllThePlaces CDN now and then answers
+                    // a range request with the whole file. Dropping the
+                    // response unread closes the connection.
+                    if status != StatusCode::PARTIAL_CONTENT {
+                        return Err(Failure::Retry(anyhow!(
+                            "{url} answered {range} with HTTP status {status}, not 206"
+                        )));
+                    }
+                    Some(parse_content_range(response.headers()).ok_or_else(|| {
+                        Failure::Fatal(anyhow!("{url} gave no valid Content-Range for {range}"))
+                    })?)
+                }
+            };
             let body = response
                 .bytes()
                 .await
                 .with_context(|| format!("Failed to read response from {url}"))
                 .map_err(Failure::Retry)?;
-            Ok(body.to_vec())
+            Ok(Got {
+                body: body.to_vec(),
+                range: content_range,
+            })
         };
         match attempt.await {
-            Ok(body) => return Ok(body),
+            Ok(got) => return Ok(got),
             Err(Failure::Fatal(err)) => return Err(err),
             Err(Failure::Retry(err) | Failure::Glitch(err)) => {
                 failures += 1;
@@ -1189,6 +1261,56 @@ mod tests {
             .create_async()
             .await;
         assert_eq!(fetch.await??, b"{}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_range() -> Result<()> {
+        let mut server = Server::new_async().await;
+        let _tail = server
+            .mock("GET", "/output.zip")
+            .match_header("range", "bytes=-3")
+            .with_status(206)
+            .with_header("content-range", "bytes 7-9/10")
+            .with_body("789")
+            .create_async()
+            .await;
+        let _ignored = server
+            .mock("GET", "/output.zip")
+            .match_header("range", "bytes=0-1")
+            .with_status(200)
+            .with_body("0123456789")
+            .create_async()
+            .await;
+        let _no_length = server
+            .mock("GET", "/output.zip")
+            .match_header("range", "bytes=2-3")
+            .with_status(206)
+            .with_header("content-range", "bytes 2-3/*")
+            .with_body("23")
+            .create_async()
+            .await;
+        let url = format!("{}/output.zip", server.url());
+        let client = test_client();
+        let timeout = Duration::from_secs(10);
+        assert_eq!(
+            get_range(&client, &url, "bytes=-3", timeout).await?,
+            Ranged {
+                first: 7,
+                total: 10,
+                body: b"789".to_vec()
+            }
+        );
+        // A server that ignores the range would send the whole file.
+        let err = get_range(&client, &url, "bytes=0-1", timeout)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not 206"), "{err:#}");
+        assert!(err.to_string().contains("Giving up"), "{err:#}");
+        let err = get_range(&client, &url, "bytes=2-3", timeout)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no file length"), "{err:#}");
         Ok(())
     }
 

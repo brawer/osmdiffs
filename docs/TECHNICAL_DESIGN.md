@@ -192,12 +192,14 @@ graph TD
     INPUTS --> FETCH_INPUTS("fetch_inputs<br/>(all in parallel)")
     FETCH_INPUTS --> ATP_ZIP[alltheplaces.zip]
     FETCH_INPUTS --> ATP_STATS[alltheplaces.stats.json]
+    FETCH_INPUTS --> ATP_FALLBACKS[alltheplaces.fallbacks/]
     FETCH_INPUTS --> OSM_PBF[planet-latest.osm.pbf]
     FETCH_INPUTS --> QRANK_CSV[qrank.csv.gz]
     FETCH_INPUTS --> OSMVIEWS_TIFF[osmviews.tiff]
     FETCH_INPUTS --> NSI_JSON[nsi.json]
 
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
+    ATP_FALLBACKS --> IMPORT_ATP
     OSM_INDEX --> IMPORT_ATP
     IMPORT_ATP --> NONDESCRIPT_PHONES[alltheplaces.nondescript-phones]
     IMPORT_ATP --> NONDESCRIPT_EMAILS[alltheplaces.nondescript-emails]
@@ -329,7 +331,20 @@ fetch away.
   `spider-stats.parquet` came out last time (`fetch_inputs.previous`,
   [`previous_release.rs`](../src/pipeline/previous_release.rs)), kept
   in `previous-release.json`; unlike the inputs, failing to read it only
-  logs a warning. Each input is hashed (SHA-256) while it streams in,
+  logs a warning. For AllThePlaces spiders that are broken in the
+  latest run, killed before they finished (a file in the dump, but no
+  entry in `_results.json`) or down to fewer than half the features of
+  their most recent healthy run, it fetches the spider's whole file from
+  that run, if it is at most four weeks old, with HTTP range requests
+  into the older `output.zip`: just its central directory and the one
+  entry, not the gigabytes around them. Spiders that AllThePlaces
+  removed don't get one, nor does a spider that a new one named
+  `<spider>_*` took over from. The files go to `alltheplaces.fallbacks/`
+  and what was done to `alltheplaces.fallbacks.json`, and `import_atp`
+  reads them in place of the dump's files
+  ([`atp/fallback.rs`](../src/pipeline/atp/fallback.rs),
+  [#1010](https://github.com/brawer/osmdiffs/issues/1010)); failing to
+  get them only logs a warning. Each input is hashed (SHA-256) while it streams in,
   and its provenance written to a `*.meta.json` sidecar. A broken or
   stalled connection, or a 5xx/408/429 answer, is retried with
   exponential backoff, and a download that broke off partway resumes
