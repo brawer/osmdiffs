@@ -23,7 +23,7 @@
 //!
 //! See `docs/notes/2026-11-09-departments.md`.
 
-use crate::matchers::contact::main_category;
+use crate::matchers::category::main_category;
 use crate::matchers::{MatchMask, normalize_name, parse_wikidata_ids};
 use crate::places::{Place, PlaceReader};
 use anyhow::Result;

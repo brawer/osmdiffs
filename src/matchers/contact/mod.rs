@@ -5,21 +5,19 @@
 //! describe the same *site*, but not necessarily the same *feature*: a
 //! flower shop inside a supermarket often lists the supermarket's
 //! number, and a hotel bar the hotel's. So a contact match also needs
-//! compatible main categories, see [category_factor]. Values that
+//! compatible main categories, see [super::category::category_factor]. Values that
 //! AllThePlaces lists for places far apart (hotlines, central
 //! mailboxes, a brand's home page) are nondescript and never count; see
 //! [Nondescript] and `pipeline::atp::nondescript`. For the background,
 //! see `docs/notes/2026-10-25-phone-and-email-matching.md` and
 //! `docs/notes/2026-11-06-website-matching.md`.
 
-use crate::matchers::split_values;
 use crate::tables::U64Set;
 use crate::utils::countries;
 use anyhow::{Context, Result};
-use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::OnceLock;
 
 mod emails;
 mod phones;
@@ -36,10 +34,6 @@ pub(crate) use urls::{is_website_key, normalize_url, parse_urls, parse_website_d
 /// Score factor of a contact match whose main categories are equal.
 /// Below 1.0, so a `brand:wikidata` match at the same distance wins.
 pub const CONTACT_FACTOR: f64 = 0.98;
-
-/// Extra factor for a contact match whose main categories are a known
-/// pair, see [category_factor].
-pub const CATEGORY_PAIR_FACTOR: f64 = 0.95;
 
 /// Phone numbers, email addresses and websites that AllThePlaces lists
 /// for places far apart, as written by `import_atp`. A shared value in
@@ -233,142 +227,10 @@ fn parse_national_phone(part: &str, country: Option<phonenumber::country::Id>) -
     parse_phone_number(&e164)
 }
 
-/// Keys whose value is a feature's main category, in order of priority.
-const CATEGORY_KEYS: &[&str] = &[
-    "shop",
-    "amenity",
-    "tourism",
-    "leisure",
-    "healthcare",
-    "craft",
-    "office",
-];
-
-/// A feature's main category as `key=value`, such as `shop=florist`:
-/// the value of the first key in [CATEGORY_KEYS] that the feature has.
-pub fn main_category<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<String> {
-    let mut best: Option<(usize, &str, &str)> = None;
-    for (k, v) in tags {
-        if let Some(i) = CATEGORY_KEYS.iter().position(|c| *c == k)
-            && best.is_none_or(|(j, _, _)| i < j)
-            && v != "no"
-        {
-            best = Some((i, k, v));
-        }
-    }
-    best.map(|(_, k, v)| format!("{k}={v}"))
-}
-
-/// Pairs of main categories that one business often has in AllThePlaces
-/// and OpenStreetMap, such as `tourism=hotel` and `amenity=restaurant`.
-/// Inferred from a planet run by `scripts/infer_contact_category_pairs.py`
-/// and then reviewed by hand; see the file's header.
-static CATEGORY_PAIRS: LazyLock<HashSet<(String, String)>> = LazyLock::new(|| {
-    let mut pairs = HashSet::new();
-    for line in include_str!("category_pairs.tsv").lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut cols = line.split('\t');
-        if let (Some(a), Some(b)) = (cols.next(), cols.next()) {
-            pairs.insert((a.to_string(), b.to_string()));
-            pairs.insert((b.to_string(), a.to_string()));
-        }
-    }
-    pairs
-});
-
-/// How well two main categories agree, for a contact match: 1.0 if
-/// they are equal, [CATEGORY_PAIR_FACTOR] if they are a known pair,
-/// and 0.0 otherwise, also when either side has no main category. A
-/// category with several `;`-separated values, such as
-/// `shop=car;car_repair`, agrees as well as its best value does.
-pub fn category_factor(atp: Option<&str>, osm: Option<&str>) -> f64 {
-    let (Some(atp), Some(osm)) = (atp, osm) else {
-        return 0.0;
-    };
-    let mut best = 0.0_f64;
-    for a in split_category(atp) {
-        for o in split_category(osm) {
-            let factor = if a == o {
-                1.0
-            } else if CATEGORY_PAIRS.contains(&(a.clone(), o.clone())) {
-                CATEGORY_PAIR_FACTOR
-            } else {
-                0.0
-            };
-            best = best.max(factor);
-        }
-    }
-    best
-}
-
-/// `shop=car;car_repair` as `shop=car` and `shop=car_repair`.
-fn split_category(category: &str) -> Vec<String> {
-    let Some((key, values)) = category.split_once('=') else {
-        return vec![category.to_string()];
-    };
-    if !values.contains(';') {
-        return vec![category.to_string()];
-    }
-    split_values(values).map(|v| format!("{key}={v}")).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn test_main_category() {
-        let t = [("name", "X"), ("amenity", "cafe"), ("shop", "bakery")];
-        assert_eq!(main_category(t.into_iter()).as_deref(), Some("shop=bakery"));
-        let t = [("shop", "no"), ("amenity", "cafe")];
-        assert_eq!(
-            main_category(t.into_iter()).as_deref(),
-            Some("amenity=cafe")
-        );
-        assert_eq!(main_category([("name", "X")].into_iter()), None);
-    }
-
-    #[test]
-    fn test_category_factor() {
-        let f = category_factor;
-        assert_eq!(f(Some("shop=car"), Some("shop=car")), 1.0);
-        assert_eq!(
-            f(Some("shop=car"), Some("shop=car_repair")),
-            CATEGORY_PAIR_FACTOR
-        );
-        assert_eq!(
-            f(Some("shop=car_repair"), Some("shop=car")),
-            CATEGORY_PAIR_FACTOR
-        );
-        // Removed by hand: a Western Union counter inside a supermarket.
-        assert_eq!(
-            f(Some("amenity=money_transfer"), Some("shop=supermarket")),
-            0.0
-        );
-        assert_eq!(f(Some("shop=florist"), Some("shop=supermarket")), 0.0);
-        assert_eq!(f(Some("shop=car_repair"), Some("shop=car;car_repair")), 1.0);
-        assert_eq!(
-            f(Some("shop=car_repair"), Some("shop=car; tyres")),
-            CATEGORY_PAIR_FACTOR
-        );
-        assert_eq!(f(Some("shop=florist"), Some("shop=car;car_repair")), 0.0);
-        assert_eq!(f(None, Some("shop=car")), 0.0);
-        assert_eq!(f(None, None), 0.0);
-    }
-
-    #[test]
-    fn test_category_pairs_file() {
-        for (a, b) in CATEGORY_PAIRS.iter() {
-            assert!(a.contains('='), "{a}");
-            assert!(b.contains('='), "{b}");
-            assert_ne!(a, b);
-        }
-        assert!(CATEGORY_PAIRS.len() >= 2 * 40);
-    }
 
     #[test]
     fn test_parse_national_phone() {
