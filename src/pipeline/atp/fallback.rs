@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use time::SignedDuration;
+use time::{SignedDuration, UtcDateTime};
 
 /// How many weeks back to look for a healthy run of a broken spider.
 /// Of the outages in the 60 weekly runs up to 2026-11-14 that ended
@@ -128,6 +128,10 @@ pub(in crate::pipeline) struct Fallback {
 
     /// The run that the spider's features come from instead.
     pub run_id: String,
+
+    /// When that run started, which its `run_id` names too.
+    #[serde(with = "crate::utils::rfc3339")]
+    pub start_time: UtcDateTime,
 
     /// The `output.zip` of that run.
     pub output_url: String,
@@ -348,6 +352,7 @@ async fn try_fetch(latest: &Input<AtpMetadata>, client: &Client, workdir: &Path)
             breakage: p.breakage,
             latest_features: p.latest_features,
             run_id: p.run.metadata.run_id.clone(),
+            start_time: p.run.metadata.start_time,
             output_url: p.run.metadata.output_url.clone(),
             features: p.stats.features,
             errors: p.stats.errors,
@@ -480,7 +485,6 @@ async fn fetch_older_runs(latest: &AtpMetadata, client: &Client) -> Result<Vec<O
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use time::UtcDateTime;
 
     #[test]
     fn test_breakage() {
@@ -798,6 +802,7 @@ pub(super) mod tests {
                 breakage: Breakage::Dropped,
                 latest_features: Some(0),
                 run_id: "2026-11-07-13-32-33".into(),
+                start_time: UtcDateTime::UNIX_EPOCH,
                 output_url: "https://example.org/output.zip".into(),
                 features: 10532,
                 errors: 0,

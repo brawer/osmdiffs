@@ -1057,6 +1057,7 @@ mod tests {
             breakage: fallback::Breakage::Dropped,
             latest_features: Some(0),
             run_id: "2025-12-25-00-00-00".into(),
+            start_time: UtcDateTime::UNIX_EPOCH,
             output_url: "https://example.org/output.zip".into(),
             features: 25,
             errors: 0,
