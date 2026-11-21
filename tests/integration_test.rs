@@ -34,6 +34,12 @@ fn run_pipeline_on_fixtures(extra_args: &[&str]) -> Result<TempDir> {
         fixture("alltheplaces.stats.json"),
         workdir.path().join("alltheplaces.stats.json"),
     )?;
+    // No broken spiders, so that fetch_atp() doesn't look for any in
+    // the older runs of history.json.
+    symlink(
+        fixture("alltheplaces.fallbacks.json"),
+        workdir.path().join("alltheplaces.fallbacks.json"),
+    )?;
     symlink(
         fixture("zugerland.osm.pbf"),
         workdir.path().join("planet-latest.osm.pbf"),

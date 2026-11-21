@@ -50,6 +50,8 @@ nulls for the dump's counts.
 spider                   UTF8     non-null
 atp_features             UINT64   nullable — features AllThePlaces says the spider wrote
 atp_errors               UINT64   nullable — errors AllThePlaces says the spider logged
+atp_run                  TIMESTAMP(MILLIS, UTC) nullable — start of the AllThePlaces run the spider's features come from
+fallback_reason          UTF8     nullable — why they come from an older run: `unfinished` or `dropped`
 dump_features            UINT64   nullable — features in the spider's file of the dump
 not_for_osm              UINT64   nullable — left out: license doesn't allow OpenStreetMap
 held_back                UINT64   nullable — left out: spider held back until AllThePlaces fixes it
@@ -160,6 +162,26 @@ Up to version 0.8.19, most of these were counted as `invalid`, which
 for the run. `atp_features` normally equals `dump_features`. Where it
 doesn't, something went wrong between the spider and the dump. A
 spider that crashed often has errors and no features at all.
+
+A spider that is broken in the latest run takes its features from its
+most recent healthy run of the last four weeks instead, so that the
+OpenStreetMap features of its brand don't turn into deletion
+candidates; see [#1010](https://github.com/brawer/osmdiffs/issues/1010).
+`fallback_reason` then says why: `unfinished` if the spider has a file
+in the dump but no entry in the run statistics, since it was killed before it
+finished and its file is partial, or `dropped` if it finished with
+fewer than half the features of that healthy run, often none. A run is
+healthy for a spider if the spider finished with at least 20 features,
+and not with fewer than half of those of its healthy run before.
+`atp_run` is the start of the run the features come from, such as
+2026-11-07T13:32:34Z; AllThePlaces names its runs by it, here
+`2026-11-07-13-32-34`. `atp_features`, `atp_errors` and the dump's
+counts are then those of that run, too. For the other spiders,
+`atp_run` is the start of the latest run. In `conflated.parquet`, the rows of
+such a spider show their age in `atp.fetched.timestamp`. A spider that
+AllThePlaces removed gets no fallback, nor does one whose features a
+new spider named after it, such as `mcdonalds_us` for `mcdonalds`,
+took over.
 
 `in_china` and `datum` concern features in mainland China. Many
 Chinese sources give coordinates in the GCJ-02 or BD-09 datum, which

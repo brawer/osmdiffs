@@ -26,8 +26,10 @@ use crate::{PROGRESS_BAR_STYLE, matchers::MatchMask};
 
 pub(super) mod camera;
 mod datum;
+pub(super) mod fallback;
 mod fetch;
 pub(super) mod nondescript;
+mod remote_zip;
 pub(super) mod run_stats;
 pub(super) mod spider_counts;
 
@@ -93,10 +95,20 @@ pub fn import_atp(
         Some(osm) => out.exists() && super::modified(&out)? < osm.modified()?,
         None => false,
     };
+    let fallbacks = read_fallbacks(workdir);
     if out.exists() && !osm_is_newer {
+        // The fallback files are an input too, though only with the zip
+        // to read the other spiders from.
         let zip_modified = std::fs::metadata(&input.path)
             .and_then(|m| m.modified())
-            .ok();
+            .ok()
+            .map(|zip| {
+                let manifest = std::fs::metadata(fallback::manifest_path(workdir))
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .filter(|_| !fallbacks.is_empty());
+                manifest.map_or(zip, |m| m.max(zip))
+            });
         let is_stale = |path: &Path| -> Result<bool> {
             Ok(match zip_modified {
                 Some(zip_modified) => super::modified(path)? < zip_modified,
@@ -161,20 +173,79 @@ pub fn import_atp(
     let (tx, rx) = sync_channel(50_000);
     let (ra, rb) = std::thread::scope(|s| {
         let r1 = s.spawn(|| process_places(rx, progress, workdir, &out));
-        let r2 = s.spawn(|| process_zip(input_zip, osm, progress, tx));
+        let r2 = s.spawn(|| process_zip(input_zip, &fallbacks, workdir, osm, progress, tx));
         (r1.join().unwrap(), r2.join().unwrap())
     });
     ra?;
     let mut counts = rb?;
     spider_counts::write(&mut counts, &spider_counts::path(workdir))?;
-    let run_stats = run_stats::read(workdir).unwrap_or_else(|err| {
-        log::warn!(error = format!("{err:#}").as_str(); "import_atp: could not read run stats");
-        None
-    });
+    let run_stats = run_stats::read(workdir)
+        .unwrap_or_else(|err| {
+            log::warn!(error = format!("{err:#}").as_str(); "import_atp: could not read run stats");
+            None
+        })
+        .map(|mut stats| {
+            // A spider from an older run is compared with what that
+            // run's statistics say about it.
+            for f in &fallbacks {
+                stats.insert(f.spider.clone(), f.run_stats());
+            }
+            stats
+        });
     let summary = spider_counts::summarize(&counts, run_stats.as_ref());
     spider_counts::log_summary(&summary, run_stats.is_some());
 
     Ok(out)
+}
+
+/// The spiders whose features `import_atp` takes from an older run
+/// (see [fallback]), as far as their files are there.
+fn read_fallbacks(workdir: &Path) -> Vec<fallback::Fallback> {
+    let manifest = match fallback::read(workdir) {
+        std::result::Result::Ok(manifest) => manifest.unwrap_or_default(),
+        Err(err) => {
+            log::warn!(
+                error = format!("{err:#}").as_str();
+                "import_atp: could not read the fallbacks, using the latest data"
+            );
+            return Vec::new();
+        }
+    };
+    manifest
+        .fallbacks
+        .into_iter()
+        .filter(|f| {
+            let exists = f.path(workdir).exists();
+            if !exists {
+                log::warn!(
+                    spider = f.spider.as_str();
+                    "import_atp: file from older run is gone, using the latest data"
+                );
+            }
+            exists
+        })
+        .collect()
+}
+
+/// The spider whose file is at `path` in the dump, such as `sdek` for
+/// `output/sdek.geojson`, or `None` if it isn't a spider's file.
+pub(super) fn spider_of_entry(path: &str) -> Option<&str> {
+    path.rsplit('/').next()?.strip_suffix(".geojson")
+}
+
+/// The spiders with a file in the dump at `zip`.
+pub(super) fn dump_spiders(zip: &Path) -> Result<std::collections::HashSet<String>> {
+    let file = File::open(zip).with_context(|| format!("could not open file `{:?}`", zip))?;
+    let mapping = unsafe { Mmap::map(&file).context("Couldn't mmap zip file")? };
+    let archive = ZipArchive::with_prepended_data(&mapping)
+        .context("Couldn't load archive")?
+        .0;
+    Ok(archive
+        .entries()
+        .iter()
+        .filter_map(|e| spider_of_entry(e.path.as_str()))
+        .map(String::from)
+        .collect())
 }
 
 /// Builds the website domains that belong to one brand from an existing
@@ -287,9 +358,12 @@ fn process_places(
 }
 
 /// Sends the features of the dump at `path` to `channel`, and returns
-/// what happened to each spider's features.
+/// what happened to each spider's features. The spiders of `fallbacks`
+/// are read from their files in `workdir` instead.
 fn process_zip(
     path: &Path,
+    fallbacks: &[fallback::Fallback],
+    workdir: &Path,
     osm: Option<&OsmFeatures>,
     progress: &MultiProgress,
     channel: SyncSender<Place>,
@@ -299,19 +373,34 @@ fn process_zip(
     let archive = ZipArchive::with_prepended_data(&mapping)
         .context("Couldn't load archive")?
         .0;
-    let bar = progress.add(ProgressBar::new(archive.entries().len() as u64));
+    let bar = progress.add(ProgressBar::new(
+        (archive.entries().len() + fallbacks.len()) as u64,
+    ));
     bar.set_prefix("atp.read      ");
     bar.set_style(ProgressStyle::with_template(PROGRESS_BAR_STYLE)?);
     bar.set_message("feature collections");
 
+    let replaced: std::collections::HashSet<&str> =
+        fallbacks.iter().map(|f| f.spider.as_str()).collect();
     let counts = Mutex::new(Vec::with_capacity(archive.entries().len()));
     archive.entries().par_iter().try_for_each(|entry| {
         let path = entry.path.as_str();
-        if path.ends_with(".geojson") {
+        let is_replaced = spider_of_entry(path).is_some_and(|s| replaced.contains(s));
+        if path.ends_with(".geojson") && !is_replaced {
             let reader = archive.read(entry)?;
             let c = process_geojson(reader, path, osm, Some(channel.clone()))?;
             counts.lock().expect("counts lock").push(c);
         }
+        bar.inc(1);
+        Ok(())
+    })?;
+    fallbacks.par_iter().try_for_each(|f| {
+        let path = f.path(workdir);
+        let reader = File::open(&path).with_context(|| format!("could not open {path:?}"))?;
+        let name = path.to_string_lossy();
+        let c = process_geojson(reader, &name, osm, Some(channel.clone()))
+            .with_context(|| format!("could not read {name}"))?;
+        counts.lock().expect("counts lock").push(c);
         bar.inc(1);
         Ok(())
     })?;
@@ -930,7 +1019,7 @@ mod tests {
         path.push("tests/test_data/alltheplaces.zip");
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
         let (tx, rx) = sync_channel(1000);
-        let mut spiders = process_zip(&path, None, &progress, tx)?;
+        let mut spiders = process_zip(&path, &[], Path::new("."), None, &progress, tx)?;
         let mut counts: HashMap<String, usize> = HashMap::new();
         for place in rx {
             *counts.entry(place.spider).or_insert(0) += 1;
@@ -955,6 +1044,41 @@ mod tests {
                 ("winterthur_ch", 4, 4),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_zip_with_fallbacks() -> Result<()> {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/alltheplaces.zip");
+        let workdir = tempfile::tempdir()?;
+        let fallback = fallback::Fallback {
+            spider: "empty".into(),
+            breakage: fallback::Breakage::Dropped,
+            latest_features: Some(0),
+            run_id: "2025-12-25-00-00-00".into(),
+            start_time: UtcDateTime::UNIX_EPOCH,
+            output_url: "https://example.org/output.zip".into(),
+            features: 25,
+            errors: 0,
+        };
+        std::fs::create_dir_all(fallback.path(workdir.path()).parent().unwrap())?;
+        std::fs::write(
+            fallback.path(workdir.path()),
+            fallback::tests::geojson("empty", 25),
+        )?;
+        let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+        let (tx, rx) = sync_channel(1000);
+        let spiders = process_zip(&path, &[fallback], workdir.path(), None, &progress, tx)?;
+        let from_fallback = rx.iter().filter(|p| p.spider == "empty").count();
+        assert_eq!(from_fallback, 25);
+        let empty: Vec<u64> = spiders
+            .iter()
+            .filter(|c| c.spider == "empty")
+            .map(|c| c.features)
+            .collect();
+        assert_eq!(empty, [25]);
+        assert_eq!(spiders.len(), 6);
         Ok(())
     }
 
