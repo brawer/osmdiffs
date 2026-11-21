@@ -61,6 +61,13 @@ fn run_pipeline_on_fixtures(extra_args: &[&str]) -> Result<TempDir> {
     ] {
         symlink(fixture(name), workdir.path().join(name))?;
     }
+    // The spider-stats.parquet that it names, so that the run compares
+    // its spiders with it without downloading it.
+    write_previous_spider_stats(
+        &workdir
+            .path()
+            .join("spider-stats-20251229-a1b2c3d4.parquet"),
+    )?;
 
     Command::new(cargo_bin!("osmdiffs"))
         .arg("run")
@@ -71,6 +78,104 @@ fn run_pipeline_on_fixtures(extra_args: &[&str]) -> Result<TempDir> {
         .success();
 
     Ok(workdir)
+}
+
+/// Writes last week's `spider-stats.parquet`, with just the columns
+/// that `summarize_spider_churn` reads: compared with this week's,
+/// `winterthur_ch` and `misenso_ch` lost more than half their
+/// features, `removed_ch` is gone, and `misenso_ch` matched 90% of its
+/// rows, but none this week.
+fn write_previous_spider_stats(path: &Path) -> Result<()> {
+    use arrow::array::{ArrayRef, RecordBatch, StringArray, UInt64Array};
+    use std::sync::Arc;
+
+    let spiders = [
+        "denner_ch",
+        "empty",
+        "mediamarkt",
+        "misenso_ch",
+        "removed_ch",
+        "tchibo",
+        "winterthur_ch",
+    ];
+    let numbers = |v: [u64; 7]| Arc::new(UInt64Array::from(v.to_vec())) as ArrayRef;
+    let batch = RecordBatch::try_from_iter([
+        (
+            "spider",
+            Arc::new(StringArray::from(spiders.to_vec())) as ArrayRef,
+        ),
+        ("atp_features", numbers([1, 0, 1, 100, 150, 1, 400])),
+        (
+            "fallback_reason",
+            Arc::new(StringArray::from(vec![None::<&str>; 7])) as ArrayRef,
+        ),
+        ("rows", numbers([1, 0, 1, 100, 150, 1, 0])),
+        ("same", numbers([1, 0, 1, 90, 0, 1, 0])),
+        ("located_in", numbers([0, 0, 0, 0, 0, 0, 0])),
+    ])?;
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(std::fs::File::create(path)?, batch.schema(), None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+/// The records of `pipeline.log` with `message`.
+fn log_records(workdir: &Path, message: &str) -> Result<Vec<serde_json::Value>> {
+    let log = std::fs::read_to_string(workdir.join("pipeline.log"))?;
+    let mut records = Vec::new();
+    for line in log.lines() {
+        let record: serde_json::Value = serde_json::from_str(line)?;
+        if record["message"] == message {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+/// Checks what `summarize_spider_churn` logged about the spiders that
+/// [write_previous_spider_stats] set up to change.
+fn assert_spider_churn(workdir: &Path) -> Result<()> {
+    let summary = log_records(workdir, "spider_churn: spiders since last week")?;
+    assert_eq!(summary.len(), 1, "{summary:?}");
+    let fields = &summary[0]["fields"];
+    assert_eq!(fields["spiders"], 6);
+    assert_eq!(fields["new"], 0);
+    assert_eq!(fields["gone"], 1);
+    assert_eq!(fields["halved"], 2);
+    assert_eq!(fields["to_zero"], 0);
+    assert_eq!(fields["match_rate_drops"], 1);
+    assert_eq!(fields["fallbacks"], 0);
+
+    let losses: Vec<(String, String)> = log_records(
+        workdir,
+        "spider_churn: spider lost features since last week",
+    )?
+    .iter()
+    .map(|r| {
+        (
+            r["fields"]["spider"].as_str().unwrap_or_default().into(),
+            r["fields"]["change"].as_str().unwrap_or_default().into(),
+        )
+    })
+    .collect();
+    assert_eq!(
+        losses,
+        [
+            ("winterthur_ch".to_string(), "halved".to_string()),
+            ("removed_ch".to_string(), "gone".to_string()),
+            ("misenso_ch".to_string(), "halved".to_string()),
+        ]
+    );
+    let drops = log_records(
+        workdir,
+        "spider_churn: spider's match rate dropped since last week",
+    )?;
+    assert_eq!(drops.len(), 1, "{drops:?}");
+    assert_eq!(drops[0]["fields"]["spider"], "misenso_ch");
+    assert_eq!(drops[0]["fields"]["previous"], 0.9);
+    assert_eq!(drops[0]["fields"]["current"], 0.0);
+    Ok(())
 }
 
 #[test]
@@ -98,6 +203,7 @@ fn test_pipeline() -> Result<()> {
     }
     assert_publish_artifacts(workdir.path())?;
     assert_spider_stats(&workdir.path().join("spider-stats.parquet"))?;
+    assert_spider_churn(workdir.path())?;
 
     Ok(())
 }
@@ -440,6 +546,8 @@ fn built_files(workdir: &Path) -> Result<BTreeMap<String, SystemTime>> {
             || name == "pipeline.log"
             || name == "datapackage.json"
             || name.ends_with(".cdx.json")
+            // Last week's spider-stats.parquet, an input.
+            || name.starts_with("spider-stats-")
         {
             continue;
         }

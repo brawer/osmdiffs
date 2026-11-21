@@ -58,15 +58,59 @@ impl PreviousRelease {
 /// Reads the manifest at `datapackage_url`, unless `workdir` already
 /// keeps what an earlier attempt of this run found. Returns `None`, and
 /// logs why, if the manifest can't be fetched or makes no sense.
+///
+/// Also downloads the `spider-stats.parquet` that the manifest lists
+/// into `workdir`, under its basename, so that `summarize_spider_churn`
+/// can compare this week's spiders with it (#1020). If that fails, it
+/// logs why and goes on: the file is only needed for the log.
 pub(crate) async fn fetch_previous_release(
     datapackage_url: &str,
     client: &Client,
     workdir: &Path,
 ) -> Result<Option<PreviousRelease>> {
-    if let Some(kept) = read_cached(workdir)? {
-        return Ok(Some(kept));
+    let previous = match read_cached(workdir)? {
+        Some(kept) => Some(kept),
+        None => find_previous_release(datapackage_url, client, workdir).await?,
+    };
+    if let Some(name) = previous.as_ref().and_then(|p| p.spider_stats.as_deref())
+        && let Err(err) = fetch_spider_stats(datapackage_url, name, client, workdir).await
+    {
+        log::warn!(
+            file = name,
+            error = format!("{err:#}");
+            "previous_release: could not download the previous spider-stats.parquet, \
+             so the log won't say how spiders changed since then"
+        );
     }
+    Ok(previous)
+}
 
+/// Downloads `name`, which lives next to `datapackage_url`, into
+/// `workdir`, unless it is already there.
+async fn fetch_spider_stats(
+    datapackage_url: &str,
+    name: &str,
+    client: &Client,
+    workdir: &Path,
+) -> Result<()> {
+    let path = workdir.join(name);
+    if path.exists() {
+        return Ok(());
+    }
+    let url = reqwest::Url::parse(datapackage_url)?.join(name)?;
+    let body = download::get_bytes(client, url.as_str(), Duration::from_secs(120)).await?;
+    let mut tmp = path.clone();
+    tmp.add_extension("tmp");
+    tokio::fs::write(&tmp, &body).await?;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
+async fn find_previous_release(
+    datapackage_url: &str,
+    client: &Client,
+    workdir: &Path,
+) -> Result<Option<PreviousRelease>> {
     let found = async {
         let body = download::get_bytes(client, datapackage_url, Duration::from_secs(60)).await?;
         let package: serde_json::Value = serde_json::from_slice(&body)
@@ -201,6 +245,12 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
+        let stats = server
+            .mock("GET", "/data/spider-stats-20261109-22222222.parquet")
+            .with_body("PAR1")
+            .expect(1)
+            .create_async()
+            .await;
         let url = format!("{}/data/datapackage.json", server.url());
         let workdir = tempfile::tempdir()?;
 
@@ -216,6 +266,16 @@ mod tests {
         let again = fetch_previous_release(&url, &test_client(), workdir.path()).await?;
         assert_eq!(again, first);
         mock.assert_async().await;
+        // Downloaded once, next to the workdir's other files.
+        assert_eq!(
+            std::fs::read(
+                workdir
+                    .path()
+                    .join("spider-stats-20261109-22222222.parquet")
+            )?,
+            b"PAR1"
+        );
+        stats.assert_async().await;
         Ok(())
     }
 
