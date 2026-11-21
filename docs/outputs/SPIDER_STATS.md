@@ -52,8 +52,10 @@ atp_features             UINT64   nullable — features AllThePlaces says the sp
 atp_errors               UINT64   nullable — errors AllThePlaces says the spider logged
 dump_features            UINT64   nullable — features in the spider's file of the dump
 not_for_osm              UINT64   nullable — left out: license doesn't allow OpenStreetMap
-invalid                  UINT64   nullable — left out: no usable geometry, or no spider name
-no_matcher               UINT64   nullable — kept, but no matcher handles their kind
+no_geometry              UINT64   nullable — left out: AllThePlaces gives no geometry
+bad_geometry             UINT64   nullable — left out: geometry we can't use, see below
+no_kind                  UINT64   nullable — left out: no tag says what kind of place it is
+no_matcher               UINT64   nullable — no matcher handles their kind
 in_china                 UINT64   nullable — features in mainland China
 datum                    UTF8     nullable — "wgs84", "gcj02" or "bd09", for in_china
 dataset_attributes       MAP<UTF8, UTF8> nullable — the spider's dataset attributes, such as its license
@@ -124,10 +126,28 @@ brands                   LIST<STRUCT> non-null
 The counts add up like this:
 
 ```
-dump_features  = not_for_osm + invalid + no_matcher + rows
+dump_features  = not_for_osm + no_geometry + bad_geometry + no_kind + no_matcher + rows
 rows           = same + located_in + missing_in_osm
 missing_in_osm = missing_no_candidate + missing_rejected + missing_taken
 ```
+
+`no_geometry` counts features that AllThePlaces gives without a
+geometry (`"geometry": null`, or none at all). `bad_geometry` counts
+features whose geometry is there but unusable: it doesn't parse, or its
+coordinates are out of range. A feature line that isn't valid GeoJSON
+counts as `bad_geometry` too.
+
+`no_kind` counts features that have none of the keys that say what
+kind of place something is: the primary keys of the OpenStreetMap
+wiki's [Map features](https://wiki.openstreetmap.org/wiki/Map_features),
+plus `club`, `police` and `advertising`. Most are address lists, such
+as council datasets that give only `ref` and `addr:*`, or brand-only
+features. There is nothing in them to match.
+
+`no_matcher` counts features of a kind that we don't conflate yet,
+such as `amenity=atm`, `amenity=parcel_locker` or `office=insurance`.
+Up to version 0.8.19, most of these were counted as `invalid`, which
+`no_geometry`, `bad_geometry` and `no_kind` replace.
 
 `atp_features` and `atp_errors` come from AllThePlaces' own statistics
 for the run. `atp_features` normally equals `dump_features`. Where it
