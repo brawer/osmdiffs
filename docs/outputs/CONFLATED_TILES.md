@@ -201,6 +201,13 @@ with `--no-tile-size-limit`.
   `matched` and `deletion_candidate` overview features (where they
   double as the join key to the detail layer) and the z13–14
   `osm`/`link` detail features.
+- `osm:version` — the version of that OpenStreetMap object the run was
+  built from (`osm.modified.version` in `conflated.parquet`). On the
+  z13–14 `osm`/`host`/`link` and `deletion_candidate` detail features,
+  not on the overview, where it would cost the z0 tile another value
+  per feature. A viewer can fetch the object from the OpenStreetMap
+  API by type and id, and compare versions to tell whether it was
+  edited since.
 - `osm:<tag>` for every tag in `osm.tags` — z13–14 `osm`/`link` detail
   features only.
 - `atp:<tag>` for every tag in `atp.tags` — z13–14 `atp`/`link` detail

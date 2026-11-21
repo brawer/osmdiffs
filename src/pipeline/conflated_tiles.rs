@@ -72,7 +72,9 @@
 //! the full design discussion.
 
 use super::tiles::round_importance;
-use crate::utils::parquet::{get_binary, get_f32, get_string, get_struct, get_tags, get_u64};
+use crate::utils::parquet::{
+    get_binary, get_f32, get_string, get_struct, get_tags, get_u32, get_u64,
+};
 use crate::{TileLayer, make_progress_bar};
 use anyhow::{Context, Result};
 use arrow::array::{Array, RecordBatch, StructArray};
@@ -275,8 +277,24 @@ enum TileRow {
 struct OsmSide {
     osm_type: String,
     osm_id: u64,
+    /// `osm.modified.version`: the version of the OSM feature that
+    /// `conflated.parquet` was built from.
+    osm_version: u32,
     osm_tags: Vec<(String, String)>,
     osm_geometry_wkb: Vec<u8>,
+}
+
+impl OsmSide {
+    /// Inserts `osm:type`, `osm:id` and `osm:version` into the
+    /// properties of a detail feature, so that a viewer can fetch the
+    /// feature from the OSM API and tell whether it changed since.
+    /// The overview carries only `osm:type`/`osm:id`, since a version
+    /// would cost the z0 tile another unique value per feature.
+    fn insert_detail_ref(&self, properties: &mut Map<String, Value>) {
+        properties.insert("osm:type".to_string(), Value::String(self.osm_type.clone()));
+        properties.insert("osm:id".to_string(), Value::from(self.osm_id));
+        properties.insert("osm:version".to_string(), Value::from(self.osm_version));
+    }
 }
 
 impl ConflatedTileRow {
@@ -360,8 +378,7 @@ impl ConflatedTileRow {
         let atp_properties = self.atp_detail_properties(fid);
 
         let mut osm_properties = self.detail_properties(fid, osm_part);
-        osm_properties.insert("osm:type".to_string(), Value::String(osm.osm_type.clone()));
-        osm_properties.insert("osm:id".to_string(), Value::from(osm.osm_id));
+        osm.insert_detail_ref(&mut osm_properties);
         for (k, v) in &osm.osm_tags {
             osm_properties.insert(format!("osm:{k}"), Value::String(v.clone()));
         }
@@ -386,8 +403,7 @@ impl ConflatedTileRow {
             for (k, v) in &self.atp_tags {
                 link_properties.insert(format!("atp:{k}"), Value::String(v.clone()));
             }
-            link_properties.insert("osm:type".to_string(), Value::String(osm.osm_type.clone()));
-            link_properties.insert("osm:id".to_string(), Value::from(osm.osm_id));
+            osm.insert_detail_ref(&mut link_properties);
             for (k, v) in &osm.osm_tags {
                 link_properties.insert(format!("osm:{k}"), Value::String(v.clone()));
             }
@@ -469,6 +485,7 @@ impl DeletionTileRow {
         let mut properties = self.common_properties();
         properties.insert("fid".to_string(), Value::from(fid));
         properties.insert("part".to_string(), Value::String("osm".to_string()));
+        properties.insert("osm:version".to_string(), Value::from(self.osm.osm_version));
         if let Some(share) = self.local_share {
             properties.insert(
                 "local_share".to_string(),
@@ -963,6 +980,7 @@ fn osm_side(batch: &RecordBatch, osm: &StructArray, row: usize) -> Result<OsmSid
     Ok(OsmSide {
         osm_type: get_string(osm, "type", row)?,
         osm_id: get_u64(osm, "id", row)?,
+        osm_version: get_u32(get_struct(osm, "modified")?, "version", row)?,
         osm_tags: get_tags(osm, "tags", row)?,
         // Top-level, not nested inside `osm` -- GeoParquet 2.0
         // requires geometry columns to live at the schema root
@@ -1194,6 +1212,7 @@ mod tests {
             osm: Some(OsmSide {
                 osm_type: "node".to_string(),
                 osm_id: 42,
+                osm_version: 3,
                 osm_tags: vec![("shop".to_string(), "bakery".to_string())],
                 osm_geometry_wkb: encode_point(8.50001, 47.20001),
             }),
@@ -1216,6 +1235,7 @@ mod tests {
         // other tag is not.
         assert_eq!(props["osm:id"], 42);
         assert_eq!(props["osm:type"], "node");
+        assert!(props.get("osm:version").is_none());
         assert!(props.get("osm:shop").is_none());
         assert!(props.get("atp:shop").is_none());
     }
@@ -1268,6 +1288,7 @@ mod tests {
         OsmSide {
             osm_type: "way".to_string(),
             osm_id: 99,
+            osm_version: 3,
             osm_tags: vec![("shop".to_string(), "supermarket".to_string())],
             osm_geometry_wkb: encode_point(atp_lon, atp_lat + 0.00045),
         }
@@ -1319,6 +1340,7 @@ mod tests {
             .expect("expected an osm feature");
         assert_eq!(osm_feature["properties"]["osm:shop"], "supermarket");
         assert_eq!(osm_feature["properties"]["osm:id"], 99);
+        assert_eq!(osm_feature["properties"]["osm:version"], 3);
         assert!(
             osm_feature["properties"].get("atp:name").is_none(),
             "osm feature should carry no atp:* properties: {osm_feature}"
@@ -1330,6 +1352,7 @@ mod tests {
             .expect("expected a link feature -- offset is well above the threshold");
         assert_eq!(link["properties"]["atp:name"], "Acme ATP");
         assert_eq!(link["properties"]["osm:shop"], "supermarket");
+        assert_eq!(link["properties"]["osm:version"], 3);
     }
 
     #[test]
@@ -1348,6 +1371,7 @@ mod tests {
         let osm = OsmSide {
             osm_type: "node".to_string(),
             osm_id: 7,
+            osm_version: 3,
             osm_tags: vec![],
             osm_geometry_wkb: encode_point(8.5, 47.2),
         };
@@ -1476,6 +1500,7 @@ mod tests {
         assert!(props.get("spider").is_none());
         assert!(props.get("fid").is_none());
         assert!(props.get("local_share").is_none());
+        assert!(props.get("osm:version").is_none());
         assert!(props.get("osm:shop").is_none());
     }
 
@@ -1493,6 +1518,7 @@ mod tests {
         assert_eq!(props["rule"], "wikidata");
         assert_eq!(props["local_share"], 0.67);
         assert_eq!(props["osm:id"], 99);
+        assert_eq!(props["osm:version"], 3);
         assert_eq!(props["osm:shop"], "supermarket");
         assert!(props.get("spider").is_none());
     }
@@ -1513,7 +1539,7 @@ mod tests {
     fn deletion_batch(local_share: Option<f32>) -> RecordBatch {
         use arrow::array::{
             ArrayRef, BinaryArray, Float32Array, MapBuilder, MapFieldNames, StringArray,
-            StringBuilder, UInt64Array,
+            StringBuilder, UInt32Array, UInt64Array,
         };
         use arrow::buffer::NullBuffer;
         use arrow::datatypes::{DataType, Field, Fields};
@@ -1533,16 +1559,24 @@ mod tests {
         tags.append(true).expect("map entry");
         let tags = Arc::new(tags.finish()) as ArrayRef;
 
+        let modified = StructArray::try_new(
+            Fields::from(vec![Field::new("version", DataType::UInt32, false)]),
+            vec![Arc::new(UInt32Array::from(vec![12_u32])) as ArrayRef],
+            None,
+        )
+        .expect("modified");
         let osm = StructArray::try_new(
             Fields::from(vec![
                 Field::new("type", DataType::Utf8, false),
                 Field::new("id", DataType::UInt64, false),
                 Field::new("tags", tags.data_type().clone(), false),
+                Field::new("modified", modified.data_type().clone(), false),
             ]),
             vec![
                 Arc::new(StringArray::from(vec!["node"])) as ArrayRef,
                 Arc::new(UInt64Array::from(vec![7_u64])),
                 tags,
+                Arc::new(modified),
             ],
             None,
         )
@@ -1603,6 +1637,7 @@ mod tests {
         assert_eq!(row.importance, 0.25);
         assert_eq!(row.osm.osm_type, "node");
         assert_eq!(row.osm.osm_id, 7);
+        assert_eq!(row.osm.osm_version, 12);
         assert_eq!(
             row.osm.osm_tags,
             vec![("brand:wikidata".to_string(), "Q123".to_string())]
