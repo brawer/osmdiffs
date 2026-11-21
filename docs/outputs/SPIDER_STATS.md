@@ -52,6 +52,7 @@ atp_features             UINT64   nullable — features AllThePlaces says the sp
 atp_errors               UINT64   nullable — errors AllThePlaces says the spider logged
 dump_features            UINT64   nullable — features in the spider's file of the dump
 not_for_osm              UINT64   nullable — left out: license doesn't allow OpenStreetMap
+held_back                UINT64   nullable — left out: spider held back until AllThePlaces fixes it
 no_geometry              UINT64   nullable — left out: AllThePlaces gives no geometry
 bad_geometry             UINT64   nullable — left out: geometry we can't use, see below
 no_kind                  UINT64   nullable — left out: no tag says what kind of place it is
@@ -126,10 +127,16 @@ brands                   LIST<STRUCT> non-null
 The counts add up like this:
 
 ```
-dump_features  = not_for_osm + no_geometry + bad_geometry + no_kind + no_matcher + rows
+dump_features  = not_for_osm + held_back + no_geometry + bad_geometry + no_kind + no_matcher + rows
 rows           = same + located_in + missing_in_osm
 missing_in_osm = missing_no_candidate + missing_rejected + missing_taken
 ```
+
+`held_back` counts the features of a spider whose data we leave out
+until AllThePlaces fixes it, because it would mislead mappers. The
+spiders and their AllThePlaces issues are listed in
+`src/pipeline/held_back.rs`; today it is `chargepoint`
+([alltheplaces#20717](https://github.com/alltheplaces/alltheplaces/issues/20717)).
 
 `no_geometry` counts features that AllThePlaces gives without a
 geometry (`"geometry": null`, or none at all). `bad_geometry` counts

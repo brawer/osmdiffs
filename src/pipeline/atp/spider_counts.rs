@@ -13,7 +13,10 @@ use super::run_stats::SpiderRunStats;
 /// Filename, within `workdir`, of the counts that `import_atp` writes.
 const FILENAME: &str = "alltheplaces.spider-counts.tsv";
 
-const HEADER: &str = "spider\tfeatures\tnot_for_osm\tno_geometry\tbad_geometry\tno_kind\tunknown_kind\tin_china\tdatum\tdataset_attributes\texact_coords_hits\tgoogle_camera_coords_hits\tgoogle_camera_coords_control\tgoogle_camera_coords_offset";
+const HEADER: &str = "spider\tfeatures\tnot_for_osm\tno_geometry\tbad_geometry\tno_kind\tunknown_kind\tin_china\tdatum\tdataset_attributes\texact_coords_hits\tgoogle_camera_coords_hits\tgoogle_camera_coords_control\tgoogle_camera_coords_offset\theld_back";
+
+/// The header before `held_back`, which [read] reads as zero.
+const HEADER_14: &str = "spider\tfeatures\tnot_for_osm\tno_geometry\tbad_geometry\tno_kind\tunknown_kind\tin_china\tdatum\tdataset_attributes\texact_coords_hits\tgoogle_camera_coords_hits\tgoogle_camera_coords_control\tgoogle_camera_coords_offset";
 
 /// The headers of earlier versions: before `invalid` was split into
 /// `no_geometry`, `bad_geometry`, `no_kind` and `unknown_kind`, before the file had the
@@ -43,6 +46,10 @@ pub(in crate::pipeline) struct SpiderCounts {
     /// Features left out because their license doesn't allow using them
     /// in OpenStreetMap.
     pub not_for_osm: u64,
+
+    /// Features left out because their spider is held back until
+    /// AllThePlaces fixes its data; see `pipeline::held_back`.
+    pub held_back: u64,
 
     /// Features left out because AllThePlaces gives no geometry for
     /// them (`"geometry": null`, or none at all).
@@ -104,6 +111,7 @@ impl SpiderCounts {
     pub fn written(&self) -> u64 {
         self.features
             - self.not_for_osm
+            - self.held_back
             - self.no_geometry
             - self.bad_geometry
             - self.no_kind
@@ -129,7 +137,7 @@ pub(super) fn write(counts: &mut [SpiderCounts], out: &Path) -> Result<()> {
             .collect();
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             c.spider,
             c.features,
             c.not_for_osm,
@@ -146,6 +154,7 @@ pub(super) fn write(counts: &mut [SpiderCounts], out: &Path) -> Result<()> {
             c.google_camera_coords_offset
                 .map(|o| format!("{o:.7}"))
                 .unwrap_or_default(),
+            c.held_back,
         )?;
     }
     w.into_inner()?.sync_all()?;
@@ -158,7 +167,8 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
     let file = std::fs::File::open(path).with_context(|| format!("could not open {path:?}"))?;
     let mut lines = BufReader::new(file).lines();
     let (num_cols, split) = match lines.next().transpose()?.as_deref() {
-        Some(HEADER) => (14, true),
+        Some(HEADER) => (15, true),
+        Some(HEADER_14) => (14, true),
         Some(HEADER_11) => (11, false),
         Some(HEADER_7) => (7, false),
         Some(OLD_HEADER) => (6, false),
@@ -216,6 +226,7 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
                         .with_context(|| format!("bad offset in {path:?}: {line:?}"))?,
                 ),
             },
+            held_back: camera(11)?,
         });
     }
     Ok(counts)
@@ -267,6 +278,7 @@ pub(super) struct Summary {
     pub spiders: u64,
     pub features: u64,
     pub not_for_osm: u64,
+    pub held_back: u64,
     pub no_geometry: u64,
     pub bad_geometry: u64,
     pub no_kind: u64,
@@ -299,6 +311,7 @@ pub(super) fn summarize(
         s.spiders += 1;
         s.features += c.features;
         s.not_for_osm += c.not_for_osm;
+        s.held_back += c.held_back;
         s.no_geometry += c.no_geometry;
         s.bad_geometry += c.bad_geometry;
         s.no_kind += c.no_kind;
@@ -346,6 +359,7 @@ pub(super) fn log_summary(s: &Summary, has_run_stats: bool) {
         spiders = s.spiders,
         features = s.features,
         not_for_osm = s.not_for_osm,
+        held_back = s.held_back,
         no_geometry = s.no_geometry,
         bad_geometry = s.bad_geometry,
         no_kind = s.no_kind,
@@ -385,6 +399,7 @@ mod tests {
                 spider: "zara".into(),
                 features: 10,
                 not_for_osm: 0,
+                held_back: 0,
                 no_geometry: 1,
                 bad_geometry: 1,
                 no_kind: 2,

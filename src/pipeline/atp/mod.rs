@@ -157,6 +157,7 @@ pub fn import_atp(
 
     // To avoid deadlock, we must not use Rayon threads here.
     // https://dev.to/sgchris/scoped-threads-with-stdthreadscope-in-rust-163-48f9
+    super::held_back::log();
     let (tx, rx) = sync_channel(50_000);
     let (ra, rb) = std::thread::scope(|s| {
         let r1 = s.spawn(|| process_places(rx, progress, workdir, &out));
@@ -361,6 +362,15 @@ fn process_geojson<T: Read>(
                 if is_feature(&line?) {
                     counts.features += 1;
                     counts.not_for_osm += 1;
+                }
+            }
+            return Ok(counts);
+        }
+        if super::held_back::is_held_back(&counts.spider) {
+            for line in lines {
+                if is_feature(&line?) {
+                    counts.features += 1;
+                    counts.held_back += 1;
                 }
             }
             return Ok(counts);
@@ -1244,6 +1254,16 @@ mod tests {
                     "2026-11-01T00:00:00".to_string()
                 ),
             ]
+        );
+
+        let held_back =
+            file(r#""spider:lineage":"S_ATP_BRANDS""#).replace("\"s\"", "\"chargepoint\"");
+        let (tx, rx) = sync_channel(10);
+        let c = process_geojson(Cursor::new(held_back), "output/x.geojson", None, Some(tx))?;
+        assert_eq!(rx.iter().count(), 0);
+        assert_eq!(
+            (c.spider.as_str(), c.features, c.held_back, c.written()),
+            ("chargepoint", 5, 5, 0)
         );
 
         let c = process_geojson(Cursor::new(""), "output/crashed.geojson", None, None)?;
