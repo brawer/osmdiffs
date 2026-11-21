@@ -1033,8 +1033,8 @@ fn assert_shops_jsonl(path: &Path) -> Result<()> {
 /// Winterthur benches that the Zugerland extract can't match (see
 /// `assert_conflated_parquet`'s own "expected 9 conflated rows" /
 /// "expected 3 ATP features matched" assertions above). The overview layers are deliberately minimal
-/// (no tags); the detail layers carry the full tag set, keyed back to
-/// the overview by `fid`.
+/// (no tags); the detail layers carry the full ATP tag set and a few
+/// OSM tags, keyed back to the overview by `fid`.
 fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     let read_features = |name: &str| -> Result<Vec<serde_json::Value>> {
         let path = workdir.join(name);
@@ -1071,7 +1071,12 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     assert!(overview["importance"].is_f64(), "{overview}");
     let detail = &detail_deletion[0]["properties"];
     assert_eq!(detail["part"], "osm");
-    assert_eq!(detail["osm:brand"], "Denner");
+    // Only the name and the kind of place: the web app fetches the
+    // other tags from the OSM API (#1026).
+    assert_eq!(detail["osm:name"], "Denner");
+    assert_eq!(detail["osm:shop"], "supermarket");
+    assert_eq!(detail["osm:version"], 1);
+    assert!(detail.get("osm:brand").is_none(), "{detail}");
     assert!(detail["fid"].is_u64(), "{detail}");
     // One matched Denner and this one, within the radius.
     assert_eq!(detail["local_share"], 0.5);
