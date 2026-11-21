@@ -460,6 +460,17 @@ pub trait Matcher {
     /// score.
     fn rule(&self, candidate: &OsmCandidate) -> &'static str;
 
+    /// Every rule of [Rules::NAMES] that agrees for `candidate`, not
+    /// only the one that decided, for the `match.evidence.rules` column
+    /// of `conflated.parquet`. A rule that comes after the deciding one
+    /// may agree too, such as `brand_name` when `contact` decided; that
+    /// lets one measure a rule's precision on all the rows where it
+    /// fires. Empty for matchers whose rules exclude each other. Only
+    /// called for candidates with a positive score.
+    fn rules(&self, _candidate: &OsmCandidate) -> Rules {
+        Rules::default()
+    }
+
     /// True if the AllThePlaces feature counts for the coverage that
     /// deletion candidates go by (see `pipeline::conflate::deletion`):
     /// an unmatched OSM feature of a brand that ATP covers in its
@@ -512,6 +523,51 @@ pub trait Matcher {
     /// gives all street furniture 10 m.
     fn max_distance(&self) -> Option<ChordAngle> {
         None
+    }
+}
+
+/// A set of the rules that [Matcher::rules] can report, one bit for
+/// each of [Rules::NAMES], so that the candidates of an exclusive
+/// matcher can carry it at no cost in memory.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Rules(u16);
+
+impl Rules {
+    /// The rules of the POI matcher, in the order it tries them.
+    pub const NAMES: [&'static str; 8] = [
+        "official_id",
+        "brand_wikidata",
+        "former_brand",
+        "contact",
+        "brand_name",
+        "brand_in_name",
+        "brand_domain",
+        "address",
+    ];
+
+    /// Adds `rule`, which must be one of [Self::NAMES].
+    pub fn insert(&mut self, rule: &str) {
+        let i = Self::NAMES
+            .iter()
+            .position(|n| *n == rule)
+            .unwrap_or_else(|| panic!("unknown rule {rule:?}"));
+        self.0 |= 1 << i;
+    }
+
+    pub fn contains(self, rule: &str) -> bool {
+        Self::NAMES
+            .iter()
+            .position(|n| *n == rule)
+            .is_some_and(|i| self.0 & (1 << i) != 0)
+    }
+
+    /// The rules in the set, in the order of [Self::NAMES].
+    pub fn names(self) -> impl Iterator<Item = &'static str> {
+        Self::NAMES
+            .into_iter()
+            .enumerate()
+            .filter(move |(i, _)| self.0 & (1 << i) != 0)
+            .map(|(_, n)| n)
     }
 }
 
@@ -596,6 +652,22 @@ pub(crate) fn parse_wikidata_ids(value: &str) -> impl Iterator<Item = u64> + '_ 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_rules() {
+        let mut rules = Rules::default();
+        assert_eq!(rules.names().count(), 0);
+        rules.insert("address");
+        rules.insert("official_id");
+        rules.insert("address");
+        assert!(rules.contains("address"));
+        assert!(!rules.contains("contact"));
+        assert!(!rules.contains("same_id"));
+        assert_eq!(
+            rules.names().collect::<Vec<_>>(),
+            ["official_id", "address"]
+        );
+    }
+
     #[test]
     fn test_is_kind_key() {
         assert!(super::is_kind_key("amenity"));

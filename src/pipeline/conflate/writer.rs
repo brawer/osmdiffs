@@ -28,7 +28,7 @@ use std::{
 use super::ConflatedFeature;
 use crate::{
     geometry::GeometryTally,
-    matchers::OsmCandidate,
+    matchers::{OsmCandidate, Rules},
     pipeline::{decode_feature_id, osm_type_str},
     tables::StringPool,
     utils::UtcTimestamp,
@@ -75,13 +75,25 @@ pub struct ParquetWriter {
     match_relations: StringBuilder,
     match_scores: Float32Builder,
     match_rules: StringBuilder,
+    match_rule_lists: ListBuilder<StringBuilder>,
     match_distances: Float32Builder,
     match_agreeing: ListBuilder<StringBuilder>,
+    match_disagreeing: ListBuilder<StringBuilder>,
     match_local_shares: Float32Builder,
     match_positions: StringBuilder,
     match_position_shifts: Float32Builder,
 
     importance: Float32Builder,
+}
+
+/// A builder for a list of non-null strings, such as
+/// `match.evidence.agreeing`.
+fn list_of_strings() -> ListBuilder<StringBuilder> {
+    ListBuilder::new(StringBuilder::new()).with_field(Field::new(
+        "item",
+        DataType::Utf8,
+        /* nullable */ false,
+    ))
 }
 
 /// What a row of `conflated.parquet` says about its features, for its
@@ -123,6 +135,10 @@ pub(super) struct MatchInfo {
     /// The rule that decided: a matcher's [crate::matchers::Matcher::rule],
     /// or for deletion candidates, the reason.
     pub(super) rule: Option<String>,
+    /// [Self::rule], and every other rule that agrees for the matched
+    /// candidate ([crate::matchers::Matcher::rules]), in the order of
+    /// [crate::matchers::Rules::NAMES]. Empty without a rule.
+    pub(super) rules: Vec<String>,
     /// For deletion candidates by brand, the share of matched OSM
     /// features of the brand nearby; see `conflate::local_coverage`.
     pub(super) local_share: Option<f32>,
@@ -137,11 +153,16 @@ pub(super) struct MatchInfo {
 }
 
 impl MatchInfo {
-    pub(super) fn same(score: f64, rule: &str) -> Self {
+    pub(super) fn same(score: f64, rule: &str, rules: Rules) -> Self {
+        let mut names: Vec<String> = rules.names().map(str::to_string).collect();
+        if !rules.contains(rule) {
+            names.insert(0, rule.to_string());
+        }
         MatchInfo {
             relation: Relation::Same,
             score: Some(score as f32),
             rule: Some(rule.to_string()),
+            rules: names,
             local_share: None,
             position: None,
             position_shift_deg: None,
@@ -163,6 +184,7 @@ impl MatchInfo {
             relation: Relation::MissingInOsm,
             score: None,
             rule: None,
+            rules: Vec::new(),
             local_share: None,
             position: None,
             position_shift_deg: None,
@@ -174,6 +196,7 @@ impl MatchInfo {
             relation: Relation::LocatedIn,
             score: None,
             rule: Some(rule.to_string()),
+            rules: vec![rule.to_string()],
             local_share: None,
             position: None,
             position_shift_deg: None,
@@ -185,6 +208,7 @@ impl MatchInfo {
             relation: Relation::DeletionCandidate,
             score: None,
             rule: Some(rule.to_string()),
+            rules: vec![rule.to_string()],
             local_share: local_share.map(|s| s as f32),
             position: None,
             position_shift_deg: None,
@@ -240,6 +264,8 @@ pub struct ParquetRow {
     distance_m: Option<f32>,
     /// See [super::evidence::agreeing].
     agreeing: Vec<String>,
+    /// See [super::evidence::disagreeing].
+    disagreeing: Vec<String>,
 }
 
 /// Key under which the CycloneDX provenance BOM (see `pipeline::provenance`)
@@ -354,12 +380,10 @@ impl ParquetWriter {
             match_relations: StringBuilder::with_capacity(max_rows_per_group, 1024),
             match_scores: Float32Builder::with_capacity(max_rows_per_group),
             match_rules: StringBuilder::with_capacity(max_rows_per_group, 1024),
+            match_rule_lists: list_of_strings(),
             match_distances: Float32Builder::with_capacity(max_rows_per_group),
-            match_agreeing: ListBuilder::new(StringBuilder::new()).with_field(Field::new(
-                "item",
-                DataType::Utf8,
-                /* nullable */ false,
-            )),
+            match_agreeing: list_of_strings(),
+            match_disagreeing: list_of_strings(),
             match_local_shares: Float32Builder::with_capacity(max_rows_per_group),
             match_positions: StringBuilder::with_capacity(max_rows_per_group, 0),
             match_position_shifts: Float32Builder::with_capacity(max_rows_per_group),
@@ -538,11 +562,19 @@ impl ParquetWriter {
             .append_value(row.matching.relation.as_str());
         self.match_scores.append_option(row.matching.score);
         self.match_rules.append_option(row.matching.rule);
+        for rule in row.matching.rules {
+            self.match_rule_lists.values().append_value(rule);
+        }
+        self.match_rule_lists.append(true);
         self.match_distances.append_option(row.distance_m);
         for tag in row.agreeing {
             self.match_agreeing.values().append_value(tag);
         }
         self.match_agreeing.append(true);
+        for tag in row.disagreeing {
+            self.match_disagreeing.values().append_value(tag);
+        }
+        self.match_disagreeing.append(true);
         self.match_local_shares
             .append_option(row.matching.local_share);
         self.match_positions
@@ -731,8 +763,10 @@ impl ParquetWriter {
             evidence_fields,
             vec![
                 Arc::new(self.match_rules.finish()) as ArrayRef,
+                Arc::new(self.match_rule_lists.finish()) as ArrayRef,
                 Arc::new(self.match_distances.finish()) as ArrayRef,
                 Arc::new(self.match_agreeing.finish()) as ArrayRef,
+                Arc::new(self.match_disagreeing.finish()) as ArrayRef,
                 Arc::new(self.match_local_shares.finish()) as ArrayRef,
                 Arc::new(self.match_positions.finish()) as ArrayRef,
                 Arc::new(self.match_position_shifts.finish()) as ArrayRef,
@@ -797,6 +831,7 @@ impl ParquetRow {
 
         let mut distance_m = None;
         let mut agreeing = Vec::new();
+        let mut disagreeing = Vec::new();
         if let (Some(atp), Some(feature)) = (&atp, &osm) {
             let candidate = OsmCandidate {
                 feature,
@@ -813,6 +848,11 @@ impl ParquetRow {
                     let ll = s2::latlng::LatLng::from(s2::cellid::CellID(atp.s2_cell_id));
                     (ll.lng.deg(), ll.lat.deg())
                 }),
+            );
+            disagreeing = super::evidence::disagreeing(
+                atp.tags.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+                candidate.tags(),
+                &agreeing,
             );
         }
 
@@ -943,6 +983,7 @@ impl ParquetRow {
             matching,
             distance_m,
             agreeing,
+            disagreeing,
         })
     }
 
@@ -1058,9 +1099,19 @@ mod schema {
             "evidence",
             vec![
                 Field::new("rule", DataType::Utf8, NULLABLE),
+                Field::new_list(
+                    "rules",
+                    Field::new("item", DataType::Utf8, NOT_NULLABLE),
+                    NOT_NULLABLE,
+                ),
                 Field::new("distance_m", DataType::Float32, NULLABLE),
                 Field::new_list(
                     "agreeing",
+                    Field::new("item", DataType::Utf8, NOT_NULLABLE),
+                    NOT_NULLABLE,
+                ),
+                Field::new_list(
+                    "disagreeing",
                     Field::new("item", DataType::Utf8, NOT_NULLABLE),
                     NOT_NULLABLE,
                 ),
@@ -1176,8 +1227,25 @@ mod tests {
             atp: Some(atp),
             osm: Some(osm),
             score: 0.0,
-            matching: super::MatchInfo::same(1.0, "test"),
+            matching: super::MatchInfo::same(1.0, "test", Rules::default()),
         }
+    }
+
+    #[test]
+    fn match_info_same_lists_deciding_rule() {
+        let mut rules = Rules::default();
+        rules.insert("brand_name");
+        rules.insert("contact");
+        assert_eq!(
+            MatchInfo::same(0.9, "contact", rules).rules,
+            ["contact", "brand_name"]
+        );
+        // A matcher without [crate::matchers::Matcher::rules].
+        assert_eq!(
+            MatchInfo::same(0.9, "same_id", Rules::default()).rules,
+            ["same_id"]
+        );
+        assert!(MatchInfo::missing_in_osm().rules.is_empty());
     }
 
     fn new_string_pool(dir: &TempDir) -> StringPool<'static> {
