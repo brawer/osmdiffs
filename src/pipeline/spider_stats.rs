@@ -989,7 +989,8 @@ pub(super) fn schema() -> Schema {
         Field::new("atp_errors", DataType::UInt64, true),
         Field::new("dump_features", DataType::UInt64, true),
         Field::new("not_for_osm", DataType::UInt64, true),
-        Field::new("invalid", DataType::UInt64, true),
+        Field::new("bad_geometry", DataType::UInt64, true),
+        Field::new("no_kind", DataType::UInt64, true),
         Field::new("no_matcher", DataType::UInt64, true),
         Field::new("in_china", DataType::UInt64, true),
         Field::new("datum", DataType::Utf8, true),
@@ -1068,7 +1069,8 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
     let mut atp_errors = UInt64Builder::new();
     let mut dump_features = UInt64Builder::new();
     let mut not_for_osm = UInt64Builder::new();
-    let mut invalid = UInt64Builder::new();
+    let mut bad_geometry = UInt64Builder::new();
+    let mut no_kind = UInt64Builder::new();
     let mut no_matcher = UInt64Builder::new();
     let mut in_china = UInt64Builder::new();
     let mut datum = StringBuilder::new();
@@ -1134,9 +1136,15 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         atp_errors.append_option(row.run_stats.map(|r| r.errors));
         dump_features.append_option(row.counts.map(|c| c.features));
         not_for_osm.append_option(row.counts.map(|c| c.not_for_osm));
-        invalid.append_option(row.counts.map(|c| c.invalid));
+        bad_geometry.append_option(row.counts.map(|c| c.bad_geometry));
+        no_kind.append_option(row.counts.map(|c| c.no_kind));
         // Every feature that a matcher handles gets exactly one row.
-        no_matcher.append_option(row.counts.map(|c| c.written().saturating_sub(s.rows)));
+        // The others are of a kind that no matcher handles: left out
+        // by `import_atp` already, or written but without a row.
+        no_matcher.append_option(
+            row.counts
+                .map(|c| c.unknown_kind + c.written().saturating_sub(s.rows)),
+        );
         in_china.append_option(row.counts.map(|c| c.in_china));
         datum.append_option(
             row.counts
@@ -1346,7 +1354,8 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         Arc::new(atp_errors.finish()),
         Arc::new(dump_features.finish()),
         Arc::new(not_for_osm.finish()),
-        Arc::new(invalid.finish()),
+        Arc::new(bad_geometry.finish()),
+        Arc::new(no_kind.finish()),
         Arc::new(no_matcher.finish()),
         Arc::new(in_china.finish()),
         Arc::new(datum.finish()),
@@ -1701,8 +1710,10 @@ mod tests {
         });
         let counts = spider_counts::SpiderCounts {
             spider: "denner".into(),
-            features: 3,
-            invalid: 1,
+            features: 6,
+            bad_geometry: 1,
+            no_kind: 1,
+            unknown_kind: 2,
             exact_coords_hits: 4,
             google_camera_coords_hits: 9,
             google_camera_coords_offset: Some(-0.0022),
@@ -1774,8 +1785,16 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        // 3 features, 1 invalid, 2 conflated rows: none without a matcher.
-        assert_eq!(u64s("no_matcher").value(0), 0);
+        // 6 features: 1 with bad geometry, 1 without a kind, 2 of an
+        // unknown kind, and 2 conflated rows.
+        assert_eq!(
+            (
+                u64s("bad_geometry").value(0),
+                u64s("no_kind").value(0),
+                u64s("no_matcher").value(0),
+            ),
+            (1, 1, 2)
+        );
         assert_eq!(
             (
                 u64s("exact_coords_hits").value(0),

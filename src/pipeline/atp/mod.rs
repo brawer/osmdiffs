@@ -400,9 +400,20 @@ fn process_geojson<T: Read>(
         };
 
         // Handle individual features.
-        let Some(place) = make_place(trimmed, collection_time) else {
-            counts.invalid += 1;
-            continue;
+        let place = match make_place(trimmed, &counts.spider, collection_time) {
+            std::result::Result::Ok(place) => place,
+            Err(Skip::BadGeometry) => {
+                counts.bad_geometry += 1;
+                continue;
+            }
+            Err(Skip::NoKind) => {
+                counts.no_kind += 1;
+                continue;
+            }
+            Err(Skip::UnknownKind) => {
+                counts.unknown_kind += 1;
+                continue;
+            }
         };
         if osm.is_some() && datum::place_in_mainland_china(&place) {
             in_china.push(place);
@@ -547,16 +558,33 @@ fn is_usable_for_osm(fc: &geojson::FeatureCollection) -> bool {
     }
 }
 
-fn make_place(geojson: &str, timestamp: time::UtcDateTime) -> Option<Place> {
-    let parsed = geojson.parse::<GeoJson>().ok()?;
+/// Why [make_place] left a feature out; counted in [spider_counts::SpiderCounts].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Skip {
+    /// No geometry we understand, or not a GeoJSON feature at all.
+    BadGeometry,
+    /// No tag that says what kind of place it is.
+    NoKind,
+    /// A kind that no matcher handles.
+    UnknownKind,
+}
+
+/// Makes a [Place] from one GeoJSON feature of `spider_name`'s file. A
+/// feature without `@spider` gets `spider_name`, the name its file gives.
+fn make_place(
+    geojson: &str,
+    spider_name: &str,
+    timestamp: time::UtcDateTime,
+) -> std::result::Result<Place, Skip> {
+    let parsed = geojson.parse::<GeoJson>().map_err(|_| Skip::BadGeometry)?;
     // Borrows `parsed`, so it's still available for the by-value
     // destructure below.
-    let shape = parse_geometry(&parsed)?;
-    let coord = find_point(&shape)?.0;
+    let shape = parse_geometry(&parsed).ok_or(Skip::BadGeometry)?;
+    let coord = find_point(&shape).ok_or(Skip::BadGeometry)?.0;
     let GeoJson::Feature(feature) = parsed else {
-        return None;
+        return Err(Skip::BadGeometry);
     };
-    let properties = feature.properties?;
+    let properties = feature.properties.unwrap_or_default();
 
     let mut spider: Option<String> = None;
 
@@ -566,6 +594,7 @@ fn make_place(geojson: &str, timestamp: time::UtcDateTime) -> Option<Place> {
     let mut tags =
         Vec::<(String, String)>::with_capacity(if num_tags > 3 { num_tags - 3 } else { num_tags });
     let mut mask = MatchMask::default();
+    let mut has_kind = false;
 
     for (key, val) in properties {
         // All The Places inserts an "nsi_id" for any features
@@ -596,16 +625,27 @@ fn make_place(geojson: &str, timestamp: time::UtcDateTime) -> Option<Place> {
         }
 
         mask.add_tag(&key, &value);
+        has_kind |= crate::matchers::is_kind_key(&key);
         tags.push((key, value));
     }
+    if mask.is_empty() {
+        return Err(if has_kind {
+            Skip::UnknownKind
+        } else {
+            Skip::NoKind
+        });
+    }
+    // With a non-empty mask, only coordinates out of range are left
+    // for `Place::new` to reject.
     Place::new(
         &coord,
-        spider?,
+        spider.unwrap_or_else(|| spider_name.to_string()),
         mask,
         tags,
         &shape,
         crate::utils::UtcTimestamp(timestamp),
     )
+    .ok_or(Skip::BadGeometry)
 }
 
 /// Parses a GeoJSON Feature's geometry, as given -- `None` if `geojson`
@@ -751,7 +791,7 @@ mod tests {
     fn test_make_place() {
         let timestamp =
             UtcDateTime::parse("2026-07-01T13:14:14Z", &Iso8601::PARSING).expect("timestamp");
-        let place = super::make_place(PLAYGROUND, timestamp).expect("place");
+        let place = super::make_place(PLAYGROUND, "file_name", timestamp).expect("place");
         assert_eq!(place.spider, "winterthur_ch");
         assert_eq!(place.fetched.0, timestamp);
         assert_eq!(
@@ -769,7 +809,48 @@ mod tests {
 
     #[test]
     fn test_make_place_for_road() {
-        assert!(super::make_place(BICYCLE_ROAD, UtcDateTime::now()).is_none());
+        assert_eq!(
+            super::make_place(BICYCLE_ROAD, "s", UtcDateTime::now()).err(),
+            Some(Skip::UnknownKind)
+        );
+    }
+
+    #[test]
+    fn test_make_place_skips() {
+        let make = |geometry: &str, properties: &str| {
+            let json =
+                format!(r#"{{"type":"Feature","geometry":{geometry},"properties":{properties}}}"#);
+            super::make_place(&json, "file_name", UtcDateTime::now())
+        };
+        let point = r#"{"type":"Point","coordinates":[8.5,47.4]}"#;
+        assert_eq!(
+            make("null", r#"{"shop":"bakery"}"#).err(),
+            Some(Skip::BadGeometry)
+        );
+        assert_eq!(
+            make(
+                r#"{"type":"Point","coordinates":[8.5,95.0]}"#,
+                r#"{"shop":"bakery"}"#
+            )
+            .err(),
+            Some(Skip::BadGeometry)
+        );
+        assert_eq!(
+            super::make_place("{not json", "s", UtcDateTime::now()).err(),
+            Some(Skip::BadGeometry)
+        );
+        assert_eq!(
+            make(point, r#"{"ref":"1","addr:city":"Leeds"}"#).err(),
+            Some(Skip::NoKind)
+        );
+        assert_eq!(make(point, "null").err(), Some(Skip::NoKind));
+        assert_eq!(
+            make(point, r#"{"amenity":"atm"}"#).err(),
+            Some(Skip::UnknownKind)
+        );
+        // Without `@spider`, the file names the spider.
+        let place = make(point, r#"{"shop":"bakery"}"#).expect("place");
+        assert_eq!(place.spider, "file_name");
     }
 
     fn point_shape(x: f64, y: f64) -> geo::Geometry<f64> {
@@ -796,8 +877,8 @@ mod tests {
                ]
            }
         }"#;
-        let place =
-            super::make_place(SHOP_LINESTRING, UtcDateTime::now()).expect("place with shop tag");
+        let place = super::make_place(SHOP_LINESTRING, "s", UtcDateTime::now())
+            .expect("place with shop tag");
         let geo::Geometry::LineString(line_string) = place.shape() else {
             panic!("expected a LineString shape, got {:?}", place.shape());
         };
@@ -1098,21 +1179,32 @@ mod tests {
         use std::io::Cursor;
         let feature = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[8.5,47.4]},"properties":{"@spider":"s","shop":"bakery"}}"#;
         let no_geometry = r#"{"type":"Feature","geometry":null,"properties":{"@spider":"s"}}"#;
+        let no_kind = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[8.5,47.4]},"properties":{"@spider":"s","ref":"7"}}"#;
+        let atm = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[8.5,47.4]},"properties":{"@spider":"s","amenity":"atm"}}"#;
         let file = |attrs: &str| {
             format!(
-                "{{\"type\":\"FeatureCollection\",\"dataset_attributes\":{{\"@spider\":\"s\",\"spider:collection_time\":\"2026-11-01T00:00:00\",{attrs}}},\"features\":[\n{feature},\n{no_geometry},\n{feature}\n]}}\n"
+                "{{\"type\":\"FeatureCollection\",\"dataset_attributes\":{{\"@spider\":\"s\",\"spider:collection_time\":\"2026-11-01T00:00:00\",{attrs}}},\"features\":[\n{feature},\n{no_geometry},\n{no_kind},\n{atm},\n{feature}\n]}}\n"
             )
         };
         let (tx, rx) = sync_channel(10);
         let usable = file(r#""spider:lineage":"S_ATP_BRANDS""#);
         let c = process_geojson(Cursor::new(usable), "output/x.geojson", None, Some(tx))?;
         assert_eq!(rx.iter().count(), 2);
-        assert_eq!((c.spider.as_str(), c.features, c.invalid), ("s", 3, 1));
+        assert_eq!(
+            (
+                c.spider.as_str(),
+                c.features,
+                c.bad_geometry,
+                c.no_kind,
+                c.unknown_kind
+            ),
+            ("s", 5, 1, 1, 1)
+        );
         assert_eq!(c.written(), 2);
 
         let licensed = file(r#""license:wikidata":"Q20007257""#);
         let c = process_geojson(Cursor::new(licensed), "output/x.geojson", None, None)?;
-        assert_eq!((c.features, c.not_for_osm, c.written()), (3, 3, 0));
+        assert_eq!((c.features, c.not_for_osm, c.written()), (5, 5, 0));
         // Kept even for a spider whose features we leave out, since
         // the license says why.
         assert_eq!(

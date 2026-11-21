@@ -13,12 +13,16 @@ use super::run_stats::SpiderRunStats;
 /// Filename, within `workdir`, of the counts that `import_atp` writes.
 const FILENAME: &str = "alltheplaces.spider-counts.tsv";
 
-const HEADER: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum\tdataset_attributes\texact_coords_hits\tgoogle_camera_coords_hits\tgoogle_camera_coords_control\tgoogle_camera_coords_offset";
+const HEADER: &str = "spider\tfeatures\tnot_for_osm\tbad_geometry\tno_kind\tunknown_kind\tin_china\tdatum\tdataset_attributes\texact_coords_hits\tgoogle_camera_coords_hits\tgoogle_camera_coords_control\tgoogle_camera_coords_offset";
 
-/// The headers of earlier versions, before the file had the camera
-/// counts, and before it had `dataset_attributes`. [read] still reads
-/// such files, with what they lack as zero or empty, and [is_current]
-/// tells `import_atp` to count again where it can.
+/// The headers of earlier versions: before `invalid` was split into
+/// `bad_geometry`, `no_kind` and `unknown_kind`, before the file had the
+/// camera counts, and before it had `dataset_attributes`. [read] still
+/// reads such files, with what they lack as zero or empty, and
+/// [is_current] tells `import_atp` to count again where it can. Their
+/// `invalid` column, which also counted the features without a kind we
+/// know, is read as `bad_geometry`.
+const HEADER_11: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum\tdataset_attributes\texact_coords_hits\tgoogle_camera_coords_hits\tgoogle_camera_coords_control\tgoogle_camera_coords_offset";
 const HEADER_7: &str =
     "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum\tdataset_attributes";
 const OLD_HEADER: &str = "spider\tfeatures\tnot_for_osm\tinvalid\tin_china\tdatum";
@@ -40,9 +44,21 @@ pub(in crate::pipeline) struct SpiderCounts {
     /// in OpenStreetMap.
     pub not_for_osm: u64,
 
-    /// Features left out because they have no geometry we understand,
-    /// or don't name their spider.
-    pub invalid: u64,
+    /// Features left out because they have no geometry we understand:
+    /// none at all, one that doesn't parse, or coordinates out of range.
+    /// Also counts feature lines that aren't valid GeoJSON.
+    pub bad_geometry: u64,
+
+    /// Features left out because none of their tags says what kind of
+    /// place they are (see [crate::matchers::is_kind_key]), such as
+    /// address lists with only `ref` and `addr:*` tags.
+    pub no_kind: u64,
+
+    /// Features left out because they have a kind, but no matcher
+    /// handles it, such as `amenity=atm`. `spider-stats` counts them
+    /// under `no_matcher`, together with the features that are written
+    /// but don't get a row.
+    pub unknown_kind: u64,
 
     /// Features in mainland China.
     pub in_china: u64,
@@ -82,7 +98,7 @@ pub(in crate::pipeline) struct SpiderCounts {
 impl SpiderCounts {
     /// Features that went into `alltheplaces.parquet`.
     pub fn written(&self) -> u64 {
-        self.features - self.not_for_osm - self.invalid
+        self.features - self.not_for_osm - self.bad_geometry - self.no_kind - self.unknown_kind
     }
 }
 
@@ -104,11 +120,13 @@ pub(super) fn write(counts: &mut [SpiderCounts], out: &Path) -> Result<()> {
             .collect();
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             c.spider,
             c.features,
             c.not_for_osm,
-            c.invalid,
+            c.bad_geometry,
+            c.no_kind,
+            c.unknown_kind,
             c.in_china,
             c.datum,
             serde_json::Value::Object(attrs),
@@ -129,20 +147,29 @@ pub(super) fn write(counts: &mut [SpiderCounts], out: &Path) -> Result<()> {
 pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
     let file = std::fs::File::open(path).with_context(|| format!("could not open {path:?}"))?;
     let mut lines = BufReader::new(file).lines();
-    let num_cols = match lines.next().transpose()?.as_deref() {
-        Some(HEADER) => 11,
-        Some(HEADER_7) => 7,
-        Some(OLD_HEADER) => 6,
+    let (num_cols, split) = match lines.next().transpose()?.as_deref() {
+        Some(HEADER) => (13, true),
+        Some(HEADER_11) => (11, false),
+        Some(HEADER_7) => (7, false),
+        Some(OLD_HEADER) => (6, false),
         _ => anyhow::bail!("{path:?} doesn't start with the expected header"),
     };
     let mut counts = Vec::new();
     for line in lines {
         let line = line?;
-        let cols: Vec<&str> = line.split('\t').collect();
+        let mut cols: Vec<&str> = line.split('\t').collect();
         if cols.len() != num_cols {
             anyhow::bail!("bad line in {path:?}: {line:?}");
         }
-        let [spider, features, not_for_osm, invalid, in_china, datum] = cols[..6] else {
+        // The columns of the split counts, taken out so that the rest
+        // are where the older versions had them.
+        let (no_kind, unknown_kind) = if split {
+            let unknown_kind = cols.remove(5);
+            (Some(cols.remove(4)), Some(unknown_kind))
+        } else {
+            (None, None)
+        };
+        let [spider, features, not_for_osm, bad_geometry, in_china, datum] = cols[..6] else {
             unreachable!("checked the number of columns");
         };
         let dataset_attributes = match cols.get(6) {
@@ -159,7 +186,9 @@ pub(in crate::pipeline) fn read(path: &Path) -> Result<Vec<SpiderCounts>> {
             spider: spider.to_string(),
             features: num(features)?,
             not_for_osm: num(not_for_osm)?,
-            invalid: num(invalid)?,
+            bad_geometry: num(bad_geometry)?,
+            no_kind: no_kind.map_or(Ok(0), num)?,
+            unknown_kind: unknown_kind.map_or(Ok(0), num)?,
             in_china: num(in_china)?,
             datum: datum.to_string(),
             dataset_attributes,
@@ -224,7 +253,9 @@ pub(super) struct Summary {
     pub spiders: u64,
     pub features: u64,
     pub not_for_osm: u64,
-    pub invalid: u64,
+    pub bad_geometry: u64,
+    pub no_kind: u64,
+    pub unknown_kind: u64,
     pub written: u64,
     pub converted: u64,
     /// Spiders whose positions look like Google Maps camera centres;
@@ -253,7 +284,9 @@ pub(super) fn summarize(
         s.spiders += 1;
         s.features += c.features;
         s.not_for_osm += c.not_for_osm;
-        s.invalid += c.invalid;
+        s.bad_geometry += c.bad_geometry;
+        s.no_kind += c.no_kind;
+        s.unknown_kind += c.unknown_kind;
         s.written += c.written();
         if c.datum == "gcj02" || c.datum == "bd09" {
             s.converted += c.in_china;
@@ -297,7 +330,9 @@ pub(super) fn log_summary(s: &Summary, has_run_stats: bool) {
         spiders = s.spiders,
         features = s.features,
         not_for_osm = s.not_for_osm,
-        invalid = s.invalid,
+        bad_geometry = s.bad_geometry,
+        no_kind = s.no_kind,
+        unknown_kind = s.unknown_kind,
         written = s.written,
         converted_datum = s.converted,
         google_camera_coords_spiders = s.google_camera_coords,
@@ -333,7 +368,9 @@ mod tests {
                 spider: "zara".into(),
                 features: 10,
                 not_for_osm: 0,
-                invalid: 1,
+                bad_geometry: 1,
+                no_kind: 2,
+                unknown_kind: 3,
                 in_china: 4,
                 datum: "gcj02".into(),
                 dataset_attributes: vec![
@@ -351,7 +388,7 @@ mod tests {
         assert_eq!(written[0].spider, "crashed");
         assert_eq!(read(&out)?, written);
         assert!(is_current(&out)?);
-        assert_eq!(written[1].written(), 9);
+        assert_eq!(written[1].written(), 4);
         Ok(())
     }
 
@@ -363,6 +400,27 @@ mod tests {
         let c = read(&out)?;
         assert_eq!((c[0].features, c[0].datum.as_str()), (10, "gcj02"));
         assert!(c[0].dataset_attributes.is_empty());
+        assert!(!is_current(&out)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_header_before_split() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let out = path(dir.path());
+        std::fs::write(
+            &out,
+            format!("{HEADER_11}\nzara\t10\t0\t1\t4\tgcj02\t{{}}\t3\t2\t1\t-0.0022000\n"),
+        )?;
+        let c = &read(&out)?[0];
+        assert_eq!(
+            (c.bad_geometry, c.no_kind, c.unknown_kind, c.in_china),
+            (1, 0, 0, 4)
+        );
+        assert_eq!(
+            (c.exact_coords_hits, c.google_camera_coords_control),
+            (3, 1)
+        );
         assert!(!is_current(&out)?);
         Ok(())
     }

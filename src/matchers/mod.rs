@@ -333,6 +333,51 @@ impl MatchMask {
     }
 }
 
+/// True if `key` says what kind of place a feature is, such as `shop`
+/// or `aeroway`: the primary keys of the OpenStreetMap wiki's
+/// [Map features](https://wiki.openstreetmap.org/wiki/Map_features),
+/// plus `club`, `police` and `advertising`. `import_atp` counts a
+/// feature whose [MatchMask] is empty as `no_kind` if it has none of
+/// them, and as `unknown_kind` otherwise, so that we can tell features
+/// that say nothing about what they are, such as address lists, from
+/// kinds we don't match yet, such as `amenity=atm`.
+pub fn is_kind_key(key: &str) -> bool {
+    matches!(
+        key,
+        "advertising"
+            | "aerialway"
+            | "aeroway"
+            | "amenity"
+            | "barrier"
+            | "boundary"
+            | "building"
+            | "club"
+            | "craft"
+            | "emergency"
+            | "geological"
+            | "healthcare"
+            | "highway"
+            | "historic"
+            | "landuse"
+            | "leisure"
+            | "man_made"
+            | "military"
+            | "natural"
+            | "office"
+            | "place"
+            | "police"
+            | "power"
+            | "public_transport"
+            | "railway"
+            | "route"
+            | "shop"
+            | "telecom"
+            | "tourism"
+            | "water"
+            | "waterway"
+    )
+}
+
 /// Return the maximal spatial distance we allow so that another feature
 /// is still considered close enough to be a potential match.
 /// The returned distance depends on the MatchMask, which is derived
@@ -551,6 +596,15 @@ pub(crate) fn parse_wikidata_ids(value: &str) -> impl Iterator<Item = u64> + '_ 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_is_kind_key() {
+        assert!(super::is_kind_key("amenity"));
+        assert!(super::is_kind_key("aeroway"));
+        assert!(!super::is_kind_key("addr:city"));
+        assert!(!super::is_kind_key("ref"));
+        assert!(!super::is_kind_key("brand"));
+    }
+
     use super::*;
     use s2::{cell::Cell, cellid::CellID, latlng::LatLng};
     use tempfile::TempDir;
