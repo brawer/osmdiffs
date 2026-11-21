@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.0](https://github.com/brawer/osmdiffs/compare/v0.8.19...v0.9.0) (2026-11-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **conflate:** `match.evidence.agreeing` in conflated.parquet is now `match.evidence.agreeing_tags`.
+* **spider-stats:** split `invalid` into `no_geometry`, `bad_geometry` and `no_kind` ([#1013](https://github.com/brawer/osmdiffs/issues/1013))
+
+### 🆕 Enhancements
+
+* **conflate:** record all agreeing rules, and the tags that disagree ([#1022](https://github.com/brawer/osmdiffs/issues/1022)) ([a21af64](https://github.com/brawer/osmdiffs/commit/a21af64ea1599ced309bca4159ea33933f7dafb3))
+* **matching:** match charge points, and hold back chargepoint ([#1014](https://github.com/brawer/osmdiffs/issues/1014)) ([f113935](https://github.com/brawer/osmdiffs/commit/f1139353147034b077db947d9b680b577bf61a20))
+* **spider-stats:** split `invalid` into `no_geometry`, `bad_geometry` and `no_kind` ([#1013](https://github.com/brawer/osmdiffs/issues/1013)) ([985392f](https://github.com/brawer/osmdiffs/commit/985392f9575819d299d817f39b4519c0556227c0))
+
+
+### 🐞 Bug Fixes
+
+* **deletion:** compare the main category, not only the match mask ([#1011](https://github.com/brawer/osmdiffs/issues/1011)) ([cad49f4](https://github.com/brawer/osmdiffs/commit/cad49f4d13fa5d4945cc571b7d41d4b13cbcc6f7))
+
 ## [0.8.19](https://github.com/brawer/osmdiffs/compare/v0.8.18...v0.8.19) (2026-11-19)
 
 
