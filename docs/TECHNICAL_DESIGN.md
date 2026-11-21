@@ -526,7 +526,9 @@ fetch away.
     `part: "host"`; any other unmatched row yields one (its ATP point
     with the full `atp:*` set). Every detail feature carries `fid`, the
     row’s ordinal in `conflated.parquet` — it groups a matched row’s
-    up-to-three features and cross-references the parquet. To go from a
+    up-to-three features and cross-references the parquet. Detail
+    features with an OSM side also carry `osm:version`, from
+    `osm.modified.version`. To go from a
     clicked overview feature to the full record: `matched` features
     join on `osm:type`+`osm:id`; `unmatched` (which have no id —
     `conflated.parquet` carries none for the ATP side) on the nearest
