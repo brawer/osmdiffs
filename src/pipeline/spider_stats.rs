@@ -14,7 +14,7 @@
 //! `alltheplaces.stats.json` from `import_atp`, and `osm-brands.tsv` and
 //! `brand-names.tsv` from `collect_wikidata_ids`.
 
-use super::atp::{run_stats, spider_counts};
+use super::atp::{fallback, run_stats, spider_counts};
 use super::brand_totals;
 use super::conflate::deletion::{atp_names, candidate_names};
 use super::conflate::diagnostics::{self, SpiderDiagnostics};
@@ -130,7 +130,17 @@ pub fn compute_spider_stats(
             .into_iter()
             .map(|c| (c.spider.clone(), c))
             .collect();
-    let run_stats = run_stats::read(workdir)?.unwrap_or_default();
+    let mut run_stats = run_stats::read(workdir)?.unwrap_or_default();
+    let fallbacks = fallback::read(workdir)?.unwrap_or_default();
+    let fallbacks = fallbacks.by_spider();
+    // A spider whose features come from an older run gets that run's
+    // statistics, which describe its features.
+    for f in fallbacks.values() {
+        run_stats.insert(f.spider.clone(), f.run_stats());
+    }
+    let latest_run = super::read_cached_atp_metadata(workdir)
+        .map(|m| m.run_id)
+        .ok();
     let osm_brands = brand_totals::read_features(workdir)?;
     let names = brand_totals::read_names(workdir)?;
     let diagnostics = diagnostics::read(&diagnostics::path(workdir))?;
@@ -147,6 +157,11 @@ pub fn compute_spider_stats(
             spider,
             counts: counts.get(spider),
             run_stats: run_stats.get(spider),
+            fallback: fallbacks.get(spider).copied(),
+            atp_run: fallbacks
+                .get(spider)
+                .map(|f| f.run_id.as_str())
+                .or(latest_run.as_deref()),
             diagnostics: diagnostics.get(spider),
             stats: stats.spiders.get(spider).unwrap_or(&empty),
         })
@@ -838,6 +853,10 @@ struct Row<'a> {
     spider: &'a str,
     counts: Option<&'a spider_counts::SpiderCounts>,
     run_stats: Option<&'a run_stats::SpiderRunStats>,
+    /// Set if the spider's features come from an older run.
+    fallback: Option<&'a fallback::Fallback>,
+    /// The AllThePlaces run that the spider's features come from.
+    atp_run: Option<&'a str>,
     diagnostics: Option<&'a SpiderDiagnostics>,
     stats: &'a Spider,
 }
@@ -987,6 +1006,8 @@ pub(super) fn schema() -> Schema {
         Field::new("spider", DataType::Utf8, false),
         Field::new("atp_features", DataType::UInt64, true),
         Field::new("atp_errors", DataType::UInt64, true),
+        Field::new("atp_run", DataType::Utf8, true),
+        Field::new("fallback", DataType::Utf8, true),
         Field::new("dump_features", DataType::UInt64, true),
         Field::new("not_for_osm", DataType::UInt64, true),
         Field::new("held_back", DataType::UInt64, true),
@@ -1069,6 +1090,8 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
     let mut spider = StringBuilder::new();
     let mut atp_features = UInt64Builder::new();
     let mut atp_errors = UInt64Builder::new();
+    let mut atp_run = StringBuilder::new();
+    let mut fallback = StringBuilder::new();
     let mut dump_features = UInt64Builder::new();
     let mut not_for_osm = UInt64Builder::new();
     let mut held_back = UInt64Builder::new();
@@ -1138,6 +1161,8 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         spider.append_value(row.spider);
         atp_features.append_option(row.run_stats.map(|r| r.features));
         atp_errors.append_option(row.run_stats.map(|r| r.errors));
+        atp_run.append_option(row.atp_run);
+        fallback.append_option(row.fallback.map(|f| f.breakage.as_str()));
         dump_features.append_option(row.counts.map(|c| c.features));
         not_for_osm.append_option(row.counts.map(|c| c.not_for_osm));
         held_back.append_option(row.counts.map(|c| c.held_back));
@@ -1358,6 +1383,8 @@ fn batch(rows: &[Row], lookups: &Lookups, schema: &Arc<Schema>) -> Result<Record
         Arc::new(spider.finish()),
         Arc::new(atp_features.finish()),
         Arc::new(atp_errors.finish()),
+        Arc::new(atp_run.finish()),
+        Arc::new(fallback.finish()),
         Arc::new(dump_features.finish()),
         Arc::new(not_for_osm.finish()),
         Arc::new(held_back.finish()),
@@ -1533,6 +1560,8 @@ mod tests {
             spider: "x",
             counts: None,
             run_stats: None,
+            fallback: None,
+            atp_run: None,
             diagnostics: None,
             stats: &stats,
         }];
@@ -1733,11 +1762,22 @@ mod tests {
             ..Default::default()
         };
         let empty = Spider::default();
+        let fallback = fallback::Fallback {
+            spider: "denner".into(),
+            breakage: fallback::Breakage::Unfinished,
+            latest_features: None,
+            run_id: "2026-11-07-13-32-34".into(),
+            output_url: "https://example.org/output.zip".into(),
+            features: 7,
+            errors: 0,
+        };
         let rows = [
             Row {
                 spider: "denner",
                 counts: Some(&counts),
                 run_stats: None,
+                fallback: Some(&fallback),
+                atp_run: Some("2026-11-07-13-32-34"),
                 diagnostics: None,
                 stats: &stats,
             },
@@ -1745,6 +1785,8 @@ mod tests {
                 spider: "unknown",
                 counts: None,
                 run_stats: None,
+                fallback: None,
+                atp_run: None,
                 diagnostics: None,
                 stats: &empty,
             },
@@ -1838,6 +1880,18 @@ mod tests {
             .clone();
         assert_eq!(oh.value(0), "Mo-Sa 08:00-20:00");
         assert!(oh.is_null(1));
+        let strings = |name: &str| {
+            let column = batch.column_by_name(name).unwrap();
+            let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+            (0..2)
+                .map(|i| (!column.is_null(i)).then(|| column.value(i).to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            strings("atp_run"),
+            [Some("2026-11-07-13-32-34".to_string()), None]
+        );
+        assert_eq!(strings("fallback"), [Some("unfinished".to_string()), None]);
 
         let attributes = get_tags(&batch, "dataset_attributes", 0)?;
         assert_eq!(attributes, counts.dataset_attributes);
