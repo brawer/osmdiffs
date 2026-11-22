@@ -1,8 +1,8 @@
 //! Matches street infrastructure: post boxes, defibrillators (AEDs),
 //! benches, fire hydrants, public bookcases, bicycle parking, waste
-//! baskets, fountains, toilets, bike-share stations and the charge
-//! points of charging stations for now, with street lamps and the like
-//! to follow.
+//! baskets, fountains, toilets, bike-share stations, the charge
+//! points of charging stations and parcel lockers for now, with street
+//! lamps and the like to follow.
 //!
 //! Such features have no brand and rarely a name, and many of them
 //! stand close together, so the match rests on position. Each kind has
@@ -44,6 +44,44 @@ const GBFS_ID_MAX_METERS: f64 = 200.0;
 /// OSM's, at stations with the same name on both sides.
 const BIKE_SHARE_NAME_MAX_METERS: f64 = 50.0;
 
+/// A parcel locker with the same ref may be this far away. Lockers
+/// keep their ref when they move, and it is unique within a network:
+/// in Mazowieckie, 90% of the InPost lockers whose ref OSM has are
+/// within 19 m of it, and 99% within 55 m.
+const PARCEL_LOCKER_REF_MAX_METERS: f64 = 100.0;
+
+/// Spiders whose parcel lockers don't count for deletion candidates
+/// ([Matcher::counts_for_coverage]), since they list only part of
+/// their network. `allegro_one_box_pl` stops at exactly 10,000
+/// lockers, and in Mazowieckie, 26% of the Allegro lockers in OSM have
+/// none of its lockers within 100 m
+/// ([alltheplaces#20728](https://github.com/alltheplaces/alltheplaces/issues/20728)).
+const PARTIAL_LOCKER_SPIDERS: &[&str] = &["allegro_one_box_pl"];
+
+/// The brand of the parcel lockers of a spider that gives them none:
+/// Deutsche Post's Packstations only have `operator=Deutsche Post`,
+/// where OSM has `brand=DHL Packstation` and `operator=DHL`, and
+/// `brand=Paketbox` for the smaller ones. Without it, a Packstation in
+/// Berlin took an Amazon Locker 22 m away. Remove once
+/// [alltheplaces#20730](https://github.com/alltheplaces/alltheplaces/issues/20730)
+/// is fixed.
+type BrandTags = &'static [(&'static str, &'static str)];
+const LOCKER_BRAND_FALLBACK: &[(&str, BrandTags)] = &[(
+    "deutsche_post_de",
+    &[
+        ("brand", "DHL Packstation"),
+        ("brand:wikidata", "Q1766703"),
+        ("operator:wikidata", "Q489815"),
+    ],
+)];
+
+/// Words of parcel locker brands that say nothing about the network,
+/// for [LockerBrand]: `DPD Pickup Station` and `DHL BOX 24/7` share
+/// no word that counts.
+const GENERIC_LOCKER_WORDS: &[&str] = &[
+    "box", "hub", "locker", "lockers", "parcel", "pickup", "point", "station",
+];
+
 /// What kind of infrastructure a feature is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -68,6 +106,10 @@ enum Kind {
     /// several sockets. A charge point that OSM lacks is `located_in`
     /// the OSM charging station around it; see `pipeline::conflate`.
     ChargePoint,
+    /// A parcel locker (`amenity=parcel_locker`), such as an InPost
+    /// Paczkomat or a DHL Packstation. Several networks often stand
+    /// side by side, so the brands must agree ([LockerBrand]).
+    ParcelLocker,
 }
 
 impl Kind {
@@ -101,6 +143,7 @@ impl Kind {
             ("amenity", "toilets") => Some(Kind::Toilets),
             ("amenity", "bicycle_rental") => Some(Kind::BikeShare),
             ("man_made", "charge_point") => Some(Kind::ChargePoint),
+            ("amenity", "parcel_locker") => Some(Kind::ParcelLocker),
             _ => None,
         }
     }
@@ -118,6 +161,7 @@ impl Kind {
             Kind::Toilets => "toilets",
             Kind::BikeShare => "bicycle_rental",
             Kind::ChargePoint => "charge_point",
+            Kind::ParcelLocker => "parcel_locker",
         }
     }
 
@@ -147,6 +191,8 @@ impl Kind {
             // Japan: docks get added and removed.
             Kind::BikeShare => &[],
             Kind::ChargePoint => &[],
+            // The ref is all that tells lockers apart; see [RefRule].
+            Kind::ParcelLocker => &[],
         }
     }
 
@@ -188,9 +234,17 @@ enum RefRule {
     /// The last word of the ATP ref equals the OSM ref, such as
     /// Steiger Stiftung's `AEDR 1786` and OSM's `1786`.
     LastWord,
-    /// The ATP ref without this prefix equals the OSM ref, such as
-    /// Zürich's fountain `wvz-22` and OSM's `22`.
+    /// The ATP ref without this prefix equals the OSM ref, with or
+    /// without the prefix, such as Zürich's fountain `wvz-22` and OSM's
+    /// `22`.
     StripPrefix(&'static str),
+    /// The last this many characters of the ATP ref equal the OSM ref,
+    /// such as Deutsche Post's Packstation `1-14482182` (in postcode
+    /// 14482) and OSM's `182`.
+    Suffix(usize),
+    /// The end of the ATP `name` after ` - ` equals the OSM ref, such as
+    /// the nickname of `Amazon Locker - Nilias` and OSM's `nilias`.
+    NameSuffix,
 }
 
 /// How to match the features of one kind, or of one spider.
@@ -231,6 +285,40 @@ impl Settings {
             (Kind::Fountain, "stadt_zuerich_ch") => Some((10.0, RefRule::StripPrefix("wvz-"))),
             (Kind::Toilets, "stadt_zuerich_ch") => Some((20.0, RefRule::Ignore)),
             (Kind::Toilets, "changing_places_gb") => Some((100.0, RefRule::Ignore)),
+            // In Mazowieckie, 97% of the InPost lockers and 17% of the
+            // Allegro ones have their ref in OSM, and 99% of the
+            // nearest same-brand lockers within 30 m have the same
+            // ref. In London, 7 of the 8 InPost refs in OSM agree.
+            (Kind::ParcelLocker, "paczkomat_inpost_pl") => Some((30.0, RefRule::Equal)),
+            (Kind::ParcelLocker, "allegro_one_box_pl") => Some((30.0, RefRule::Equal)),
+            (Kind::ParcelLocker, "inpost_gb") => Some((30.0, RefRule::Equal)),
+            // In Berlin, 393 of the 420 OSM Packstations within 20 m
+            // of a Deutsche Post one have its number as `ref`.
+            (Kind::ParcelLocker, "deutsche_post_de") => Some((30.0, RefRule::Suffix(3))),
+            // PUDO's `PCJ00177` is OSM's `00177` or `PCJ00177` for 27
+            // of the 33 close pairs in Japan.
+            // PUDO's positions are rougher: of the 243 OSM PUDO lockers
+            // in Japan, 49 have the nearest ATP one 30–75 m away, while
+            // moving the 7,356 ATP lockers 2 km brings 3 that close.
+            (Kind::ParcelLocker, "pudostation_jp") => Some((75.0, RefRule::StripPrefix("PCJ"))),
+            // OSM has the locker's nickname as `ref` for 66 of the 75
+            // close pairs with a ref in Berlin, and for all 3 in
+            // Massachusetts.
+            (Kind::ParcelLocker, s) if s.starts_with("amazon_locker_") => {
+                Some((30.0, RefRule::NameSuffix))
+            }
+            // myflexbox's `DE-30` is OSM's `30` or `DE-30` for 22 of
+            // the 27 close pairs with a ref in Berlin.
+            (Kind::ParcelLocker, "myflexbox") => Some((30.0, RefRule::StripPrefix("DE-"))),
+            // Packeta's `I_23111` is OSM's `ref:packeta=23111` for all
+            // 1,584 close pairs in Prague and South Moravia.
+            (Kind::ParcelLocker, "packeta") => {
+                return Settings {
+                    max_meters: 30.0,
+                    refs: RefRule::StripPrefix("I_"),
+                    osm_ref_key: "ref:packeta",
+                };
+            }
             (Kind::Bench, "seattle_parks_and_recreation_benches_us") => {
                 return Settings {
                     max_meters: 15.0,
@@ -257,6 +345,11 @@ impl Settings {
             // elsewhere, 3,134 of 26,883 ChargePoint devices have an
             // OSM charge point within 15 m.
             Kind::ChargePoint => (15.0, RefRule::Ignore),
+            // Of the ATP lockers with an OSM locker of the same brand
+            // within 100 m, 90–100% have it within 30 m, against at
+            // most 1% when the ATP lockers are moved 2 km away. See
+            // `docs/notes/2026-11-22-parcel-lockers.md`.
+            Kind::ParcelLocker => (30.0, RefRule::Ignore),
         });
         Settings {
             max_meters,
@@ -459,6 +552,11 @@ pub struct InfrastructureMatcher {
     /// lowercased: GBFS `short_name`, which OSM has as `ref`, such as
     /// Bluebikes' `D32022` or nextbike's `80285`.
     station_code: Option<String>,
+    /// For parcel lockers, the ATP brand.
+    locker_brand: Option<LockerBrand>,
+    /// Whether the feature counts for deletion candidates; see
+    /// [PARTIAL_LOCKER_SPIDERS].
+    counts_for_coverage: bool,
 }
 
 impl InfrastructureMatcher {
@@ -468,7 +566,12 @@ impl InfrastructureMatcher {
         let osm = candidate
             .tags()
             .find(|&(k, _)| k == self.settings.osm_ref_key)
-            .and_then(|(_, v)| normalize_ref(v, false));
+            .map(|(_, v)| match self.settings.refs {
+                // OSM sometimes has the prefix too: PUDO's `PCJ02291`.
+                RefRule::StripPrefix(prefix) => v.strip_prefix(prefix).unwrap_or(v),
+                _ => v,
+            })
+            .and_then(|v| normalize_ref(v, false));
         matches!((&self.reference, osm), (Some(atp), Some(osm)) if *atp == osm)
             || self.gbfs_match(candidate) == Some(true)
             || self.same_code(candidate)
@@ -504,7 +607,25 @@ impl InfrastructureMatcher {
             RefRule::StripPrefix(prefix) => tag("ref")
                 .and_then(|v| v.strip_prefix(prefix))
                 .and_then(|v| normalize_ref(v, false)),
+            RefRule::NameSuffix => tag("name")
+                .and_then(|v| v.rsplit_once(" - "))
+                .and_then(|(_, nick)| normalize_ref(nick, false)),
+            RefRule::Suffix(n) => tag("ref")
+                .map(str::trim)
+                .and_then(|v| v.char_indices().rev().nth(n - 1).map(|(i, _)| &v[i..]))
+                .and_then(|v| normalize_ref(v, false)),
         };
+        // A locker without brand or operator could be of any network.
+        // `czech_post_cz` lists the Z-BOX, AlzaBox and other lockers
+        // where its parcels can be picked up that way, and Packeta
+        // lists the Z-BOXes again with their brand
+        // (alltheplaces/alltheplaces#20729).
+        let has_brand = ["brand", "brand:wikidata", "operator", "operator:wikidata"]
+            .iter()
+            .any(|key| tag(key).is_some());
+        if kind == Kind::ParcelLocker && !has_brand {
+            return None;
+        }
         Some(InfrastructureMatcher {
             center: Cell::from(CellID(place.s2_cell_id)).center(),
             kind,
@@ -548,6 +669,19 @@ impl InfrastructureMatcher {
             } else {
                 Vec::new()
             },
+            locker_brand: (kind == Kind::ParcelLocker).then(|| {
+                let fallback = LOCKER_BRAND_FALLBACK
+                    .iter()
+                    .find(|(s, _)| *s == place.spider);
+                match fallback {
+                    Some((_, brand)) if tag("brand").is_none() => {
+                        LockerBrand::from_tags(brand.iter().copied())
+                    }
+                    _ => LockerBrand::from_tags(tags()),
+                }
+            }),
+            counts_for_coverage: !(kind == Kind::ParcelLocker
+                && PARTIAL_LOCKER_SPIDERS.contains(&place.spider.as_str())),
         })
     }
 
@@ -609,6 +743,11 @@ impl InfrastructureMatcher {
         {
             return (0.0, 0.0);
         }
+        if let Some(atp) = &self.locker_brand
+            && !atp.agrees(&LockerBrand::from_tags(candidate.tags()))
+        {
+            return (0.0, 0.0);
+        }
         if self.same_ref(candidate) {
             return (1.0, SAME_REF_MIN_SCORE);
         }
@@ -657,6 +796,8 @@ impl Matcher for InfrastructureMatcher {
             GBFS_ID_MAX_METERS
         } else if self.same_name(candidate) {
             BIKE_SHARE_NAME_MAX_METERS
+        } else if self.kind == Kind::ParcelLocker && self.same_ref(candidate) {
+            PARCEL_LOCKER_REF_MAX_METERS
         } else {
             self.settings.max_meters
         };
@@ -687,15 +828,95 @@ impl Matcher for InfrastructureMatcher {
             .is_some_and(|osm| osm > atp)
     }
 
+    /// False for the parcel lockers of [PARTIAL_LOCKER_SPIDERS].
+    fn counts_for_coverage(&self) -> bool {
+        self.counts_for_coverage
+    }
+
     fn max_distance(&self) -> Option<ChordAngle> {
         let meters = if self.gbfs_id.is_some() || self.station_code.is_some() {
             self.settings.max_meters.max(GBFS_ID_MAX_METERS)
         } else if !self.name_words.is_empty() {
             self.settings.max_meters.max(BIKE_SHARE_NAME_MAX_METERS)
+        } else if self.kind == Kind::ParcelLocker && self.reference.is_some() {
+            self.settings.max_meters.max(PARCEL_LOCKER_REF_MAX_METERS)
         } else {
             self.settings.max_meters
         };
         Some(meters_to_chord_angle(meters))
+    }
+}
+
+/// The brand of a parcel locker: its `brand:wikidata` and
+/// `operator:wikidata`, and the [locker_brand_words] of its `brand`. The operator only counts for a
+/// locker without brand, since it says little otherwise: in
+/// Mazowieckie, OSM gives 283 Allegro lockers `operator=UPS`.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct LockerBrand {
+    ids: Vec<u64>,
+    words: Vec<String>,
+}
+
+impl LockerBrand {
+    fn from_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> LockerBrand {
+        let mut brand = LockerBrand::default();
+        let mut operator = Vec::new();
+        for (key, value) in tags {
+            match key {
+                "brand:wikidata" | "operator:wikidata" => {
+                    brand.ids.extend(parse_wikidata_ids(value))
+                }
+                "brand" => brand.words.extend(locker_brand_words(value)),
+                "operator" => operator.extend(locker_brand_words(value)),
+                _ => {}
+            }
+        }
+        // Without a brand, the operator stands in, so that an OSM
+        // locker with just `operator=Amazon` is no PUDO station.
+        if brand.ids.is_empty() && brand.words.is_empty() {
+            brand.words = operator;
+        }
+        brand
+    }
+
+    /// Whether two lockers may be of the same network: they share a
+    /// Wikidata ID or a brand word, or have nothing to compare. Brand
+    /// and operator IDs count alike, since ATP gives PUDO lockers the
+    /// operator's ID as `brand:wikidata`, while OSM has the brand's.
+    /// A word is enough, since OSM has both `Amazon Locker` and
+    /// `Amazon Hub`, each with a Wikidata ID of its own.
+    fn agrees(&self, other: &LockerBrand) -> bool {
+        let shares = |a: &[u64], b: &[u64]| a.iter().any(|x| b.contains(x));
+        let comparable = (!self.ids.is_empty() && !other.ids.is_empty())
+            || (!self.words.is_empty() && !other.words.is_empty());
+        !comparable
+            || shares(&self.ids, &other.ids)
+            || self.words.iter().any(|w| other.words.contains(w))
+    }
+}
+
+/// The words of a locker brand for [LockerBrand]: lowercase, of at
+/// least three letters, and not in [GENERIC_LOCKER_WORDS]; or if none
+/// is left, the whole brand, so that `Z-Box` gives `zbox`.
+fn locker_brand_words(value: &str) -> Vec<String> {
+    let words: Vec<String> = value
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .filter(|w| !GENERIC_LOCKER_WORDS.contains(&w.as_str()))
+        .collect();
+    if !words.is_empty() {
+        return words;
+    }
+    let whole: String = value
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if whole.is_empty() {
+        Vec::new()
+    } else {
+        vec![whole]
     }
 }
 
@@ -885,6 +1106,34 @@ mod tests {
         ("brand", "ChargePoint"),
         ("brand:wikidata", "Q5176149"),
         ("operator:wikidata", "Q5176149"),
+    ];
+
+    const PACZKOMAT: &[(&str, &str)] = &[
+        ("amenity", "parcel_locker"),
+        ("ref", "WAW211AP"),
+        ("brand", "Paczkomat InPost"),
+        ("brand:wikidata", "Q110970254"),
+        ("operator", "InPost"),
+        ("operator:wikidata", "Q3182097"),
+    ];
+    const PACKSTATION: &[(&str, &str)] = &[
+        ("amenity", "parcel_locker"),
+        ("ref", "1-14482182"),
+        ("operator", "Deutsche Post"),
+        ("operator:wikidata", "Q157645"),
+    ];
+    const Z_BOX: &[(&str, &str)] = &[
+        ("amenity", "parcel_locker"),
+        ("ref", "I_23111"),
+        ("brand", "Z-Box"),
+        ("brand:wikidata", "Q121537464"),
+        ("operator", "Zásilkovna"),
+    ];
+    const AMAZON_LOCKER: &[(&str, &str)] = &[
+        ("amenity", "parcel_locker"),
+        ("ref", "54243621"),
+        ("brand", "Amazon Locker"),
+        ("brand:wikidata", "Q16974764"),
     ];
 
     const CASES: &[Case] = &[
@@ -1509,6 +1758,235 @@ mod tests {
             want: NO_MATCH,
         },
         Case {
+            what: "parcel locker, same ref",
+            spider: "paczkomat_inpost_pl",
+            atp: PACZKOMAT,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "Paczkomat InPost"),
+                ("brand:wikidata", "Q110970254"),
+                ("ref", "WAW211AP"),
+            ],
+            meters: 50.0,
+            want: (0.94, 0.96),
+        },
+        Case {
+            what: "parcel locker, same ref beyond 100 m",
+            spider: "paczkomat_inpost_pl",
+            atp: PACZKOMAT,
+            osm: &[("amenity", "parcel_locker"), ("ref", "WAW211AP")],
+            meters: 110.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "parcel locker, another ref",
+            spider: "paczkomat_inpost_pl",
+            atp: PACZKOMAT,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "Paczkomat InPost"),
+                ("ref", "WAW211M"),
+            ],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "parcel locker without ref beyond 30 m",
+            spider: "paczkomat_inpost_pl",
+            atp: PACZKOMAT,
+            osm: &[("amenity", "parcel_locker"), ("brand", "Paczkomat InPost")],
+            meters: 35.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "parcel locker of another network next to it",
+            spider: "paczkomat_inpost_pl",
+            atp: PACZKOMAT,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "Orlen Paczka"),
+                ("brand:wikidata", "Q110457879"),
+                ("operator", "Orlen"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "Appkomat shares the InPost brand word",
+            spider: "paczkomat_inpost_pl",
+            atp: PACZKOMAT,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "Appkomat InPost"),
+                ("brand:wikidata", "Q110970263"),
+            ],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "parcel locker without brand in OSM",
+            spider: "paczkomat_inpost_pl",
+            atp: PACZKOMAT,
+            osm: &[("amenity", "parcel_locker"), ("ref", "WAW211M")],
+            meters: 15.0,
+            want: (0.4, 0.4),
+        },
+        Case {
+            what: "OSM locker of another operator, without brand",
+            spider: "paczkomat_inpost_pl",
+            atp: PACZKOMAT,
+            osm: &[("amenity", "parcel_locker"), ("operator", "UPS")],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "Packstation number at the end of Deutsche Post's ref",
+            spider: "deutsche_post_de",
+            atp: PACKSTATION,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "DHL Packstation"),
+                ("brand:wikidata", "Q1766703"),
+                ("operator", "DHL"),
+                ("ref", "182"),
+            ],
+            meters: 0.0,
+            want: (1.0, 1.0),
+        },
+        Case {
+            what: "Packstation next to an Amazon Locker",
+            spider: "deutsche_post_de",
+            atp: PACKSTATION,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "Amazon Locker"),
+                ("ref", "filomena"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "Packstation that OSM tags with its operator only",
+            spider: "deutsche_post_de",
+            atp: PACKSTATION,
+            osm: &[("amenity", "parcel_locker"), ("operator", "DHL")],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "a DHL Paketbox is a Packstation too",
+            spider: "deutsche_post_de",
+            atp: PACKSTATION,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "Paketbox"),
+                ("brand:wikidata", "Q2046604"),
+                ("operator:wikidata", "Q489815"),
+            ],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "PUDO Station of the operator that ATP names as brand",
+            spider: "pudostation_jp",
+            atp: &[
+                ("amenity", "parcel_locker"),
+                ("ref", "PCJ00528"),
+                ("brand", "プドー"),
+                ("brand:wikidata", "Q86738066"),
+            ],
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "PUDOステーション"),
+                ("operator:wikidata", "Q86738066"),
+                ("ref", "00528"),
+            ],
+            meters: 15.0,
+            want: (0.98, 0.99),
+        },
+        Case {
+            what: "Packstation that OSM numbers otherwise",
+            spider: "deutsche_post_de",
+            atp: PACKSTATION,
+            osm: &[("amenity", "parcel_locker"), ("ref", "1-14482182")],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "Z-Box by ref:packeta",
+            spider: "packeta",
+            atp: Z_BOX,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "Z-Box"),
+                ("brand:wikidata", "Q121537464"),
+                ("ref:packeta", "23111"),
+            ],
+            meters: 60.0,
+            want: (0.93, 0.95),
+        },
+        Case {
+            what: "Z-Box next to an AlzaBox",
+            spider: "packeta",
+            atp: Z_BOX,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "AlzaBox"),
+                ("brand:wikidata", "Q115254158"),
+            ],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
+            what: "Amazon Locker and Amazon Hub share a word",
+            spider: "amazon_locker_us",
+            atp: AMAZON_LOCKER,
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "Amazon Hub"),
+                ("brand:wikidata", "Q100274430"),
+            ],
+            meters: 0.0,
+            want: (0.8, 0.8),
+        },
+        Case {
+            what: "Amazon Locker nickname as OSM ref",
+            spider: "amazon_locker_at_cz_de",
+            atp: &[
+                ("amenity", "parcel_locker"),
+                ("ref", "43651462"),
+                ("name", "Amazon Locker - Nilias"),
+                ("brand", "Amazon Locker"),
+            ],
+            osm: &[
+                ("amenity", "parcel_locker"),
+                ("brand", "Amazon Hub"),
+                ("ref", "nilias"),
+            ],
+            meters: 40.0,
+            want: (0.95, 0.96),
+        },
+        Case {
+            what: "PUDO ref with or without its prefix",
+            spider: "pudostation_jp",
+            atp: &[
+                ("amenity", "parcel_locker"),
+                ("ref", "PCJ00177"),
+                ("brand", "プドー"),
+            ],
+            osm: &[("amenity", "parcel_locker"), ("ref", "PCJ177")],
+            meters: 0.0,
+            want: (1.0, 1.0),
+        },
+        Case {
+            what: "a parcel locker is not a vending machine",
+            spider: "amazon_locker_us",
+            atp: AMAZON_LOCKER,
+            osm: &[("amenity", "vending_machine"), ("brand", "Amazon Locker")],
+            meters: 0.0,
+            want: NO_MATCH,
+        },
+        Case {
             what: "default radius for an unknown AED spider",
             spider: "some_aed_spider",
             atp: &[("emergency", "defibrillator")],
@@ -1550,6 +2028,66 @@ mod tests {
     }
 
     #[test]
+    fn test_parcel_locker_matcher() {
+        let matcher = |spider, atp| InfrastructureMatcher::for_place(&place(spider, atp));
+        let paczkomat = matcher("paczkomat_inpost_pl", PACZKOMAT).unwrap();
+        assert!(paczkomat.max_distance() == Some(meters_to_chord_angle(100.0)));
+        assert!(paczkomat.counts_for_coverage());
+        let dhl = &[
+            ("amenity", "parcel_locker"),
+            ("ref", "234972"),
+            ("brand", "DHL BOX 24/7"),
+        ];
+        assert!(
+            matcher("dhl_pl", dhl).unwrap().max_distance() == Some(meters_to_chord_angle(30.0))
+        );
+        let allegro = &[
+            ("amenity", "parcel_locker"),
+            ("ref", "AL010ZST"),
+            ("brand", "Allegro One Box"),
+        ];
+        assert!(
+            !matcher("allegro_one_box_pl", allegro)
+                .unwrap()
+                .counts_for_coverage()
+        );
+        // `czech_post_cz` doesn't say whose locker it is.
+        let unbranded = &[
+            ("amenity", "parcel_locker"),
+            ("ref", "6"),
+            ("name", "Praha 10 AlzaBox Šrobárova"),
+        ];
+        assert!(matcher("czech_post_cz", unbranded).is_none());
+    }
+
+    #[test]
+    fn test_locker_brand() {
+        let brand = |tags: &[(&str, &str)]| LockerBrand::from_tags(tags.iter().copied());
+        let dhl = brand(&[("brand", "DHL BOX 24/7")]);
+        assert_eq!(dhl.words, vec!["dhl"]);
+        assert!(dhl.agrees(&brand(&[("brand", "DHL Packstation")])));
+        assert!(!dhl.agrees(&brand(&[("brand", "DPD Pickup Station")])));
+        assert!(!dhl.agrees(&brand(&[("operator", "DPD")])));
+        assert!(dhl.agrees(&brand(&[("operator", "DHL")])));
+        assert!(dhl.agrees(&brand(&[("brand", "DHL Packstation"), ("operator", "UPS")])));
+        assert!(dhl.agrees(&LockerBrand::default()));
+        let z_box = brand(&[("brand", "Z-Box"), ("brand:wikidata", "Q121537464")]);
+        assert_eq!(z_box.words, vec!["zbox"]);
+        assert!(z_box.agrees(&brand(&[("brand", "Z-BOX")])));
+        assert!(z_box.agrees(&brand(&[("brand:wikidata", "Q121537464")])));
+        assert!(!z_box.agrees(&brand(&[("brand", "AlzaBox")])));
+        assert!(!z_box.agrees(&brand(&[
+            ("brand", "AlzaBox"),
+            ("brand:wikidata", "Q115254158")
+        ])));
+        let amazon = brand(&[("brand", "Amazon Locker"), ("brand:wikidata", "Q16974764")]);
+        assert!(amazon.agrees(&brand(&[
+            ("brand", "Amazon Hub"),
+            ("brand:wikidata", "Q100274430")
+        ])));
+    }
+
+    #[test]
     fn test_may_share() {
         let may_share = |atp: &[(&str, &str)], osm: &[(&str, &str)]| {
             with_candidate(osm, |candidate| {
@@ -1579,6 +2117,7 @@ mod tests {
         assert_eq!(kind(&[("man_made", "drinking_fountain")]), Some("fountain"));
         assert_eq!(kind(&[("amenity", "toilets")]), Some("toilets"));
         assert_eq!(kind(&[("man_made", "charge_point")]), Some("charge_point"));
+        assert_eq!(kind(&[("amenity", "parcel_locker")]), Some("parcel_locker"));
         assert_eq!(kind(&[("amenity", "charging_station")]), None);
         assert_eq!(kind(&[("amenity", "waste_basket")]), Some("waste_basket"));
         assert_eq!(

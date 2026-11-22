@@ -820,14 +820,17 @@ until the full pipeline was proven out:
   [`notes/2026-10-30-transit-matching.md`](notes/2026-10-30-transit-matching.md)).
   `InfrastructureMatcher` matches post boxes, defibrillators, benches,
   fire hydrants, public bookcases, bicycle parking, waste baskets,
-  fountains and toilets by
+  fountains, toilets, bike-share stations, charge points and parcel
+  lockers by
   distance, one to one, with a search radius and ref rules per spider
   (see
   [`notes/2026-11-05-infrastructure-matching.md`](notes/2026-11-05-infrastructure-matching.md)
   and
   [`notes/2026-11-06-hydrants-bookcases-bicycle-parking.md`](notes/2026-11-06-hydrants-bookcases-bicycle-parking.md)
   and
-  [`notes/2026-11-06-waste-baskets-fountains-toilets.md`](notes/2026-11-06-waste-baskets-fountains-toilets.md)).
+  [`notes/2026-11-06-waste-baskets-fountains-toilets.md`](notes/2026-11-06-waste-baskets-fountains-toilets.md)
+  and
+  [`notes/2026-11-22-parcel-lockers.md`](notes/2026-11-22-parcel-lockers.md)).
   Still ahead: matching by name, including CJK names (see
   [#953](https://github.com/brawer/osmdiffs/issues/953)), and
   matching trees by distance and species (see
