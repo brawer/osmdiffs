@@ -2,7 +2,7 @@
 //!
 //! Not yet consumed anywhere -- `import_osm` in `mod.rs` calls this and
 //! discards the result, the same way it already discards `Assembly`
-//! itself, until `conflate`/`suggest_edits` are ready to use it. This
+//! itself, until `conflate` is ready to use it. This
 //! exists so the index-building step gets exercised against real PBF
 //! data -- and can be watched with actual production-scale metrics --
 //! before anything downstream depends on it.

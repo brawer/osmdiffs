@@ -391,19 +391,6 @@ const CONFLATED_TILES: Publish = Publish {
     sha512: false,
 };
 
-const EDITS_TILES: Publish = Publish {
-    name: "edits-tiles",
-    stem: "edits",
-    ext: "pmtiles",
-    title: "edits.pmtiles \u{2014} visualization of suggested edits",
-    description: "Debugging aid. Not a data product; may change, or stop being produced, \
-        without notice.",
-    format: "pmtiles",
-    mediatype: "application/vnd.pmtiles",
-    describes: None,
-    sha512: false,
-};
-
 const SPIDER_STATS: Publish = Publish {
     name: "spider-stats",
     stem: "spider-stats",
@@ -448,10 +435,6 @@ fn publish(
         sha512: digest.sha512,
         describes: spec.describes,
     })
-}
-
-pub fn upload_tiles(tiles: &Path, date: &str, progress: &MultiProgress) -> Result<PublishedFile> {
-    publish(&EDITS_TILES, tiles, date, progress)
 }
 
 pub fn upload_conflated(
@@ -686,12 +669,12 @@ mod tests {
     #[test]
     fn skips_upload_when_config_is_none() -> Result<()> {
         let dir = TempDir::new()?;
-        let path = dir.path().join("edits.pmtiles");
+        let path = dir.path().join("conflated.pmtiles");
         std::fs::write(&path, b"tiles")?;
         upload_file_with_config(
             None,
             &path,
-            "edits.pmtiles",
+            "conflated.pmtiles",
             "application/vnd.pmtiles",
             "upload.tiles",
             &hidden_progress(),
@@ -736,20 +719,20 @@ mod tests {
         let config = test_config(&server);
 
         let mock = server
-            .mock("PUT", "/test-bucket/edits.pmtiles")
+            .mock("PUT", "/test-bucket/conflated.pmtiles")
             .match_header("content-type", "application/vnd.pmtiles")
             .with_status(200)
             .with_header("ETag", "\"abc123\"")
             .create();
 
         let dir = TempDir::new()?;
-        let path = dir.path().join("edits.pmtiles");
+        let path = dir.path().join("conflated.pmtiles");
         std::fs::write(&path, b"small file, well under the multipart threshold")?;
 
         upload_file_with_config(
             Some(&config),
             &path,
-            "edits.pmtiles",
+            "conflated.pmtiles",
             "application/vnd.pmtiles",
             "upload.tiles",
             &hidden_progress(),

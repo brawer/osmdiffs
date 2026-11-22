@@ -3,35 +3,46 @@
 //! [crate::matchers::post_partner]. Both get the `post_office` tags
 //! that OSM lacks, and nothing else: the partner's opening hours or
 //! phone may be the counter's, not the store's.
+//!
+//! Moved unchanged from the old `edit_suggesters` module (see git
+//! history) when `suggest_edits` was removed; the new edits step uses
+//! it from milestone 3 of `docs/notes/2026-11-23-edits-parquet.md` on.
 
-use super::EditSuggester;
-use crate::matchers::post_partner::PostalBrand;
+// Until the edits step uses it.
+#![allow(dead_code)]
 
-pub struct PostPartnerEditSuggester {
+use crate::matchers::post_partner::{PostalBrand, is_post_partner};
+
+/// Whether an AllThePlaces feature with `atp_tags`, matched with
+/// `match.relation` = `relation`, gets postal-partner edits: only a
+/// postal partner gets edits for the host it is `located_in`, since
+/// OSM puts the partner's tags on its host.
+pub(crate) fn has_partner_edits(atp_tags: &[(String, String)], relation: &str) -> bool {
+    is_post_partner(atp_tags.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        && matches!(relation, "same" | "located_in")
+}
+
+pub(crate) struct PostPartnerEditSuggester {
     brand: PostalBrand,
 }
 
 impl PostPartnerEditSuggester {
-    pub fn new(spider: &str, atp_tags: &[(String, String)]) -> Self {
+    pub(crate) fn new(spider: &str, atp_tags: &[(String, String)]) -> Self {
         let tags = atp_tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
         PostPartnerEditSuggester {
             brand: PostalBrand::of_atp(spider, tags),
         }
     }
-}
 
-impl EditSuggester for PostPartnerEditSuggester {
     /// `post_office=post_partner` if OSM has no `post_office` tag. ATP's
     /// postal brand as `post_office:brand` if OSM has none, or added to
     /// OSM's with `;` if OSM's is another network's, as in a kiosk that
     /// is both a Hermes and a DHL partner; for an `amenity=post_office`,
     /// its `brand` counts as OSM's. The brand's Wikidata ID goes along
     /// where OSM's IDs, if any, still line up with its brands.
-    fn suggest_edit(
+    pub(crate) fn suggest_edit(
         &self,
-        _atp_tags: &[(String, String)],
         osm_tags: &[(String, String)],
-        _position: Option<(f64, f64)>,
     ) -> Option<Vec<(String, String)>> {
         let tag = |key: &str| {
             osm_tags
@@ -92,6 +103,50 @@ impl EditSuggester for PostPartnerEditSuggester {
     }
 }
 
+/// Adds the tags of another edit for the same OSM feature to `tags`.
+/// As before postal partners got edits, the other tags come from one
+/// edit alone, the first that has any, so that two ATP features never
+/// mix their opening hours. The `post_office` tags of
+/// this module add up, since several partners may be in
+/// one store: `Hermes;DHL` and `Hermes;DPD` give `Hermes;DHL;DPD`. If
+/// the brands and their Wikidata IDs no longer line up, the IDs are
+/// left out.
+pub(crate) fn merge_edits(tags: &mut Vec<(String, String)>, other: Vec<(String, String)>) {
+    const LISTS: [&str; 2] = ["post_office:brand", "post_office:brand:wikidata"];
+    let is_postal = |key: &str| key == "post_office" || key.starts_with("post_office:");
+    let has_other = tags.iter().any(|(k, _)| !is_postal(k));
+    for (key, value) in other {
+        if !is_postal(&key) {
+            if !has_other {
+                tags.push((key, value));
+            }
+            continue;
+        }
+        match tags.iter_mut().find(|(k, _)| *k == key) {
+            None => tags.push((key, value)),
+            Some((_, old)) if LISTS.contains(&key.as_str()) => {
+                for v in value.split(';') {
+                    if !old.split(';').any(|o| o == v) {
+                        old.push(';');
+                        old.push_str(v);
+                    }
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    let count = |key: &str| {
+        tags.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.split(';').count())
+    };
+    if let Some(ids) = count(LISTS[1])
+        && count(LISTS[0]).is_some_and(|brands| brands != ids)
+    {
+        tags.retain(|(k, _)| k != LISTS[1]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,7 +159,7 @@ mod tests {
 
     fn suggest(spider: &str, atp: &[(&str, &str)], osm: &[(&str, &str)]) -> Vec<(String, String)> {
         PostPartnerEditSuggester::new(spider, &tags(atp))
-            .suggest_edit(&tags(atp), &tags(osm), None)
+            .suggest_edit(&tags(osm))
             .unwrap_or_default()
     }
 
@@ -204,6 +259,50 @@ mod tests {
         assert_eq!(
             suggest("correios_br", &atp, &[("amenity", "townhall")]),
             tags(&[("post_office", "post_partner")])
+        );
+    }
+
+    #[test]
+    fn test_merge_edits() {
+        let tags = |t: &[(&str, &str)]| -> Vec<(String, String)> {
+            t.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let mut a = tags(&[
+            ("opening_hours", "Mo-Fr 08:00-18:00"),
+            ("post_office:brand", "Hermes;DHL"),
+        ]);
+        merge_edits(
+            &mut a,
+            tags(&[
+                ("opening_hours", "Mo-Sa 08:00-20:00"),
+                ("post_office", "post_partner"),
+                ("post_office:brand", "Hermes;DPD"),
+            ]),
+        );
+        assert_eq!(
+            a,
+            tags(&[
+                ("opening_hours", "Mo-Fr 08:00-18:00"),
+                ("post_office:brand", "Hermes;DHL;DPD"),
+                ("post_office", "post_partner"),
+            ])
+        );
+        let mut b = tags(&[
+            ("post_office:brand", "DHL"),
+            ("post_office:brand:wikidata", "Q489815"),
+        ]);
+        merge_edits(
+            &mut b,
+            tags(&[("post_office:brand", "DPD"), ("phone", "+49 30 1234567")]),
+        );
+        assert_eq!(
+            b,
+            tags(&[
+                ("post_office:brand", "DHL;DPD"),
+                ("phone", "+49 30 1234567")
+            ])
         );
     }
 }

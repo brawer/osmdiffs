@@ -7,11 +7,9 @@ Visualizes [`conflated.parquet`](CONFLATED_PARQUET.md) itself — every
 [AllThePlaces](https://alltheplaces.xyz/) feature, matched to
 [OpenStreetMap](https://www.openstreetmap.org/) or not, and the
 OpenStreetMap features that may be gone — so the
-*matching* step can be reviewed on its own, independent of whatever
-[`edits.pmtiles`](../TECHNICAL_DESIGN.md) separately proposes changing.
+*matching* step can be reviewed on its own.
 It's a [PMTiles](https://protomaps.com/docs/pmtiles) archive, built with
-[Tippecanoe](https://github.com/felt/tippecanoe) the same way
-`edits.pmtiles` is — see [`pmtiles.io`](https://pmtiles.io) for how to
+[Tippecanoe](https://github.com/felt/tippecanoe) — see [`pmtiles.io`](https://pmtiles.io) for how to
 open one in a browser, no server required.
 
 ⚠️ **This file is for visualization only** — a debugging aid for
@@ -53,8 +51,7 @@ Each is built as two PMTiles archives — a coarse **overview** (z0–12)
 and a fine **detail** (z13–14) — merged with `tile-join`, so what a
 row looks like depends on how far you're zoomed in (see below). A
 feature's coordinates are rounded to 1e-7 degrees (about 1 cm at the
-equator) before being written out — the same precision `edits.pmtiles`
-uses — so raw source-data precision noise doesn't inflate the file.
+equator) before being written out, so raw source-data precision noise doesn't inflate the file.
 
 ## The two zoom ranges
 

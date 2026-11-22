@@ -255,19 +255,14 @@ graph TD
     SPIDER_STATS --> SPIDER_STATS_PARQUET[spider-stats.parquet]
     SPIDER_STATS_PARQUET --> UPLOAD_SPIDER_STATS(upload_spider_stats) --> S3A
 
-    CONFLATED --> SUGGEST_EDITS(suggest_edits) --> LAYERS["*.jsonl (for visualization)"]
-    LAYERS --> RENDER_TILES("render_tiles<br/>(tippecanoe, auto zoom)") --> PMTILES[diffed-places.pmtiles]
-    PMTILES --> UPLOAD_TILES(upload_tiles) --> S3B[("public S3")]
-
     CONFLATED --> UPLOAD_BOM(upload_conflated_bom) --> S3A
     UPLOAD_CONFLATED --> UPLOAD_DATAPACKAGE
     UPLOAD_CONFLATED_TILES --> UPLOAD_DATAPACKAGE
-    UPLOAD_TILES --> UPLOAD_DATAPACKAGE
     UPLOAD_SPIDER_STATS --> UPLOAD_DATAPACKAGE
     UPLOAD_BOM --> UPLOAD_DATAPACKAGE(upload_datapackage<br/>data/datapackage.json) --> S3A
 
     classDef process fill:#fce4ec,stroke:#ad1457,stroke-width:2px,color:#4a0e28,font-weight:bold;
-    class FETCH_INPUTS,IMPORT_ATP,OSMVIEWS_RANKS,COLLECT_WIKI,QRANK_QUANTILES,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SPIDER_STATS,UPLOAD_SPIDER_STATS,SUGGEST_EDITS,RENDER_TILES,UPLOAD_TILES,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
+    class FETCH_INPUTS,IMPORT_ATP,OSMVIEWS_RANKS,COLLECT_WIKI,QRANK_QUANTILES,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SPIDER_STATS,UPLOAD_SPIDER_STATS,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
 ```
 
 (Pink boxes are processing steps; plain rectangles are the files they
@@ -501,8 +496,7 @@ fetch away.
   writing 1,731,159 rows (719,507 matched).
 - **`extract_conflated_layers`**
   ([`src/pipeline/conflated_tiles.rs`](../src/pipeline/conflated_tiles.rs))
-  — scans every row of `conflated.parquet` (matched or not, unlike
-  `suggest_edits` below) exactly once, writing all the layers
+  — scans every row of `conflated.parquet` (matched or not) exactly once, writing all the layers
   `conflated.pmtiles`' passes need:
   - the coarse **overview** `matched`/`unmatched` layers — one
     deliberately minimal feature per row: `spider`, `relation`,
@@ -555,9 +549,17 @@ fetch away.
 - **`render_conflated_overview`**
   ([`src/pipeline/tiles.rs`](../src/pipeline/tiles.rs)) — runs
   [tippecanoe](https://github.com/felt/tippecanoe) over the overview
-  layers, bounded to z0–12 (`ZoomRange::Bounded`, not tippecanoe’s
+  layers, bounded to z0–12 (`ZoomRange`, not tippecanoe’s
   automatic zoom selection — see `render_conflated_detail` below for
-  why), to build `conflated-overview.pmtiles`. **~1m45s**, **1.76 GB
+  why), to build `conflated-overview.pmtiles`. A tippecanoe feature
+  filter (`-j`) on the rounded `importance` decides what coarse zooms
+  show: the top 1% at z0, 4% at z1, 16% at z2, 64% at z3 and everything
+  from z4 on (four times as many per zoom, since each tile splits into
+  four), with no random dot-dropping (`-r 1`) and
+  `--drop-densest-as-needed` only as the safety net for oversized
+  tiles. A per-feature `"tippecanoe": {"minzoom": N}` would be the
+  obvious way, but with tippecanoe v2.49 it made tippecanoe drop nearly
+  all features at every zoom. **~1m45s**, **1.76 GB
   peak RSS**, **~750 MB output** on a full-planet `conflated.parquet`
   (same local run as `extract_conflated_layers` above). _(These
   figures predate the minimal-overview change, which cuts the output
@@ -613,37 +615,17 @@ fetch away.
   rate, (`same` + `located_in`) / `rows`, dropped by 20 points or more
   from at least 100 rows. Without last week's file, it logs that and
   goes on.
-- **`suggest_edits`** ([`src/pipeline/edits.rs`](../src/pipeline/edits.rs))
-  — scans `conflated.parquet` for matched rows and asks an
-  [`edit_suggesters`](../src/edit_suggesters/) implementation what
-  should change, split into GeoJSON Lines layers by category (shops,
-  infrastructure, trees). **~20 seconds** at full-planet scale (cpx42
-  run).
-- **`render_tiles`** ([`src/pipeline/tiles.rs`](../src/pipeline/tiles.rs))
-  — runs tippecanoe over those layers to build `diffed-places.pmtiles`
-  for visual review. **~2m48s** at full-planet scale (cpx42 run). The
-  same function now builds both this and `conflated.pmtiles` above,
-  parameterized by output filename. For this archive and the
-  `conflated.pmtiles` overview, a tippecanoe feature filter (`-j`) on
-  the rounded `importance` decides what coarse zooms show: the top 1%
-  at z0, 4% at z1, 16% at z2, 64% at z3 and everything from z4 on
-  (four times as many per zoom, since each tile splits into four),
-  with no random dot-dropping (`-r 1`) and `--drop-densest-as-needed`
-  only as the safety net for oversized tiles. A per-feature
-  `"tippecanoe": {"minzoom": N}` would be the obvious way, but with
-  tippecanoe v2.49 it made tippecanoe drop nearly all features at
-  every zoom.
-- **`upload_conflated` / `upload_conflated_tiles` / `upload_tiles`**
+- **`upload_conflated` / `upload_conflated_tiles` / `upload_spider_stats`**
   ([`src/pipeline/upload.rs`](../src/pipeline/upload.rs)) — push the
-  data output and both sets of tiles to the public (`PUBLIC_S3_*`)
+  data output, its tiles and the spider statistics to the public (`PUBLIC_S3_*`)
   bucket, each under a dated, content-hashed key
   `data/<stem>-<YYYYMMDD>-<hash8>.<ext>` (see
   [`PRODUCTION.md`](PRODUCTION.md#what-the-pipeline-publishes) for the
   CDN contract behind that naming). Each step also SHA-256s the file
   first (the key depends on the hash, so this can't ride the upload's
-  own read); **~5.5s** / *(not yet measured)* / **~3s** for the uploads
-  themselves at full-planet scale (cpx42 run), plus tens of seconds of
-  hashing across the three.
+  own read); **~5.5s** for `conflated.parquet` itself at full-planet
+  scale (cpx42 run), plus tens of seconds of hashing; the other two are
+  not yet measured on their own.
 - **`upload_conflated_bom` / `upload_datapackage`**
   ([`src/pipeline/upload.rs`](../src/pipeline/upload.rs)) — after every
   dated file is up: write `conflated-<date>-<hash8>.cdx.json` (the
@@ -762,7 +744,6 @@ Top-level modules (see [`src/lib.rs`](../src/lib.rs)):
 | [`tables`](../src/tables/) | On-disk, memory-mapped data structures shared across the pipeline (string pools, spatial indexes, external-sort-backed tables). |
 | [`places`](../src/places/) | The `Place` type (an AllThePlaces feature) and its Parquet reader/writer. |
 | [`matchers`](../src/matchers/) | Scores an OSM candidate against an ATP feature. |
-| [`edit_suggesters`](../src/edit_suggesters/) | Decides what to actually change, for a matched pair. |
 | [`geometry`](../src/geometry/) | Shared geometry-construction helpers (ring-building, polygon unions, S2 coverage stats, …). |
 | [`utils`](../src/utils.rs) | Small, generic helpers genuinely shared by more than one otherwise-independent part of the crate. |
 
@@ -785,9 +766,10 @@ Related documentation:
 
 We wanted to get the pipeline running end to end before polishing any
 single piece of it. As of this writing, it does: it produces
-`conflated.parquet` and two PMTiles archives for visual review — one of
-`conflated.parquet` itself, one of what `suggest_edits` proposes — each
-uploaded to S3 at the end of a run. What’s still ahead follows from
+`conflated.parquet`, a PMTiles archive of it for visual review, and
+per-spider statistics, each uploaded to S3 at the end of a run. Proposed
+edits are being rebuilt as `edits.parquet`; see
+[the plan](notes/2026-11-23-edits-parquet.md). What’s still ahead follows from
 that same choice — several pieces are deliberately simple placeholders
 until the full pipeline was proven out:
 

@@ -183,7 +183,6 @@ fn test_pipeline() -> Result<()> {
     let workdir = run_pipeline_on_fixtures(&[])?;
 
     assert_conflated_parquet(&workdir.path().join("conflated.parquet"))?;
-    assert_shops_jsonl(&workdir.path().join("shops.jsonl"))?;
     assert_conflated_tile_layers(workdir.path())?;
     assert!(
         workdir.path().join("conflated.pmtiles").exists(),
@@ -226,15 +225,14 @@ fn assert_publish_artifacts(workdir: &Path) -> Result<()> {
     assert_eq!(manifest["name"], "osmdiffs");
 
     let resources = manifest["resources"].as_array().context("no resources")?;
-    // conflated + bom + conflated-tiles + spider-stats + edits-tiles
-    assert_eq!(resources.len(), 5, "manifest resources: {resources:#?}");
+    // conflated + bom + conflated-tiles + spider-stats
+    assert_eq!(resources.len(), 4, "manifest resources: {resources:#?}");
     // Resource name -> the workdir file it was uploaded from (the local
     // copies keep their undated names; only the S3 key and the manifest
     // path carry the date+hash).
     let local_name = |name: &str| match name {
         "conflated" => "conflated.parquet",
         "conflated-tiles" => "conflated.pmtiles",
-        "edits-tiles" => "diffed-places.pmtiles",
         "spider-stats" => "spider-stats.parquet",
         "bom" => "", // exists under its manifest path
         other => panic!("unexpected resource {other}"),
@@ -586,8 +584,6 @@ fn test_kept_workdir_rebuilds_after_newer_osm() -> Result<()> {
         "matched.jsonl",
         "conflated.pmtiles",
         "spider-stats.parquet",
-        "shops.jsonl",
-        "diffed-places.pmtiles",
     ] {
         assert!(first.contains_key(name), "{name} was not produced");
     }
@@ -626,7 +622,7 @@ fn test_kept_workdir_rebuilds_after_newer_osm() -> Result<()> {
 
 /// One decoded `osm` side of a `conflated.parquet` row -- just the
 /// fields this test needs, not a general-purpose reader (this is a
-/// black-box integration test; it can't reach `pipeline::edits`'s own
+/// black-box integration test; it can't reach the pipeline's own
 /// private column-extraction code, so this is a small, deliberately
 /// narrow one of its own).
 struct ConflatedOsmSide {
@@ -956,76 +952,6 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Checks `suggest_edits`'s output against the fixture data's known
-/// shops (see `tests/test_data/zugerland.osm.pbf` /
-/// `alltheplaces.zip`) -- pins concrete expected values, not just "the
-/// file has some content", so a regression in tag-diffing or GeoJSON
-/// output actually gets caught, not just a crash.
-fn assert_shops_jsonl(path: &Path) -> Result<()> {
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("could not read {path:?}"))?;
-    let lines: Vec<&str> = content.lines().collect();
-    assert_eq!(
-        lines.len(),
-        3,
-        "expected 3 suggested shop edits, got:\n{content}"
-    );
-
-    let features: Vec<serde_json::Value> = lines
-        .iter()
-        .map(|line| Ok(serde_json::from_str(line)?))
-        .collect::<Result<_>>()?;
-
-    // Every row is a well-formed GeoJSON Point feature, carrying the
-    // OSM base version it was suggested against -- needed to detect
-    // edit conflicts later (OSM's own edit API uses the version number,
-    // not the changeset, for this), even though nothing uploads edits
-    // yet. Deliberately no changeset here -- see brawer/osmdiffs#730.
-    for feature in &features {
-        assert_eq!(feature["type"], "Feature");
-        assert_eq!(feature["geometry"]["type"], "Point");
-        assert!(feature["id"].is_number(), "feature has no id: {feature}");
-        assert!(
-            feature["properties"]["@osm_version"].is_number(),
-            "feature has no @osm_version: {feature}"
-        );
-        assert!(
-            feature["properties"].get("@osm_changeset").is_none(),
-            "feature should not carry @osm_changeset: {feature}"
-        );
-        let importance = feature["properties"]["@importance"]
-            .as_f64()
-            .unwrap_or_else(|| panic!("feature has no @importance: {feature}"));
-        assert!((0.0..=1.0).contains(&importance), "{feature}");
-    }
-
-    // One specific, known edit: this OSM feature's opening_hours and
-    // phone differ from AllThePlaces' in the fixture data.
-    let edit = features
-        .iter()
-        .find(|f| f["id"] == 737021556)
-        .expect("expected a suggested edit for OSM feature 737021556");
-    assert_eq!(
-        edit["properties"]["opening_hours"],
-        "Mo-Th 09:00-19:00; Fr 09:00-21:00; Sa 08:00-17:00"
-    );
-    assert_eq!(edit["properties"]["phone"], "+41 848 544 455");
-    // Only the tags that actually differ (and are on the trustworthy
-    // allowlist -- see PoiEditSuggester) should be suggested, nothing else.
-    assert_eq!(
-        edit["properties"]
-            .as_object()
-            .expect("properties should be an object")
-            .keys()
-            .filter(|k| !k.starts_with('@'))
-            .count(),
-        2,
-        "unexpected extra tags in suggested edit: {edit}"
-    );
-
-    Ok(())
-}
-
 /// Checks `extract_conflated_layers`'s output layers against the
 /// same fixture data `assert_conflated_parquet` checks: 3 matched + 5
 /// unmatched ATP features and one deletion candidate, a Denner in OSM
@@ -1175,8 +1101,7 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
         );
     }
 
-    // Same known match `assert_shops_jsonl` checks above: MediaMarkt,
-    // matched to OSM way/737021556, a polygon. Its overview feature is
+    // MediaMarkt, matched to OSM way/737021556, a polygon. Its overview feature is
     // the bare OSM shape; the tags live on the detail features. The
     // overview carries no fid, so the join to detail is on osm:id (the
     // matched-feature join key a viewer would use too).
