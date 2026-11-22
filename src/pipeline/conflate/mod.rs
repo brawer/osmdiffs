@@ -74,7 +74,7 @@ use diagnostics::{Diagnostics, Missing};
 use local_coverage::{LocalCoverage, LocalKey, MIN_LOCAL_SHARE};
 use located_in::{
     Host, charging_station_host, department_brands, enclosing_host, find_departments,
-    located_in_tag,
+    located_in_tag, post_partner_host,
 };
 use s2_util::MergedCellRanges;
 use writer::{MatchInfo, ParquetRow, ParquetWriter};
@@ -357,6 +357,10 @@ fn produce_rows(
     // report a feature it can't match as missing; see
     // [crate::matchers::Matcher::reports_missing].
     let silent_when_unmatched: Mutex<HashSet<u64>> = Mutex::new(HashSet::new());
+    // Exclusive candidates, by ATP ordinal, whose matcher reports a
+    // feature it can't match as `located_in` its host, but not as
+    // missing.
+    let missing_silenced: Mutex<HashSet<u64>> = Mutex::new(HashSet::new());
     let matched = MatchedSet::new(osm.index.len());
     let mut coverage = AtpCoverage::default();
     // ATP features per spider that no matcher handles, and that get no
@@ -375,7 +379,9 @@ fn produce_rows(
     // [enclosing_host].
     let enclosing_hosts: Mutex<HashMap<u64, Host>> = Mutex::new(HashMap::new());
     let host_of = |ordinal: u64, atp: &Place| {
-        located_in_tag(atp)
+        // A partner's `located_in` is for its own rules.
+        post_partner_host(atp)
+            .or_else(|| located_in_tag(atp))
             .or_else(|| departments.get(&ordinal).cloned())
             .or_else(|| {
                 enclosing_hosts
@@ -388,8 +394,10 @@ fn produce_rows(
     };
     let located_in_rows = AtomicU64::new(0);
     // Sends the row of an ATP feature without a match, and returns
-    // whether it is `missing_in_osm`, rather than `located_in`.
-    let send_unmatched = |atp: &Place, host: Option<&Host>| -> Result<bool> {
+    // whether it is `missing_in_osm`, rather than `located_in`. With
+    // `report_missing` false, only a `located_in` row goes out; see
+    // [crate::matchers::Matcher::reports_located_in].
+    let send_unmatched = |atp: &Place, host: Option<&Host>, report_missing: bool| -> Result<bool> {
         if let Some(host) = host
             && let Some(r) = find_host(atp, host, osm)?
         {
@@ -404,6 +412,9 @@ fn produce_rows(
                 signals,
                 &out,
             )?;
+            return Ok(false);
+        }
+        if !report_missing {
             return Ok(false);
         }
         send_row(atp, None, MatchInfo::missing_in_osm(), osm, signals, &out)?;
@@ -510,7 +521,10 @@ fn produce_rows(
                     Ok(())
                 };
             for (lo, hi) in MergedCellRanges::new(covering) {
-                for r in osm.index.query(lo..=hi, atp.mask) {
+                for r in osm
+                    .index
+                    .query(lo..=hi, matcher.query_mask().unwrap_or(atp.mask))
+                {
                     let feature = osm.index.get_feature(r)?;
                     osm_candidates_decoded.fetch_add(1, Ordering::Relaxed);
                     let (Some((own, brands)), Some(point)) = (&maybe_enclosed, &point) else {
@@ -570,10 +584,15 @@ fn produce_rows(
                 }
                 let mut hasher = std::hash::DefaultHasher::new();
                 atp.spider.hash(&mut hasher);
-                if !matcher.reports_missing() {
+                if !matcher.reports_located_in() {
                     silent_when_unmatched
                         .lock()
                         .expect("silent_when_unmatched lock")
+                        .insert(batch_start + i as u64);
+                } else if !matcher.reports_missing() {
+                    missing_silenced
+                        .lock()
+                        .expect("missing_silenced lock")
                         .insert(batch_start + i as u64);
                 }
                 if !via_corrected.is_empty() {
@@ -595,10 +614,10 @@ fn produce_rows(
                 return Ok(());
             }
             let Some(&(score, r)) = best.first() else {
-                if !matcher.reports_missing() {
+                if !matcher.reports_located_in() {
                     return Ok(());
                 }
-                if send_unmatched(atp, host.as_ref())? {
+                if send_unmatched(atp, host.as_ref(), matcher.reports_missing())? {
                     let why = if rejected.is_empty() {
                         Missing::NoCandidate
                     } else {
@@ -698,6 +717,9 @@ fn produce_rows(
     let silent_when_unmatched = silent_when_unmatched
         .into_inner()
         .expect("silent_when_unmatched lock");
+    let missing_silenced = missing_silenced
+        .into_inner()
+        .expect("missing_silenced lock");
     let mut ordinal: u64 = 0;
     for batch in atp_reader.read_all()? {
         for atp in batch? {
@@ -721,7 +743,8 @@ fn produce_rows(
                     }
                     None if silent_when_unmatched.contains(&ordinal) => {}
                     None => {
-                        if send_unmatched(&atp, host_of(ordinal, &atp).as_ref())? {
+                        let report_missing = !missing_silenced.contains(&ordinal);
+                        if send_unmatched(&atp, host_of(ordinal, &atp).as_ref(), report_missing)? {
                             diagnostics.add_missing(&atp.spider, Missing::Taken);
                         }
                     }
@@ -1083,7 +1106,7 @@ fn find_host(atp: &Place, host: &Host, osm: &OsmFeatures) -> Result<Option<Local
             };
             // The covering reaches farther than the search radius, and
             // a charge point's station must really be close.
-            if host.prefers_enclosing() && d > max_rad {
+            if host.is_strict_radius() && d > max_rad {
                 continue;
             }
             if best.is_none_or(|(b, _)| d < b) {

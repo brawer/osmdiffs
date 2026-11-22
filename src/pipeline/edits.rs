@@ -64,7 +64,7 @@ pub struct SuggestedEdit {
 
 impl PartialEq for SuggestedEdit {
     fn eq(&self, other: &Self) -> bool {
-        self.osm_id == other.osm_id
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 impl Eq for SuggestedEdit {}
@@ -74,8 +74,12 @@ impl PartialOrd for SuggestedEdit {
     }
 }
 impl Ord for SuggestedEdit {
+    /// By OSM ID, and then by tags, so that [merge_edits] gets the
+    /// edits of one feature in the same order every run.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.osm_id.cmp(&other.osm_id)
+        self.osm_id
+            .cmp(&other.osm_id)
+            .then_with(|| self.tags.cmp(&other.tags))
     }
 }
 
@@ -188,6 +192,9 @@ pub fn suggest_edits(
 /// match don't decode into this (nothing to suggest an edit for), but
 /// still count against the caller's progress bar; see [read_conflated_rows].
 struct ConflatedRow {
+    atp_spider: String,
+    /// `match.relation`: `same` or `located_in`.
+    relation: String,
     atp_tags: Vec<(String, String)>,
     osm_type: String,
     osm_id: u64,
@@ -212,7 +219,9 @@ fn produce_edits(
             let Some(row) = row else {
                 return Ok(());
             };
-            let Some(suggester) = create_edit_suggester(&row.atp_tags) else {
+            let Some(suggester) =
+                create_edit_suggester(&row.atp_spider, &row.atp_tags, &row.relation)
+            else {
                 return Ok(());
             };
             let centroid = decode_centroid(&row.osm_geometry_wkb)?;
@@ -287,14 +296,19 @@ fn extract_conflated_row(batch: &RecordBatch, row: usize) -> Result<Option<Confl
     if osm.is_null(row) {
         return Ok(None);
     }
-    // Only a row about one thing gets edits: in a `located_in` row, the
-    // OSM feature is the store that the ATP feature is inside of.
-    if get_string(get_struct(batch, "match")?, "relation", row)? != "same" {
+    // Mostly, only a row about one thing gets edits: in a `located_in`
+    // row, the OSM feature is the store that the ATP feature is inside
+    // of. Postal partners are the exception; see
+    // [crate::edit_suggesters::create_edit_suggester].
+    let relation = get_string(get_struct(batch, "match")?, "relation", row)?;
+    if relation != "same" && relation != "located_in" {
         return Ok(None);
     }
     let modified = get_struct(osm, "modified")?;
 
     Ok(Some(ConflatedRow {
+        atp_spider: get_string(get_struct(atp, "fetched")?, "spider", row)?,
+        relation,
         atp_tags: get_tags(atp, "tags", row)?,
         osm_type: get_string(osm, "type", row)?,
         osm_id: get_u64(osm, "id", row)?,
@@ -333,17 +347,32 @@ fn write_edits(edits: Receiver<SuggestedEdit>, path: &Path, workdir: &Path) -> R
         num_edits.fetch_add(1, Ordering::Relaxed);
         std::io::Result::Ok(x)
     }))?;
-    let mut last_osm_id = None;
-    for edit in sorted {
-        let edit = edit?;
-        // Only emit one single edit per OSM ID.
-        if Some(edit.osm_id) == last_osm_id {
-            continue;
-        }
-        last_osm_id = Some(edit.osm_id);
+    // Only emit one single edit per OSM ID, merging the edits that
+    // several ATP features suggest for it; see [merge_edits]. The
+    // merged edit is as important as the most important of them.
+    let mut pending: Option<SuggestedEdit> = None;
+    let mut emit = |edit: SuggestedEdit| -> Result<()> {
         let mut line = edit.to_geojson().to_string();
         line.push('\n');
         writer.write_all(line.as_ref())?;
+        Ok(())
+    };
+    for edit in sorted {
+        let edit = edit?;
+        match &mut pending {
+            Some(p) if p.osm_id == edit.osm_id => {
+                p.importance = p.importance.max(edit.importance);
+                merge_edits(&mut p.tags, edit.tags);
+            }
+            _ => {
+                if let Some(p) = pending.replace(edit) {
+                    emit(p)?;
+                }
+            }
+        }
+    }
+    if let Some(p) = pending {
+        emit(p)?;
     }
     writer.flush()?;
     rename(&tmp_path, path)?;
@@ -351,9 +380,97 @@ fn write_edits(edits: Receiver<SuggestedEdit>, path: &Path, workdir: &Path) -> R
     Ok(num_edits.load(Ordering::SeqCst))
 }
 
+/// Adds the tags of another edit for the same OSM feature to `tags`.
+/// As before postal partners got edits, the other tags come from one
+/// edit alone, the first that has any, so that two ATP features never
+/// mix their opening hours. The `post_office` tags of
+/// [crate::edit_suggesters] add up, since several partners may be in
+/// one store: `Hermes;DHL` and `Hermes;DPD` give `Hermes;DHL;DPD`. If
+/// the brands and their Wikidata IDs no longer line up, the IDs are
+/// left out.
+fn merge_edits(tags: &mut Vec<(String, String)>, other: Vec<(String, String)>) {
+    const LISTS: [&str; 2] = ["post_office:brand", "post_office:brand:wikidata"];
+    let is_postal = |key: &str| key == "post_office" || key.starts_with("post_office:");
+    let has_other = tags.iter().any(|(k, _)| !is_postal(k));
+    for (key, value) in other {
+        if !is_postal(&key) {
+            if !has_other {
+                tags.push((key, value));
+            }
+            continue;
+        }
+        match tags.iter_mut().find(|(k, _)| *k == key) {
+            None => tags.push((key, value)),
+            Some((_, old)) if LISTS.contains(&key.as_str()) => {
+                for v in value.split(';') {
+                    if !old.split(';').any(|o| o == v) {
+                        old.push(';');
+                        old.push_str(v);
+                    }
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    let count = |key: &str| {
+        tags.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.split(';').count())
+    };
+    if let Some(ids) = count(LISTS[1])
+        && count(LISTS[0]).is_some_and(|brands| brands != ids)
+    {
+        tags.retain(|(k, _)| k != LISTS[1]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_merge_edits() {
+        let tags = |t: &[(&str, &str)]| -> Vec<(String, String)> {
+            t.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let mut a = tags(&[
+            ("opening_hours", "Mo-Fr 08:00-18:00"),
+            ("post_office:brand", "Hermes;DHL"),
+        ]);
+        merge_edits(
+            &mut a,
+            tags(&[
+                ("opening_hours", "Mo-Sa 08:00-20:00"),
+                ("post_office", "post_partner"),
+                ("post_office:brand", "Hermes;DPD"),
+            ]),
+        );
+        assert_eq!(
+            a,
+            tags(&[
+                ("opening_hours", "Mo-Fr 08:00-18:00"),
+                ("post_office:brand", "Hermes;DHL;DPD"),
+                ("post_office", "post_partner"),
+            ])
+        );
+        let mut b = tags(&[
+            ("post_office:brand", "DHL"),
+            ("post_office:brand:wikidata", "Q489815"),
+        ]);
+        merge_edits(
+            &mut b,
+            tags(&[("post_office:brand", "DPD"), ("phone", "+49 30 1234567")]),
+        );
+        assert_eq!(
+            b,
+            tags(&[
+                ("post_office:brand", "DHL;DPD"),
+                ("phone", "+49 30 1234567")
+            ])
+        );
+    }
 
     #[test]
     fn to_geojson_carries_rounded_importance() {

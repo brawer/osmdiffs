@@ -128,9 +128,15 @@ pub struct Sighting {
 /// Returns one [Sighting] for each phone number and email address in
 /// `place`'s tags, at the place's `s2_cell_id`. A value listed twice on
 /// the same place yields two identical sightings, which doesn't change
-/// any rectangle.
+/// any rectangle. A postal partner gives none: its contacts are often
+/// those of the post office it belongs to, and would make that office's
+/// phone nondescript; see [crate::matchers::post_partner].
 pub fn sightings(place: &Place) -> Vec<Sighting> {
     let mut result = Vec::new();
+    let tags = place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+    if crate::matchers::post_partner::is_post_partner(tags) {
+        return result;
+    }
     for (key, value) in &place.tags {
         let (signal, values): (Signal, Box<dyn Iterator<Item = u64>>) = if is_phone_key(key) {
             (Signal::Phone, Box::new(parse_phone_numbers(value)))
@@ -363,6 +369,12 @@ mod tests {
         assert!(s.iter().all(|s| s.s2_cell_id == p.s2_cell_id));
 
         assert!(sightings(&place(8.5, 47.3, &[("name", "No phone")])).is_empty());
+        let partner = [
+            ("amenity", "yes"),
+            ("post_office", "post_partner"),
+            ("phone", "+66 2 532 3837"),
+        ];
+        assert!(sightings(&place(100.6, 13.9, &partner)).is_empty());
     }
 
     fn sighting(signal: Signal, value: u64, lng: f64, lat: f64) -> Sighting {

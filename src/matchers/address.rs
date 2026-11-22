@@ -14,7 +14,7 @@ fn find<'a>(tags: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
 /// otherwise unsegmented: `Zürcherstr. 4` → `zurcherstr`, `4`;
 /// `銀座4-6-16` → `銀座`, `4`, `6`, `16`. This needs no word
 /// segmentation, so it works the same for scripts without spaces.
-fn fold_tokens(s: &str) -> Vec<String> {
+pub(crate) fn fold_tokens(s: &str) -> Vec<String> {
     use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
     let mut tokens = Vec::new();
     let mut cur = String::new();

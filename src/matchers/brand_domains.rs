@@ -99,7 +99,14 @@ struct DomainStats {
 }
 
 impl BrandDomainsBuilder {
+    /// Counts the feature with `tags`. A postal partner doesn't count:
+    /// it links the postal network's website, such as `royalmail.com`
+    /// for a corner shop, which would make the network's domain look
+    /// shared with other brands; see [super::post_partner].
     pub fn add<'a>(&mut self, tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) {
+        if super::post_partner::is_post_partner(tags.clone()) {
+            return;
+        }
         let domains = website_domains(tags.clone());
         if domains.is_empty() || has_several_ids(tags.clone()) {
             return;
@@ -293,6 +300,16 @@ mod tests {
         add(
             &mut b,
             &[("brand:wikidata", "Q5"), ("website", "https://group.ch/b")],
+        );
+        // A postal partner linking Denner's site, as a Royal Mail
+        // partner links royalmail.com, doesn't count.
+        add(
+            &mut b,
+            &[
+                ("amenity", "yes"),
+                ("post_office", "post_partner"),
+                ("website", "https://denner.ch/post"),
+            ],
         );
         // A car dealer of two brands neither helps nor hurts.
         add(
