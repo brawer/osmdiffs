@@ -6,22 +6,14 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// How [`render_tiles`] should choose which zoom levels to build.
-pub enum ZoomRange {
-    /// `-zg --extend-zooms-if-still-dropping`: let tippecanoe pick a
-    /// maximum zoom automatically, extending further if features are
-    /// still being dropped once it gets there. Safe for ordinary
-    /// point/line/polygon data, where zooming in genuinely separates
-    /// crowded features from each other -- but see
-    /// `conflated_tiles::DETAIL_MAX_ZOOM`'s doc comment for a
-    /// real case where that assumption doesn't hold, and this never
-    /// terminates in practice.
-    Auto,
-    /// `-Z<min> -z<max>`: an explicit, non-negotiable zoom range, no
-    /// auto-detection or extension. Use this for any input that might
-    /// contain the kind of degenerate geometry `Auto`'s doc comment
-    /// warns about.
-    Bounded { min: u8, max: u8 },
+/// Which zoom levels [`render_tiles`] builds: `-Z<min> -z<max>`, an
+/// explicit, non-negotiable range. Never tippecanoe's automatic `-zg
+/// --extend-zooms-if-still-dropping`, which doesn't terminate on the
+/// kind of degenerate geometry that `conflated_tiles::DETAIL_MAX_ZOOM`'s
+/// doc comment describes.
+pub struct ZoomRange {
+    pub min: u8,
+    pub max: u8,
 }
 
 /// Whether [`render_tiles`] may drop features to keep tiles small.
@@ -164,14 +156,8 @@ fn make_tippecanoe_command(
         .arg("--force")
         .arg("--temporary-directory")
         .arg(std::path::absolute(workdir)?);
-    match zoom_range {
-        ZoomRange::Auto => {
-            cmd.arg("-zg").arg("--extend-zooms-if-still-dropping");
-        }
-        ZoomRange::Bounded { min, max } => {
-            cmd.arg(format!("-Z{min}")).arg(format!("-z{max}"));
-        }
-    }
+    let ZoomRange { min, max } = zoom_range;
+    cmd.arg(format!("-Z{min}")).arg(format!("-z{max}"));
     // No random dot-dropping (`-r 1`): with an importance filter, that
     // filter decides what coarse zooms show; without one, every zoom
     // shows every point. Tippecanoe's default rate of 2.5 (or any rate
@@ -221,8 +207,8 @@ fn make_tippecanoe_command(
 /// via `tile-join` (a sibling binary tippecanoe's own build already
 /// produces -- see `Containerfile`). Used to combine
 /// `conflated.pmtiles`' coarse overview pass (built with
-/// `ZoomRange::Bounded { min: 0, max: DETAIL_MIN_ZOOM - 1 }`) and its
-/// high-zoom detail pass (`Bounded { min: DETAIL_MIN_ZOOM, max:
+/// `ZoomRange { min: 0, max: DETAIL_MIN_ZOOM - 1 }`) and its
+/// high-zoom detail pass (`ZoomRange { min: DETAIL_MIN_ZOOM, max:
 /// DETAIL_MAX_ZOOM }`) into one file spanning the whole range -- see
 /// `pipeline::conflated_tiles`' module doc comment for why that split
 /// exists. `tile-join` itself warns (not an error) about the two
@@ -324,14 +310,14 @@ mod tests {
 
     #[test]
     fn test_make_tippecanoe_command_importance_filter() {
-        let layers = [make_test_tile_layer("Shops", "diffed-shops.jsonl")];
+        let layers = [make_test_tile_layer("Shops", "shops.jsonl")];
         let cmd = make_tippecanoe_command(
             &layers,
             &PathBuf::from("test-workdir"),
             &PathBuf::from("test-output.pmtiles"),
-            ZoomRange::Auto,
+            ZoomRange { min: 0, max: 12 },
             Thinning::DropDensest {
-                importance_attr: Some("@importance"),
+                importance_attr: Some("importance"),
             },
         )
         .expect("should not fail");
@@ -342,16 +328,16 @@ mod tests {
         let r = args.iter().position(|a| a == "-r").expect("-r");
         assert_eq!(args[r + 1], "1");
         let j = args.iter().position(|a| a == "-j").expect("-j");
-        assert_eq!(args[j + 1], importance_filter("@importance"));
+        assert_eq!(args[j + 1], importance_filter("importance"));
         assert!(args.iter().any(|a| a == "--drop-densest-as-needed"));
     }
 
     #[test]
-    fn test_make_tippecanoe_command_auto_zoom() {
+    fn test_make_tippecanoe_command_args() {
         let layers = [
             // Empty input file, expected to be suppressed from arguments.
             make_test_tile_layer("Empty", "empty.jsonl"),
-            make_test_tile_layer("Shops", "diffed-shops.jsonl"),
+            make_test_tile_layer("Shops", "shops.jsonl"),
         ];
         let workdir = PathBuf::from("test-workdir");
         let out = PathBuf::from("test-output.pmtiles");
@@ -359,7 +345,7 @@ mod tests {
             &layers,
             &workdir,
             &out,
-            ZoomRange::Auto,
+            ZoomRange { min: 0, max: 12 },
             Thinning::DropDensest {
                 importance_attr: None,
             },
@@ -380,8 +366,8 @@ mod tests {
                 "--force",
                 "--temporary-directory",
                 workdir_abs.to_str().expect("workdir.to_str"),
-                "-zg",
-                "--extend-zooms-if-still-dropping",
+                "-Z0",
+                "-z12",
                 "-r",
                 "1",
                 "--drop-densest-as-needed",
@@ -393,15 +379,15 @@ mod tests {
     }
 
     #[test]
-    fn test_make_tippecanoe_command_bounded_zoom() {
-        let layers = [make_test_tile_layer("Shops", "diffed-shops.jsonl")];
+    fn test_make_tippecanoe_command_detail_pass() {
+        let layers = [make_test_tile_layer("Shops", "shops.jsonl")];
         let workdir = PathBuf::from("test-workdir");
         let out = PathBuf::from("test-output.pmtiles");
         let cmd = make_tippecanoe_command(
             &layers,
             &workdir,
             &out,
-            ZoomRange::Bounded { min: 13, max: 14 },
+            ZoomRange { min: 13, max: 14 },
             Thinning::DropDensest {
                 importance_attr: None,
             },
@@ -419,12 +405,6 @@ mod tests {
             args.iter().any(|a| a == "-z14"),
             "expected -z14 in {args:?}"
         );
-        assert!(
-            !args
-                .iter()
-                .any(|a| a == "-zg" || a == "--extend-zooms-if-still-dropping"),
-            "bounded zoom range should not also pass auto-zoom flags: {args:?}"
-        );
         // The detail pass of conflated.pmtiles must keep every point
         // at every zoom (#916).
         let r = args.iter().position(|a| a == "-r").expect("-r");
@@ -434,12 +414,12 @@ mod tests {
 
     #[test]
     fn test_make_tippecanoe_command_never_thin() {
-        let layers = [make_test_tile_layer("Shops", "diffed-shops.jsonl")];
+        let layers = [make_test_tile_layer("Shops", "shops.jsonl")];
         let cmd = make_tippecanoe_command(
             &layers,
             &PathBuf::from("test-workdir"),
             &PathBuf::from("test-output.pmtiles"),
-            ZoomRange::Bounded { min: 0, max: 8 },
+            ZoomRange { min: 0, max: 8 },
             Thinning::Never {
                 zoom_attr: Some("z"),
                 max_zoom: 8,

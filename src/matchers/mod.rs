@@ -456,7 +456,7 @@ impl<'a> OsmCandidate<'a> {
 
 /// Trait for objects that can score a match candidate. Turning a
 /// matched pair into a proposed edit is a separate concern, handled by
-/// `crate::edit_suggesters` instead.
+/// `crate::pipeline::edits` instead.
 pub trait Matcher {
     fn score_osm_candidate(&self, candidate: &OsmCandidate) -> f64;
 

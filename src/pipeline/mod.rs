@@ -243,8 +243,8 @@ fn run_pipeline_steps(
     // inverted index -- tens of GB on a full-planet run). Nothing after
     // `conflate()` needs it, so it should drop -- unmapping those tables
     // -- right here, instead of pinning that address space for the rest
-    // of the pipeline's steps (`suggest_edits`, `render_tiles`, and
-    // beyond) for no reason.
+    // of the pipeline's steps (tiles, spider statistics, uploads) for
+    // no reason.
     let conflated = {
         let osm_features = run_step("import_osm", || {
             osm::import_osm(&inputs.osm, progress, workdir)
@@ -289,24 +289,19 @@ fn run_pipeline_steps(
         upload::upload_conflated(&conflated, &date, progress)
     })?);
 
-    // Two independent branches off `conflated`, neither depending on
-    // the other: `conflated.pmtiles` (every ATP feature, matched or
-    // not -- see conflated_tiles's own doc comment) visualizes the
-    // *matching* step itself, while `diffed-places.pmtiles` below
-    // visualizes only what `suggest_edits` separately decided to
-    // propose.
+    // `conflated.pmtiles` shows every ATP feature, matched or not (see
+    // conflated_tiles's own doc comment), to visualize the matching step.
     //
-    // conflated.pmtiles itself is built in two zoom-bounded passes,
-    // joined together, rather than one -zg/auto-zoom build: an
-    // overview pass (one minimal feature per row -- no tags -- up to
-    // DETAIL_MIN_ZOOM - 1) and a detail pass (full-tag features,
-    // DETAIL_MIN_ZOOM..DETAIL_MAX_ZOOM; matched rows up to three each,
-    // unmatched rows one). See conflated_tiles::DETAIL_MAX_ZOOM's doc
-    // comment for why the detail pass can't use tippecanoe's automatic
-    // zoom selection the way the overview pass (and diffed-places.pmtiles,
-    // below) safely can, and the conflated_tiles module doc comment for
-    // why the overview carries no tags. Both passes' input layers come
-    // from one extract_conflated_layers scan, not two.
+    // It is built in two zoom-bounded passes, joined together, rather
+    // than one -zg/auto-zoom build: an overview pass (one minimal
+    // feature per row -- no tags -- up to DETAIL_MIN_ZOOM - 1) and a
+    // detail pass (full-tag features, DETAIL_MIN_ZOOM..DETAIL_MAX_ZOOM;
+    // matched rows up to three each, unmatched rows one). See
+    // conflated_tiles::DETAIL_MAX_ZOOM's doc comment for why the detail
+    // pass can't use tippecanoe's automatic zoom selection, and the
+    // conflated_tiles module doc comment for why the overview carries
+    // no tags. Both passes' input layers come from one
+    // extract_conflated_layers scan, not two.
     let conflated_layers = run_step("extract_conflated_layers", || {
         conflated_tiles::extract_conflated_layers(&conflated, progress, workdir)
     })?;
@@ -320,7 +315,7 @@ fn run_pipeline_steps(
             progress,
             workdir,
             "conflated-overview.pmtiles",
-            tiles::ZoomRange::Bounded {
+            tiles::ZoomRange {
                 min: 0,
                 max: conflated_tiles::DETAIL_MIN_ZOOM - 1,
             },
@@ -339,7 +334,7 @@ fn run_pipeline_steps(
             progress,
             workdir,
             "conflated-detail.pmtiles",
-            tiles::ZoomRange::Bounded {
+            tiles::ZoomRange {
                 min: conflated_tiles::DETAIL_MIN_ZOOM,
                 max: conflated_tiles::DETAIL_MAX_ZOOM,
             },
@@ -357,7 +352,7 @@ fn run_pipeline_steps(
             progress,
             workdir,
             "conflated-spider-cells.pmtiles",
-            tiles::ZoomRange::Bounded {
+            tiles::ZoomRange {
                 min: 0,
                 max: conflated_tiles::SPIDER_CELLS_MAX_ZOOM,
             },
@@ -394,25 +389,6 @@ fn run_pipeline_steps(
     })?;
     published.push(run_step("upload_spider_stats", || {
         upload::upload_spider_stats(&spider_stats, &date, progress)
-    })?);
-
-    let edits = run_step("suggest_edits", || {
-        edits::suggest_edits(&conflated, progress, workdir)
-    })?;
-    let tiles = run_step("render_tiles", || {
-        tiles::render_tiles(
-            &edits,
-            progress,
-            workdir,
-            "diffed-places.pmtiles",
-            tiles::ZoomRange::Auto,
-            tiles::Thinning::DropDensest {
-                importance_attr: Some("@importance"),
-            },
-        )
-    })?;
-    published.push(run_step("upload_tiles", || {
-        upload::upload_tiles(&tiles, &date, progress)
     })?);
 
     // Standalone provenance BOM for conflated.parquet (paired to it by

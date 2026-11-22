@@ -1,12 +1,9 @@
 //! Turns `conflated.parquet` (produced by `crate::pipeline::conflate`)
 //! into PMTiles-ready GeoJSON Lines tile layers, for visualizing the
 //! *matching* step itself -- every AllThePlaces feature, matched or
-//! not -- independent of whatever `crate::pipeline::edits` separately
-//! decides to propose as an edit (see
-//! [#709](https://github.com/brawer/osmdiffs/issues/709)).
+//! not (see [#709](https://github.com/brawer/osmdiffs/issues/709)).
 //!
-//! Unlike `edits`, this doesn't need an external sort: every output
-//! feature comes from exactly one input row (a row contributes one
+//! This doesn't need an external sort: every output feature comes from exactly one input row (a row contributes one
 //! overview feature and one-to-three detail features, never anything
 //! merged across rows), so a straight sequential-batch,
 //! rayon-parallel-per-batch scan is enough.
@@ -199,7 +196,7 @@ pub(crate) const SPIDER_CELL_ZOOM_ATTR: &str = "z";
 /// consumes them. Named fields, not a `Vec` some caller has to index
 /// positionally and remember the order of.
 pub struct ConflatedLayers {
-    /// Fed to the overview pass (`ZoomRange::Bounded { min: 0, max:
+    /// Fed to the overview pass (`ZoomRange { min: 0, max:
     /// DETAIL_MIN_ZOOM - 1 }`) together with [`Self::overview_unmatched`].
     pub overview_matched: TileLayer,
     /// Fed to the overview pass together with [`Self::overview_matched`].
@@ -207,7 +204,7 @@ pub struct ConflatedLayers {
     /// Fed to the overview pass together with [`Self::overview_matched`]:
     /// one minimal OSM shape per deletion candidate.
     pub overview_deletion_candidates: TileLayer,
-    /// Fed to the detail pass (`ZoomRange::Bounded { min:
+    /// Fed to the detail pass (`ZoomRange { min:
     /// DETAIL_MIN_ZOOM, max: DETAIL_MAX_ZOOM }`): matched rows, up to
     /// three features each. Named `MATCHED_LAYER_NAME` -- the same
     /// layer name [`Self::overview_matched`] uses -- so `tile-join`
@@ -225,7 +222,7 @@ pub struct ConflatedLayers {
     /// `DELETION_CANDIDATE_LAYER_NAME`, matching
     /// [`Self::overview_deletion_candidates`].
     pub detail_deletion_candidates: TileLayer,
-    /// Fed to its own pass (`ZoomRange::Bounded { min: 0, max:
+    /// Fed to its own pass (`ZoomRange { min: 0, max:
     /// SPIDER_CELLS_MAX_ZOOM }`, `tiles::Thinning::Never`, never
     /// dropping anything): per spider
     /// and grid cell, one point with counts; see [`SpiderCells`].
@@ -233,9 +230,7 @@ pub struct ConflatedLayers {
 }
 
 /// One decoded row of `conflated.parquet`, kept whether or not it has
-/// an OSM match -- unlike `edits::ConflatedRow`, which only exists for
-/// matched rows (nothing to suggest an edit for otherwise). A row
-/// without an ATP side is a [`DeletionTileRow`] instead.
+/// an OSM match. A row without an ATP side is a [`DeletionTileRow`] instead.
 struct ConflatedTileRow {
     spider: String,
     /// `match.relation`, such as `same` or `located_in`; see
@@ -843,11 +838,10 @@ fn extract_rows(
     for batch in reader {
         let batch = batch?;
         // Decoding + GeoJSON serialization is the CPU-heavy part of
-        // this loop; parallelize it per batch with Rayon, same as
-        // edits.rs's produce_edits, then write out sequentially --
-        // there's nothing to deduplicate or sort here, unlike edits.rs,
-        // so no channels/external sort are needed, just an ordered
-        // in-memory Vec per batch.
+        // this loop; parallelize it per batch with Rayon, then write
+        // out sequentially -- there's nothing to deduplicate or sort
+        // here, so no channels/external sort are needed, just an
+        // ordered in-memory Vec per batch.
         type AtpResult = (ConflatedTileRow, Option<(f64, f64)>, String, Vec<String>);
         enum Extracted {
             Atp(Box<AtpResult>),
@@ -942,8 +936,7 @@ fn extract_rows(
 
 /// Decodes `row`. A row without an ATP side is an OSM feature that may
 /// be gone (see `conflate::deletion`), and becomes a [`DeletionTileRow`].
-/// Unlike `edits::extract_conflated_row`, a row without an `osm` side
-/// is kept, not skipped: an unmatched ATP feature is exactly what this
+/// A row without an `osm` side is kept, not skipped: an unmatched ATP feature is exactly what this
 /// module exists to show.
 fn extract_conflated_tile_row(batch: &RecordBatch, row: usize) -> Result<TileRow> {
     let atp = get_struct(batch, "atp")?;

@@ -149,8 +149,7 @@ pub struct OsmFeatureIndex<'a> {
     _features_mmap: Mmap,
     // Backs len()/is_empty()/feature_id(), not yet called by any real
     // caller (conflate always decodes the full Feature via get_feature()
-    // instead) -- may be picked up once suggest_edits also moves onto
-    // this index.
+    // instead).
     #[allow(unused)]
     entries_count: usize,
     #[allow(unused)]
