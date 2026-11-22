@@ -91,8 +91,13 @@ of the same `spider`.
 
 ### z13–14: the detail
 
-**Full-tag features**, where a tile covers a few km and the tag
-payload costs nothing. Every zoom from z13 to z14 shows every feature:
+**Features with their tags**, where a tile covers a few km. AllThePlaces
+features carry their full `atp:*` tag set. OpenStreetMap features carry
+only `osm:type`, `osm:id`, `osm:version`, `osm:name` and the keys that
+say what kind of place they are (see [Properties](#properties)); a
+viewer fetches their other tags from the OpenStreetMap API when someone
+clicks one ([#1026](https://github.com/brawer/osmdiffs/issues/1026)).
+AllThePlaces has no such API, so its tags stay. Every zoom from z13 to z14 shows every feature:
 there is no random dot-dropping (`-r 1`), and only
 `--drop-densest-as-needed` would thin out a tile that gets too large.
 For the 2026-11-02 planet, the largest z13 tile then comes to about
@@ -120,7 +125,7 @@ under a meter, so map clients such as MapLibre overzoom it instead
   (id-less) overview feature finds this one by taking the nearest
   `part: "atp"` feature of the same `spider` to the click.
 - A **`deletion_candidate`** row yields one feature: its OpenStreetMap
-  shape (`part: "osm"`), with the full `osm:*` tag set, `rule`, and —
+  shape (`part: "osm"`), with the few `osm:*` tags above, `rule`, and —
   for the `wikidata` and `name` rules — `local_share`.
 
 The matched split into separate `atp`/`osm`/`link` features exists
@@ -200,24 +205,30 @@ with `--no-tile-size-limit`.
 - `osm:type`, `osm:id` — the matched OpenStreetMap object. On the
   `matched` and `deletion_candidate` overview features (where they
   double as the join key to the detail layer) and the z13–14
-  `osm`/`link` detail features.
+  `osm`/`host` detail features.
 - `osm:version` — the version of that OpenStreetMap object the run was
   built from (`osm.modified.version` in `conflated.parquet`). On the
-  z13–14 `osm`/`host`/`link` and `deletion_candidate` detail features,
+  z13–14 `osm`/`host` and `deletion_candidate` detail features,
   not on the overview, where it would cost the z0 tile another value
   per feature. A viewer can fetch the object from the OpenStreetMap
   API by type and id, and compare versions to tell whether it was
   edited since.
-- `osm:<tag>` for every tag in `osm.tags` — z13–14 `osm`/`link` detail
-  features only.
-- `atp:<tag>` for every tag in `atp.tags` — z13–14 `atp`/`link` detail
+- `osm:name`, and `osm:<key>` for every key in `osm.tags` that says
+  what kind of place the feature is, such as `osm:shop` or
+  `osm:amenity` (the primary keys of the OpenStreetMap wiki's
+  [Map features](https://wiki.openstreetmap.org/wiki/Map_features),
+  plus `club`, `police` and `advertising`; see `is_kind_key` in
+  [`src/matchers/mod.rs`](../../src/matchers/mod.rs)) — z13–14
+  `osm`/`host` and `deletion_candidate` detail features only, enough
+  to label and style them. Other OpenStreetMap tags are not in the
+  archive.
+- `atp:<tag>` for every tag in `atp.tags` — z13–14 `atp` detail
   features only.
 - `part` (`"atp"` | `"osm"` | `"link"`) — z13–14 detail features only,
   identifying which of the (up to) three a given feature is.
 
-On the `link` feature, tag properties are prefixed (`atp:name` vs.
-`osm:name`) rather than merged, since the two sides can and do disagree
-— that disagreement is often exactly what's worth reviewing. The
-`atp`/`osm` detail features carry only their own side's tags (no
-`osm:*` on the `atp` feature or vice versa), so a tile inspector shows
-unambiguously which end of a pair you're looking at.
+The `link` feature carries no tags, only `fid`, `spider`, `relation`
+and `part`; `fid` ties it to its two ends. The `atp`/`osm` detail
+features carry only their own side's tags (no `osm:*` on the `atp`
+feature or vice versa), so a tile inspector shows unambiguously which
+end of a pair you're looking at.

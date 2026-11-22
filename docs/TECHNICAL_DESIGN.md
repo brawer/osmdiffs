@@ -238,7 +238,7 @@ graph TD
 
     CONFLATED --> EXTRACT_CONFLATED_LAYERS(extract_conflated_layers)
     EXTRACT_CONFLATED_LAYERS --> OVERVIEW_LAYERS["matched.jsonl,<br/>unmatched.jsonl,<br/>deletion-candidates.jsonl<br/>(minimal, no tags)"]
-    EXTRACT_CONFLATED_LAYERS --> DETAIL_LAYERS["matched-detail.jsonl,<br/>unmatched-detail.jsonl,<br/>deletion-candidates-detail.jsonl<br/>(full tags)"]
+    EXTRACT_CONFLATED_LAYERS --> DETAIL_LAYERS["matched-detail.jsonl,<br/>unmatched-detail.jsonl,<br/>deletion-candidates-detail.jsonl<br/>(ATP tags, few OSM tags)"]
     OVERVIEW_LAYERS --> RENDER_CONFLATED_OVERVIEW("render_conflated_overview<br/>(tippecanoe, z0..12)") --> OVERVIEW_PMTILES[conflated-overview.pmtiles]
     DETAIL_LAYERS --> RENDER_CONFLATED_DETAIL("render_conflated_detail<br/>(tippecanoe, z13..16)") --> DETAIL_PMTILES[conflated-detail.pmtiles]
     OVERVIEW_PMTILES --> JOIN_CONFLATED_TILES(join_conflated_tiles/tile-join)
@@ -517,17 +517,18 @@ fetch away.
     vector tile’s columnar value dedup) costs ~20× the low-zoom density
     (measured: full tags → ~370 features at z0; `+fid` → ~7k; overview
     as it stands → ~40k, a workable world map).
-  - the high-zoom **detail** `matched`/`unmatched` layers — full-tag
-    features at z13+, where a tile covers a few km and per-feature
-    bytes cost nothing. A matched row yields up to three (the ATP
-    point, the OSM shape, and a connector line between their centroids,
-    each carrying only its own side’s tags so a tile inspector shows
-    which is which); a `located_in` row yields the same three, with the host as
-    `part: "host"`; any other unmatched row yields one (its ATP point
+  - the high-zoom **detail** `matched`/`unmatched` layers — features
+    with tags at z13+, where a tile covers a few km. A matched row
+    yields up to three: the ATP point with its full `atp:*` set, the
+    OSM shape with only `osm:type`/`osm:id`/`osm:version`, `osm:name`
+    and the keys that say what kind of place it is (the web app fetches
+    the rest from the OSM API on click, #1026), and a connector line
+    between their centroids with no tags at all. A `located_in` row
+    yields the same three, with the host as `part: "host"`; any other unmatched row yields one (its ATP point
     with the full `atp:*` set). Every detail feature carries `fid`, the
     row’s ordinal in `conflated.parquet` — it groups a matched row’s
     up-to-three features and cross-references the parquet. Detail
-    features with an OSM side also carry `osm:version`, from
+    features with an OSM side carry `osm:version`, from
     `osm.modified.version`. To go from a
     clicked overview feature to the full record: `matched` features
     join on `osm:type`+`osm:id`; `unmatched` (which have no id —
@@ -537,8 +538,8 @@ fetch away.
     OSM features that nothing in ATP matched but that may be gone (see
     `conflate::deletion`). The overview feature is the OSM shape with
     `relation`, `rule` (the row's `match.evidence.rule`), `importance`
-    and `osm:type`/`osm:id`; the detail feature adds the full `osm:*`
-    tag set, `fid`, `part: "osm"` and `local_share`. They have no
+    and `osm:type`/`osm:id`; the detail feature adds `osm:version`,
+    `osm:name` and the kind keys, `fid`, `part: "osm"` and `local_share`. They have no
     `spider` and don't count towards `spider_cells`.
 
   Rows whose ATP↔OSM offset is below `MIN_CONNECTOR_LENGTH_METERS` (a

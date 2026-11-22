@@ -32,9 +32,12 @@
 //!   where a tile covers a few km and per-feature bytes cost nothing):
 //!   matched rows get up to three features each (see
 //!   [`ConflatedTileRow::to_detail_geojson_lines`]), unmatched rows
-//!   get one -- both carrying their full tag set (the tag inspection
-//!   the overview can't afford) and `fid`, the row's ordinal in
-//!   `conflated.parquet`.
+//!   get one -- ATP features carrying their full `atp:*` tag set (the
+//!   tag inspection the overview can't afford), OSM features only
+//!   `osm:type`/`osm:id`/`osm:version`, `osm:name` and the keys that
+//!   say what kind of place they are, since a viewer can fetch the rest
+//!   from the OSM API ([#1026](https://github.com/brawer/osmdiffs/issues/1026)),
+//!   and all of them `fid`, the row's ordinal in `conflated.parquet`.
 //!
 //! - the **spider cells** layer (`spider_cells`, z0 to
 //!   [`SPIDER_CELLS_MAX_ZOOM`]): for each spider and each cell of a grid
@@ -72,6 +75,7 @@
 //! the full design discussion.
 
 use super::tiles::round_importance;
+use crate::matchers::is_kind_key;
 use crate::utils::parquet::{
     get_binary, get_f32, get_string, get_struct, get_tags, get_u32, get_u64,
 };
@@ -217,7 +221,7 @@ pub struct ConflatedLayers {
     /// for the same `tile-join` reason.
     pub detail_unmatched: TileLayer,
     /// Fed to the detail pass together with [`Self::detail_matched`]:
-    /// one full-tag OSM shape per deletion candidate. Named
+    /// one OSM shape per deletion candidate. Named
     /// `DELETION_CANDIDATE_LAYER_NAME`, matching
     /// [`Self::overview_deletion_candidates`].
     pub detail_deletion_candidates: TileLayer,
@@ -295,6 +299,21 @@ impl OsmSide {
         properties.insert("osm:id".to_string(), Value::from(self.osm_id));
         properties.insert("osm:version".to_string(), Value::from(self.osm_version));
     }
+
+    /// Inserts the few OSM tags that a detail feature keeps, as
+    /// `osm:<key>`: `name`, and every key that says what kind of place
+    /// the feature is (see [`crate::matchers::is_kind_key`]), so that
+    /// a map can label and style it without a request. The web app
+    /// fetches the other tags from the OSM API when someone clicks the
+    /// feature, by `osm:type`/`osm:id` (see
+    /// [#1026](https://github.com/brawer/osmdiffs/issues/1026)).
+    fn insert_detail_tags(&self, properties: &mut Map<String, Value>) {
+        for (k, v) in &self.osm_tags {
+            if k == "name" || is_kind_key(k) {
+                properties.insert(format!("osm:{k}"), Value::String(v.clone()));
+            }
+        }
+    }
 }
 
 impl ConflatedTileRow {
@@ -353,8 +372,10 @@ impl ConflatedTileRow {
     /// instead of an internal `Option::unwrap`.
     ///
     /// Yields the ATP point and the OSM shape as two separate
-    /// features -- each carrying only its own side's tags (`atp:*` or
-    /// `osm:*`), so a tile inspector shows which end is which -- plus
+    /// features -- each carrying only its own side's tags (the full
+    /// `atp:*` set, or the few `osm:*` tags of
+    /// [`OsmSide::insert_detail_tags`]), so a tile inspector shows
+    /// which end is which -- plus
     /// a connector line between their centroids, unless that line
     /// would be shorter than `MIN_CONNECTOR_LENGTH_METERS` (see that
     /// constant's doc comment for why). Every feature carries `fid`
@@ -362,8 +383,8 @@ impl ConflatedTileRow {
     /// row's detail features, so a viewer can group the up-to-three
     /// back together, and a cross-reference into `conflated.parquet`)
     /// and a `part` property (`"atp"` | `"osm"` | `"link"`) identifying
-    /// its role; the connector line -- the only feature that isn't
-    /// clearly one side or the other -- keeps both tag sets. For a
+    /// its role; the connector line carries no tags at all, since `fid`
+    /// already ties it to its two ends. For a
     /// `located_in` row, the OSM feature is the host, so its `part` is
     /// `"host"`. Every feature also carries `relation`.
     fn to_detail_geojson_lines(&self, osm: &OsmSide, fid: u64) -> Result<Vec<String>> {
@@ -379,9 +400,7 @@ impl ConflatedTileRow {
 
         let mut osm_properties = self.detail_properties(fid, osm_part);
         osm.insert_detail_ref(&mut osm_properties);
-        for (k, v) in &osm.osm_tags {
-            osm_properties.insert(format!("osm:{k}"), Value::String(v.clone()));
-        }
+        osm.insert_detail_tags(&mut osm_properties);
 
         let mut lines = vec![
             geometry_to_geojson_line(&atp_geometry, atp_properties)?,
@@ -399,14 +418,7 @@ impl ConflatedTileRow {
                 atp_centroid.into(),
                 osm_centroid.into(),
             ]));
-            let mut link_properties = self.detail_properties(fid, "link");
-            for (k, v) in &self.atp_tags {
-                link_properties.insert(format!("atp:{k}"), Value::String(v.clone()));
-            }
-            osm.insert_detail_ref(&mut link_properties);
-            for (k, v) in &osm.osm_tags {
-                link_properties.insert(format!("osm:{k}"), Value::String(v.clone()));
-            }
+            let link_properties = self.detail_properties(fid, "link");
             lines.push(geometry_to_geojson_line(&connector, link_properties)?);
         }
 
@@ -476,8 +488,9 @@ impl DeletionTileRow {
         geometry_to_geojson_line(&geometry, properties)
     }
 
-    /// The detail layer's representation: the OSM shape with its full
-    /// `osm:*` tag set, `part: "osm"`, `fid` (the row's ordinal in
+    /// The detail layer's representation: the OSM shape with
+    /// `osm:version` and the few `osm:*` tags of
+    /// [`OsmSide::insert_detail_tags`], `part: "osm"`, `fid` (the row's ordinal in
     /// `conflated.parquet`) and, for the brand rules, `local_share`
     /// rounded to two decimals.
     fn to_detail_geojson_line(&self, fid: u64) -> Result<String> {
@@ -492,9 +505,7 @@ impl DeletionTileRow {
                 Value::from(round_importance(share)),
             );
         }
-        for (k, v) in &self.osm.osm_tags {
-            properties.insert(format!("osm:{k}"), Value::String(v.clone()));
-        }
+        self.osm.insert_detail_tags(&mut properties);
         geometry_to_geojson_line(&geometry, properties)
     }
 
@@ -1289,7 +1300,12 @@ mod tests {
             osm_type: "way".to_string(),
             osm_id: 99,
             osm_version: 3,
-            osm_tags: vec![("shop".to_string(), "supermarket".to_string())],
+            osm_tags: vec![
+                ("shop".to_string(), "supermarket".to_string()),
+                ("building".to_string(), "retail".to_string()),
+                ("name".to_string(), "Acme OSM".to_string()),
+                ("opening_hours".to_string(), "Mo-Sa 08:00-20:00".to_string()),
+            ],
             osm_geometry_wkb: encode_point(atp_lon, atp_lat + 0.00045),
         }
     }
@@ -1341,6 +1357,14 @@ mod tests {
         assert_eq!(osm_feature["properties"]["osm:shop"], "supermarket");
         assert_eq!(osm_feature["properties"]["osm:id"], 99);
         assert_eq!(osm_feature["properties"]["osm:version"], 3);
+        // Only the name and the kind keys; the app fetches the rest
+        // from the OSM API.
+        assert_eq!(osm_feature["properties"]["osm:name"], "Acme OSM");
+        assert_eq!(osm_feature["properties"]["osm:building"], "retail");
+        assert!(
+            osm_feature["properties"].get("osm:opening_hours").is_none(),
+            "osm feature should carry no other osm:* tags: {osm_feature}"
+        );
         assert!(
             osm_feature["properties"].get("atp:name").is_none(),
             "osm feature should carry no atp:* properties: {osm_feature}"
@@ -1350,9 +1374,15 @@ mod tests {
             .iter()
             .find(|f| f["properties"]["part"] == "link")
             .expect("expected a link feature -- offset is well above the threshold");
-        assert_eq!(link["properties"]["atp:name"], "Acme ATP");
-        assert_eq!(link["properties"]["osm:shop"], "supermarket");
-        assert_eq!(link["properties"]["osm:version"], 3);
+        assert_eq!(link["properties"]["relation"], "same");
+        // No tags at all: fid ties the link to its two ends.
+        let link_keys: Vec<&String> = link["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .filter(|k| k.contains(':'))
+            .collect();
+        assert!(link_keys.is_empty(), "link should carry no tags: {link}");
     }
 
     #[test]
@@ -1520,6 +1550,8 @@ mod tests {
         assert_eq!(props["osm:id"], 99);
         assert_eq!(props["osm:version"], 3);
         assert_eq!(props["osm:shop"], "supermarket");
+        assert_eq!(props["osm:name"], "Acme OSM");
+        assert!(props.get("osm:opening_hours").is_none());
         assert!(props.get("spider").is_none());
     }
 
