@@ -231,8 +231,8 @@ impl Writer {
     /// bits). This gives sub-centimeter precision while halving the
     /// storage compared to two `f64` values.
     fn pack_coord(coord: Coord) -> u64 {
-        let x_i32 = (coord.x * 1e7) as i32;
-        let y_i32 = (coord.y * 1e7) as i32;
+        let x_i32 = (coord.x * 1e7).round() as i32;
+        let y_i32 = (coord.y * 1e7).round() as i32;
         (x_i32 as u64) << 32 | ((y_i32 as u32) as u64)
     }
 
@@ -352,6 +352,28 @@ mod tests {
         assert_eq!(table.get(99), None);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_pack_coord_round_trips_fixed_point_values() {
+        // OSM coordinates are 1e-7-degree integers. Packing their f64
+        // form must give back the same integers; truncating instead of
+        // rounding loses 1e-7 degrees for values like 0.0000013, whose
+        // f64 times 1e7 is 12.999999999999998.
+        for i in (-1_800_000_000_i32..=1_800_000_000).step_by(9_973) {
+            let packed = Writer::pack_coord(Coord {
+                x: f64::from(i) * 1e-7,
+                y: f64::from(i / 2) * 1e-7,
+            });
+            assert_eq!((packed >> 32) as i32, i);
+            assert_eq!(packed as i32, i / 2);
+        }
+        let packed = Writer::pack_coord(Coord {
+            x: 1.3e-6,
+            y: -1.3e-6,
+        });
+        assert_eq!((packed >> 32) as i32, 13);
+        assert_eq!(packed as i32, -13);
     }
 
     #[test]
