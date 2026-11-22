@@ -91,6 +91,9 @@ impl ParquetWriter {
             Arc::new(BinaryArray::from_iter_values(
                 self.places.iter().map(|p| p.shape_wkb.as_slice()),
             )),
+            Arc::new(StringArray::from_iter(
+                self.places.iter().map(|p| p.source_uri.as_deref()),
+            )),
             make_tags(&self.places, self.num_tags),
         ];
 
@@ -169,6 +172,8 @@ fn make_schema() -> Schema {
         // conflated.parquet's public `atp_geometry` column is what gets
         // that treatment (see `pipeline::conflate::writer::new_geo_field`).
         Field::new("shape", DataType::Binary, /* nullable */ false),
+        // AllThePlaces' `@source_uri`, if the feature has one.
+        Field::new("source_uri", DataType::Utf8, /* nullable */ true),
     ];
     fields.push(Field::new(
         "tags",

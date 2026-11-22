@@ -699,6 +699,7 @@ mod tests {
         spider: String::from("newyorker"),
         mask: MatchMask::SHOP,
         fetched: test_timestamp(),
+        source_uri: None,
         shape_wkb: test_shape(5159637664633565895),
         tags: tags(&[
             ("addr:city", "Rapperswil"),
@@ -720,6 +721,7 @@ mod tests {
         spider: String::from("osm"),
         mask: MatchMask(1),
         fetched: test_timestamp(),
+        source_uri: None,
         shape_wkb: test_shape(5159637664662121729),
         tags: tags(&[
             ("branch", "Rapperswil Sonnenhof"),
@@ -738,6 +740,7 @@ mod tests {
         spider: String::from("valora"),
         mask: MatchMask::SHOP,
         fetched: test_timestamp(),
+        source_uri: None,
         shape_wkb: test_shape(5159637400739491865),
         tags: tags(&[
             ("addr:city", "Rapperswil"),
@@ -758,6 +761,7 @@ mod tests {
         spider: String::from("osm"),
         mask: MatchMask::SHOP,
         fetched: test_timestamp(),
+        source_uri: None,
         shape_wkb: test_shape(5159637400743919515),
         tags: tags(&[
             ("brand", "k kiosk"),
@@ -977,6 +981,7 @@ mod tests {
             spider: String::from("test"),
             mask: MatchMask::SHOP,
             fetched: test_timestamp(),
+            source_uri: None,
             shape_wkb: test_shape(s2_cell_id),
             tags: self::tags(tags),
         };
@@ -1138,6 +1143,7 @@ mod tests {
             spider: String::from("test"),
             mask: MatchMask::FUEL,
             fetched: test_timestamp(),
+            source_uri: None,
             shape_wkb: test_shape(s2_cell_id),
             tags: self::tags(tags),
         };
@@ -1246,6 +1252,7 @@ mod tests {
             spider: String::from("test"),
             mask: MatchMask::FUEL,
             fetched: test_timestamp(),
+            source_uri: None,
             shape_wkb: test_shape(s2_cell_id),
             tags: tags(&[
                 ("amenity", "fuel"),
@@ -1369,6 +1376,7 @@ mod tests {
             spider: String::from("test"),
             mask: MatchMask::FUEL,
             fetched: test_timestamp(),
+            source_uri: None,
             shape_wkb: test_shape(s2_cell_id),
             tags: tags(&[
                 ("amenity", "fuel"),
@@ -1507,6 +1515,7 @@ mod tests {
             spider: String::from("apollostation_jp"),
             mask: MatchMask::FUEL,
             fetched: test_timestamp(),
+            source_uri: None,
             shape_wkb: test_shape(s2_cell_id),
             tags: tags(&[("amenity", "fuel"), ("brand:wikidata", "Q114731101")]),
         };
@@ -1625,6 +1634,7 @@ mod tests {
             spider: String::from("test"),
             mask: MatchMask::SHOP,
             fetched: test_timestamp(),
+            source_uri: None,
             shape_wkb: test_shape(s2_cell_id),
             tags: self::tags(tags),
         };
@@ -1769,6 +1779,7 @@ mod tests {
             spider: String::from("test"),
             mask: MatchMask::SHOP,
             fetched: test_timestamp(),
+            source_uri: None,
             shape_wkb: test_shape(s2_cell_id),
             tags: self::tags(tags),
         };
@@ -1895,6 +1906,7 @@ mod tests {
                 spider: String::from("enseignement_premier_second_degre_fr"),
                 mask,
                 fetched: test_timestamp(),
+                source_uri: None,
                 shape_wkb: test_shape(CH_CLOTHES_ATP.s2_cell_id),
                 tags: tags(t),
             }

@@ -71,6 +71,13 @@ pub struct Place {
     /// (a spider's `spider:collection_time`, shared by every feature in
     /// that spider's run). Exposed in `conflated.parquet` as `atp.fetched`.
     pub fetched: UtcTimestamp,
+
+    /// Where AllThePlaces fetched this feature from: its `@source_uri`,
+    /// such as a store page, or a JSON API or Shapefile the spider
+    /// parses. Kept out of `tags`, which holds only the feature's own
+    /// OSM-style tags. Exposed in `conflated.parquet` as
+    /// `atp.fetched.source_uri`.
+    pub source_uri: Option<String>,
 }
 
 impl Place {
@@ -95,6 +102,7 @@ impl Place {
             tags,
             shape_wkb: crate::geometry::encode_wkb(shape),
             fetched,
+            source_uri: None,
         })
     }
 
@@ -106,6 +114,7 @@ impl Place {
             tags: self.tags.clone(),
             shape_wkb: self.shape_wkb.clone(),
             fetched: self.fetched,
+            source_uri: self.source_uri.clone(),
         }
     }
 

@@ -361,6 +361,7 @@ mod tests {
             tags: Vec::new(),
             shape_wkb: Vec::new(),
             fetched: crate::utils::UtcTimestamp(time::UtcDateTime::UNIX_EPOCH),
+            source_uri: None,
         };
         for seed in [0, 1 << 62, u64::MAX] {
             let moved = shifted(&place, seed);

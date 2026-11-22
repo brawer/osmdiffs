@@ -695,9 +695,11 @@ fn make_place(
     let properties = feature.properties.unwrap_or_default();
 
     let mut spider: Option<String> = None;
+    let mut source_uri: Option<String> = None;
 
     // We strip three properties ("nsi_id", "@spider", "@source_uri") from tags,
-    // so we do not need to reserve space for them.
+    // so we do not need to reserve space for them. `@source_uri` goes to
+    // `Place::source_uri` instead; other `@` properties are dropped.
     let num_tags = properties.len();
     let mut tags =
         Vec::<(String, String)>::with_capacity(if num_tags > 3 { num_tags - 3 } else { num_tags });
@@ -727,6 +729,10 @@ fn make_place(
             spider = Some(value);
             continue;
         }
+        if key == "@source_uri" {
+            source_uri = Some(value).filter(|v| !v.is_empty());
+            continue;
+        }
 
         if key.starts_with('@') || value.is_empty() {
             continue;
@@ -753,6 +759,10 @@ fn make_place(
         &shape,
         crate::utils::UtcTimestamp(timestamp),
     )
+    .map(|place| Place {
+        source_uri,
+        ..place
+    })
     .ok_or(Skip::BadGeometry)
 }
 
@@ -913,6 +923,22 @@ mod tests {
             ]
         );
         assert_eq!(place.shape(), point_shape(8.7339982, 47.5039168));
+        assert_eq!(place.source_uri, None);
+    }
+
+    #[test]
+    fn test_make_place_keeps_source_uri() {
+        let json = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[8.5,47.4]},
+            "properties":{"@spider":"s","shop":"bakery","@source_uri":"https://example.ch/store/7"}}"#;
+        let place = super::make_place(json, "s", UtcDateTime::now()).expect("place");
+        assert_eq!(
+            place.source_uri.as_deref(),
+            Some("https://example.ch/store/7")
+        );
+        assert_eq!(tags(&place), [("shop", "bakery")]);
+        let empty = json.replace("https://example.ch/store/7", "");
+        let place = super::make_place(&empty, "s", UtcDateTime::now()).expect("place");
+        assert_eq!(place.source_uri, None);
     }
 
     #[test]

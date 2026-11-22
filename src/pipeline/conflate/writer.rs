@@ -53,6 +53,7 @@ pub struct ParquetWriter {
     // osm.modified's shape.
     atp_fetched_timestamps: TimestampMillisecondBuilder,
     atp_fetched_spiders: StringBuilder,
+    atp_fetched_source_uris: StringBuilder,
     atp_geometries: BinaryBuilder,
     // Per-type counts and largest-geometry tracking for this column,
     // across the whole file -- becomes this column's `geometry_types` in
@@ -251,6 +252,7 @@ pub struct ParquetRow {
 
     atp_spider: Option<String>,
     atp_fetched: Option<UtcTimestamp>,
+    atp_source_uri: Option<String>,
     atp_tags: Vec<(String, String)>,
     atp_shape_wkb: Vec<u8>,
 
@@ -338,6 +340,10 @@ impl ParquetWriter {
             atp_fetched_spiders: StringBuilder::with_capacity(
                 /* item_capacity */ max_rows_per_group,
                 /* data_capacity */ 16 * 1024,
+            ),
+            atp_fetched_source_uris: StringBuilder::with_capacity(
+                /* item_capacity */ max_rows_per_group,
+                /* data_capacity */ 64 * 1024,
             ),
 
             // Most ATP geometries are points, which need 21 bytes in WKB encoding.
@@ -469,11 +475,14 @@ impl ParquetWriter {
             self.atp_geometry_tally
                 .record(&row.atp_shape_wkb, || atp_spider.clone());
             self.atp_fetched_spiders.append_value(atp_spider);
+            self.atp_fetched_source_uris
+                .append_option(row.atp_source_uri.as_deref());
         } else {
             self.atp_present.append_null();
             self.atp_tags.append(false)?;
             self.atp_fetched_timestamps.append_value(0);
             self.atp_fetched_spiders.append_value("");
+            self.atp_fetched_source_uris.append_null();
             self.atp_geometries.append_null();
         }
 
@@ -687,6 +696,7 @@ impl ParquetWriter {
             vec![
                 Arc::new(self.atp_fetched_timestamps.finish()) as ArrayRef,
                 Arc::new(self.atp_fetched_spiders.finish()) as ArrayRef,
+                Arc::new(self.atp_fetched_source_uris.finish()) as ArrayRef,
             ],
             None, // atp.fetched is never null when atp itself is present
         );
@@ -884,17 +894,20 @@ impl ParquetRow {
 
         let atp_spider;
         let atp_fetched;
+        let atp_source_uri;
         let atp_shape_wkb;
         let atp_tags;
         if let Some(atp) = atp {
             atp_shape_wkb = crate::geometry::encode_wkb(&atp.shape());
             atp_spider = Some(atp.spider);
             atp_fetched = Some(atp.fetched);
+            atp_source_uri = atp.source_uri;
             atp_tags = atp.tags;
         } else {
             atp_shape_wkb = Vec::with_capacity(0);
             atp_spider = None;
             atp_fetched = None;
+            atp_source_uri = None;
             atp_tags = Vec::with_capacity(0);
         };
 
@@ -970,6 +983,7 @@ impl ParquetRow {
             s2_cell_id,
             atp_spider,
             atp_fetched,
+            atp_source_uri,
             atp_tags,
             atp_shape_wkb,
             osm_id,
@@ -1041,6 +1055,7 @@ mod schema {
             vec![
                 new_timestamp_field("timestamp", NOT_NULLABLE),
                 Field::new("spider", DataType::Utf8, NOT_NULLABLE),
+                Field::new("source_uri", DataType::Utf8, NULLABLE),
             ],
             NOT_NULLABLE,
         );
@@ -1217,6 +1232,7 @@ mod tests {
             tags: Vec::new(),
             shape_wkb: crate::geometry::encode_wkb(&geo::Geometry::from(geo::Point::new(0.0, 0.0))),
             fetched: UtcTimestamp(time::UtcDateTime::from_unix_timestamp(0).expect("epoch")),
+            source_uri: None,
         };
         let osm = Feature {
             id: 6_870_158_061, // node/687015806, Feature.id-encoded

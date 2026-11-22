@@ -7,7 +7,7 @@
 //! hit for.
 
 use anyhow::{Context, Result};
-use arrow::array::{Array, Int64Array, RecordBatch};
+use arrow::array::{Array, Int64Array, RecordBatch, StringArray};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -76,7 +76,18 @@ fn extract_place(batch: &RecordBatch, row: usize) -> Result<Place> {
         tags: get_tags(batch, "tags", row)?,
         shape_wkb: get_binary(batch, "shape", row)?,
         fetched: get_fetched(batch, row)?,
+        source_uri: get_source_uri(batch, row)?,
     })
+}
+
+fn get_source_uri(batch: &RecordBatch, row: usize) -> Result<Option<String>> {
+    let column = batch
+        .column_by_name("source_uri")
+        .context("missing column 'source_uri'")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("column 'source_uri' is not Utf8")?;
+    Ok(column.is_valid(row).then(|| column.value(row).to_string()))
 }
 
 fn get_fetched(batch: &RecordBatch, row: usize) -> Result<UtcTimestamp> {
