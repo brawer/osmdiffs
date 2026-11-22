@@ -635,6 +635,7 @@ struct ConflatedOsmSide {
     way_members_count: usize,
     atp_spider: String,
     atp_fetched_millis: i64,
+    atp_source_uri: Option<String>,
 }
 
 /// Checks `conflate()`'s output against the fixture data's known shops
@@ -849,6 +850,15 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
                 .downcast_ref::<TimestampMillisecondArray>()
                 .context("'timestamp' is not a millisecond timestamp")?
                 .value(row);
+            let source_uris = fetched
+                .column_by_name("source_uri")
+                .context("fetched has no 'source_uri' field")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("'source_uri' is not a string")?;
+            let atp_source_uri = source_uris
+                .is_valid(row)
+                .then(|| source_uris.value(row).to_string());
 
             matched.push(ConflatedOsmSide {
                 id,
@@ -860,6 +870,7 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
                 way_members_count,
                 atp_spider,
                 atp_fetched_millis,
+                atp_source_uri,
             });
         }
     }
@@ -946,6 +957,18 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
         assert_eq!(
             row.atp_fetched_millis, fetched_millis,
             "way/{osm_id} atp.fetched.timestamp"
+        );
+        // AllThePlaces' `@source_uri`, as the spider gives it: a store
+        // page for MediaMarkt, an API for the others.
+        let source_uri = row.atp_source_uri.as_deref().unwrap_or_default();
+        let expected_prefix = match spider {
+            "tchibo" => "https://www.tchibo.de/service/storefinder/api/",
+            "mediamarkt" => "https://www.mediamarkt.ch/de/store/steinhausen-zugerland-6198",
+            _ => "https://www.denner.ch/api/store/list",
+        };
+        assert!(
+            source_uri.starts_with(expected_prefix),
+            "way/{osm_id} atp.fetched.source_uri: {source_uri:?}"
         );
     }
 

@@ -29,6 +29,7 @@ atp                                          STRUCT, nullable
   fetched                                    STRUCT, non-null
     timestamp TIMESTAMP(ms, UTC)             non-null
     spider    UTF8                           non-null
+    source_uri UTF8                          nullable
 atp_geometry  BINARY (WKB)                   nullable — null exactly when atp is null
 
 osm                                          STRUCT, nullable
@@ -102,6 +103,13 @@ A few things worth calling out that aren’t obvious from the above:
   of that feature’s most recent edit). We don’t preserve OpenStreetMap’s
   full edit history here, only its current state as of the database
   snapshot this file was built from.
+- **`atp.fetched.source_uri`** is the URL that AllThePlaces fetched the
+  feature from (its `@source_uri`), or null if the spider doesn't say.
+  It's often not a page for people: many spiders read a JSON or XML
+  API, or a Shapefile, so look at the feature's `website` first when
+  you want a page that shows the store. Like the other `@` properties
+  of AllThePlaces, it isn't in `atp.tags`, which only holds OSM-style
+  tags.
 - **We deliberately don’t carry OpenStreetMap’s changeset ID.** A
   changeset number resolves, via OSM’s own public API, to the account
   that made the edit — unlike a node/way/relation ID, which only
