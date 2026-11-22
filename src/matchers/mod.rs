@@ -19,6 +19,7 @@ pub(crate) mod former_brands;
 mod infrastructure_matcher;
 pub(crate) mod official_id;
 mod poi_matcher;
+pub(crate) mod post_partner;
 pub(crate) mod street;
 mod transit_matcher;
 pub(crate) use infrastructure_matcher::kind_name as infrastructure_kind;
@@ -286,6 +287,10 @@ impl MatchMask {
             ("power", "yes") => 0,
             ("power", _) => Self::STREET_FURNITURE.0,
 
+            // A postal counter in another business, which AllThePlaces
+            // lists as `amenity=yes`; see [post_partner].
+            ("post_office", "post_partner") => Self::SHOP.0,
+
             ("public_transport", "no") => 0,
             ("public_transport", "platform") => Self::TRANSIT.0 | Self::LARGE.0,
             ("public_transport", _) => Self::TRANSIT.0,
@@ -490,6 +495,17 @@ pub trait Matcher {
         true
     }
 
+    /// True if an AllThePlaces feature that this matcher doesn't match
+    /// goes into `conflated.parquet` as `located_in` its host, when it
+    /// has one in OpenStreetMap; see `pipeline::conflate::located_in`.
+    /// By default, as for [Matcher::reports_missing], since a host is
+    /// the other way of not having a match. True for postal partners,
+    /// whose host is where OSM puts them, while a partner without one
+    /// isn't missing.
+    fn reports_located_in(&self) -> bool {
+        self.reports_missing()
+    }
+
     /// True if no two AllThePlaces features of the same spider should
     /// match the same OpenStreetMap feature, such as two bus platforms
     /// of a stop, or two branches of a chain. Features of different
@@ -523,6 +539,13 @@ pub trait Matcher {
     /// example, Deutsche Post boxes need 100 m, while [match_distance]
     /// gives all street furniture 10 m.
     fn max_distance(&self) -> Option<ChordAngle> {
+        None
+    }
+
+    /// Which OSM features to score, if not those whose [MatchMask]
+    /// intersects the ATP feature's: a postal partner may be in any
+    /// kind of business.
+    fn query_mask(&self) -> Option<MatchMask> {
         None
     }
 }
@@ -588,7 +611,11 @@ pub fn create_matcher<'a>(
     brand_domains: &'a brand_domains::BrandDomains,
     nsi: &brand_names::NsiNames,
 ) -> Option<Box<dyn Matcher + 'a>> {
-    if let Some(matcher) =
+    // Before the POI matcher, which would take a partner's host name
+    // for its own.
+    if let Some(matcher) = post_partner::PostPartnerMatcher::for_place(place) {
+        Some(Box::new(matcher))
+    } else if let Some(matcher) =
         poi_matcher::PoiMatcher::for_place(place, nondescript, brand_domains, nsi)
     {
         Some(Box::new(matcher))

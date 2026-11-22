@@ -14,6 +14,7 @@
 //! one-for-one; there may end up being far fewer of them.
 
 mod poi;
+mod post_partner;
 
 /// Suggests a tag-level edit for an OSM feature already matched to an
 /// AllThePlaces feature. Operates on plain tag lists -- not `Place`/
@@ -32,9 +33,27 @@ pub trait EditSuggester {
     ) -> Option<Vec<(String, String)>>;
 }
 
-/// Picks an [EditSuggester] for an AllThePlaces feature's tags, or
-/// `None` if we don't (yet) generate edits for this kind of feature.
-pub fn create_edit_suggester(atp_tags: &[(String, String)]) -> Option<Box<dyn EditSuggester>> {
+/// Picks an [EditSuggester] for an AllThePlaces feature of `spider`
+/// with `atp_tags`, or `None` if we don't (yet) generate edits for this
+/// kind of feature. `relation` is the row's `match.relation`: only a
+/// postal partner gets edits for the host it is `located_in`, since
+/// OSM puts the partner's tags on its host.
+pub fn create_edit_suggester(
+    spider: &str,
+    atp_tags: &[(String, String)],
+    relation: &str,
+) -> Option<Box<dyn EditSuggester>> {
+    let tags = || atp_tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+    if crate::matchers::post_partner::is_post_partner(tags()) {
+        return matches!(relation, "same" | "located_in").then(|| {
+            Box::new(post_partner::PostPartnerEditSuggester::new(
+                spider, atp_tags,
+            )) as _
+        });
+    }
+    if relation != "same" {
+        return None;
+    }
     let mut mask = crate::matchers::MatchMask::default();
     for (key, value) in atp_tags {
         mask.add_tag(key, value);

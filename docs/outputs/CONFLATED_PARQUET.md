@@ -130,7 +130,10 @@ the matching.
 - `located_in`: the AllThePlaces feature is inside another business,
   such as a pharmacy inside a supermarket, and OpenStreetMap has no
   feature of its own for it. `osm` is the host, so this row says where
-  to add it. Never use its tags for editing the host.
+  to add it. Never use its tags for editing the host. The exception
+  is a postal partner (`post_office=post_partner`), a postal counter
+  that OpenStreetMap maps with `post_office` tags on its host; see
+  rule `post_partner`.
 - `missing_in_osm`: nothing in OpenStreetMap matched the AllThePlaces
   feature (`osm` is null).
 - `deletion_candidate`: nothing in AllThePlaces matched the
@@ -161,8 +164,11 @@ scores lower than one matched by its ID, even when both are right.
 | `same` | `name` | transit stop with a similar name |
 | `same` | `ref` | street furniture, such as a post box, with the same reference |
 | `same` | `kind` | street furniture of the same kind close by |
+| `same` | `post_partner` | postal partner: an OSM `post_office=post_partner` (or `amenity=post_office`) of the same postal brand within 30 m |
+| `same` | `post_partner_name` | postal partner: an OSM partner of the same postal brand that is also the host by name, within 100 m |
 | `located_in` | `department` | a department of a store of the same brand, such as a Publix pharmacy in a Publix supermarket |
 | `located_in` | `located_in` | the host named by the `located_in` or `located_in:wikidata` tags, such as a Starbucks in a Target |
+| `located_in` | `post_partner` | a postal partner, such as a DHL counter in a kiosk, in the OSM store whose name ATP gives, within 100 m; the edits add the `post_office` tags to the store |
 | `located_in` | `charging_station` | a charge point that OSM doesn't map on its own, in the OSM charging station that contains it or is within 50 m |
 | `deletion_candidate` | `wikidata` | brand, network or operator by Wikidata ID |
 | `deletion_candidate` | `name` | brand, network or operator by name |
@@ -195,7 +201,7 @@ match whose phone numbers also agree has the rule `contact`; its
 that decided are checked as they would be if it hadn't, except for the
 distance limits that only apply to the deciding rule: `address`
 matches only within 150 m (30 m for a shop without a name). For the
-transit, street furniture, `located_in` and deletion candidate rules,
+transit, street furniture, postal partner, `located_in` and deletion candidate rules,
 `rules` holds `rule` alone.
 `match.evidence.local_share` is, for deletion candidates by
 brand, the share of OpenStreetMap features of that brand nearby that

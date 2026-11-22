@@ -20,6 +20,9 @@
 //! - An ATP feature with `located_in:wikidata` or `located_in`, which
 //!   some spiders set, such as `starbucks_us` for its cafés in Target
 //!   stores.
+//! - A postal partner (`post_office=post_partner`) that OSM doesn't map
+//!   as a partner yet, in the OSM store whose name ATP gives, within
+//!   [crate::matchers::post_partner::HOST_METERS]; see [post_partner_host].
 //! - A charge point (`man_made=charge_point`) that OSM doesn't map on
 //!   its own, in the OSM charging station that contains it or is within
 //!   [CHARGING_STATION_METERS]; see [charging_station_host].
@@ -27,6 +30,7 @@
 //! See `docs/notes/2026-11-09-departments.md`.
 
 use crate::matchers::category::main_category;
+use crate::matchers::post_partner::{self, PartnerHost, PostalBrand};
 use crate::matchers::{MatchMask, normalize_name, parse_wikidata_ids};
 use crate::places::{Place, PlaceReader};
 use anyhow::Result;
@@ -182,6 +186,9 @@ pub(super) enum Host {
     /// a station's operator often differs from the network that lists
     /// the charge point.
     ChargingStation,
+    /// The store that a postal partner is in, by the name that ATP
+    /// gives for it; see [crate::matchers::post_partner].
+    PostPartner(PartnerHost),
 }
 
 impl Host {
@@ -192,6 +199,7 @@ impl Host {
             Host::Department { .. } => "department",
             Host::LocatedIn { .. } => "located_in",
             Host::ChargingStation => "charging_station",
+            Host::PostPartner(_) => "post_partner",
         }
     }
 
@@ -206,7 +214,7 @@ impl Host {
                 mask
             }
             // The host may be anything, such as a fuel station.
-            Host::LocatedIn { .. } => MatchMask(u16::MAX),
+            Host::LocatedIn { .. } | Host::PostPartner(_) => MatchMask(u16::MAX),
             Host::ChargingStation => {
                 let mut mask = MatchMask::default();
                 mask.add_tag("amenity", "charging_station");
@@ -220,6 +228,7 @@ impl Host {
     pub(super) fn search_meters(&self) -> f64 {
         match self {
             Host::ChargingStation => CHARGING_STATION_METERS,
+            Host::PostPartner(_) => post_partner::HOST_METERS,
             _ => HOST_SEARCH_METERS,
         }
     }
@@ -229,6 +238,12 @@ impl Host {
     /// its centroid farther away than [CHARGING_STATION_METERS].
     pub(super) fn prefers_enclosing(&self) -> bool {
         matches!(self, Host::ChargingStation)
+    }
+
+    /// Whether the host must really be within [Host::search_meters],
+    /// not just in the cells that cover that circle.
+    pub(super) fn is_strict_radius(&self) -> bool {
+        matches!(self, Host::ChargingStation | Host::PostPartner(_))
     }
 
     /// Whether the OSM feature with `tags` is the host. A host is never
@@ -276,6 +291,10 @@ impl Host {
             }
             Host::ChargingStation => main_category(tags)
                 .is_some_and(|c| category_values(&c).any(|c| c == "amenity=charging_station")),
+            Host::PostPartner(host) => {
+                let category = main_category(tags.clone());
+                category.is_some_and(|c| !is_not_host_category(&c)) && host.agrees(tags)
+            }
         }
     }
 
@@ -298,6 +317,9 @@ impl Host {
             Host::LocatedIn { .. } => self.is_host(tags),
             // The charge point matcher only takes charge points anyway.
             Host::ChargingStation => false,
+            // The partner matcher only takes OSM partners of its brand,
+            // and its host may be one already.
+            Host::PostPartner(_) => false,
         }
     }
 }
@@ -310,6 +332,17 @@ pub(super) fn charging_station_host(place: &Place) -> Option<Host> {
         .iter()
         .any(|(k, v)| k == "man_made" && v == "charge_point")
         .then_some(Host::ChargingStation)
+}
+
+/// The host of a postal partner, if ATP names one; `None` for anything
+/// but a partner; see [crate::matchers::post_partner].
+pub(super) fn post_partner_host(place: &Place) -> Option<Host> {
+    let tags = || place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+    if !post_partner::is_post_partner(tags()) {
+        return None;
+    }
+    let brand = PostalBrand::of_atp(&place.spider, tags());
+    PartnerHost::of_atp(tags(), &brand).map(Host::PostPartner)
 }
 
 /// Whether `category` is in [NAMED_HOST_CATEGORIES]. A category with
