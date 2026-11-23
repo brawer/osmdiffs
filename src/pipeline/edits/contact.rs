@@ -94,6 +94,11 @@ pub(super) fn shared_osm_values<'a>(osm: impl Iterator<Item = &'a Tags>) -> Hash
                 *counts.entry(shared_key(family, value)).or_default() += 1;
             }
         }
+        if let Some((_, value)) = tags.iter().find(|(k, _)| k == HERITAGE_WEBSITE) {
+            *counts
+                .entry(shared_key(HERITAGE_WEBSITE, value))
+                .or_default() += 1;
+        }
     }
     counts
         .into_iter()
@@ -149,6 +154,70 @@ fn email_word_keys(email: &str) -> Vec<String> {
         .enumerate()
         .map(|(i, w)| format!("email\t{domain}\t{i}\t{w}"))
         .collect()
+}
+
+/// Spiders of official registries, such as the US National Register
+/// of Historic Places. Their page about a place is a record of it, not
+/// the place's own website, so it goes into `heritage:website`.
+const REGISTRY_SPIDERS: &[&str] = &["national_register_of_historic_places"];
+
+/// Whether `spider` is one of [REGISTRY_SPIDERS].
+pub(super) fn is_registry(spider: &str) -> bool {
+    REGISTRY_SPIDERS.contains(&spider)
+}
+
+/// The key for registry pages; see [REGISTRY_SPIDERS].
+const HERITAGE_WEBSITE: &str = "heritage:website";
+
+/// The `heritage:website` change for an OSM feature with tags `osm`,
+/// given the website `values` of the registry sources that matched it.
+/// Adds the page where OSM has none, and replaces OSM's only if it says
+/// nothing about this one place, such as the register's home page.
+pub(super) fn heritage_changes(
+    osm: &Tags,
+    values: &[&str],
+    shared: &HashSet<String>,
+    warnings: &mut Vec<String>,
+) -> Vec<Change> {
+    let values: Vec<&str> = values
+        .iter()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .collect();
+    let Some(&new) = values.first() else {
+        return Vec::new();
+    };
+    if values[1..]
+        .iter()
+        .any(|v| normalize_url(v) != normalize_url(new))
+    {
+        warnings.push(format!("sources_disagree:{HERITAGE_WEBSITE}"));
+        return Vec::new();
+    }
+    let old = osm
+        .iter()
+        .find(|(k, v)| k == HERITAGE_WEBSITE && !v.trim().is_empty())
+        .map(|(_, v)| v.as_str());
+    let Some(old) = old else {
+        return vec![Change::new(
+            HERITAGE_WEBSITE,
+            None,
+            Some(new.to_string()),
+            Reason::MissingInOsm,
+        )];
+    };
+    if normalize_url(old) == normalize_url(new) {
+        return Vec::new();
+    }
+    if shared.contains(&shared_key(HERITAGE_WEBSITE, old)) || is_home_page(old) {
+        return vec![Change::new(
+            HERITAGE_WEBSITE,
+            Some(old),
+            Some(new.to_string()),
+            Reason::GenericValue,
+        )];
+    }
+    Vec::new()
 }
 
 fn shared_key(family: &str, value: &str) -> String {
@@ -821,6 +890,45 @@ mod tests {
             &Vec::new(),
             &shared
         ));
+    }
+
+    #[test]
+    fn registry_pages_go_to_heritage_website() {
+        let page = "https://npgallery.nps.gov/AssetDetail/NRIS/76000236";
+        let index = "https://www.nps.gov/subjects/nationalregister/index.htm";
+        let mut warnings = Vec::new();
+        let run = |osm: &[(&str, &str)], shared: &HashSet<String>, w: &mut Vec<String>| {
+            heritage_changes(&tags(osm), &[page], shared, w)
+                .into_iter()
+                .map(|c| (c.key, c.old, c.new, c.reason.as_str()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            run(&[("historic", "building")], &HashSet::new(), &mut warnings),
+            [change("heritage:website", None, page, "missing_in_osm")]
+        );
+        // The register's index page, on many features, gets replaced.
+        let osm = tags(&[("heritage:website", index)]);
+        let shared = shared_osm_values([&osm, &osm, &osm].into_iter());
+        assert_eq!(
+            run(&[("heritage:website", index)], &shared, &mut warnings),
+            [change(
+                "heritage:website",
+                Some(index),
+                page,
+                "generic_value"
+            )]
+        );
+        // Another specific page stays.
+        assert!(
+            run(
+                &[("heritage:website", "https://example.org/quaker-house")],
+                &shared,
+                &mut warnings
+            )
+            .is_empty()
+        );
+        assert!(warnings.is_empty());
     }
 
     #[test]

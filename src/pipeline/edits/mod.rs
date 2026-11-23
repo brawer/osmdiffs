@@ -164,9 +164,33 @@ pub(crate) fn decide(element: &mut Element, ctx: &RuleContext) -> Option<Decisio
         .iter()
         .filter(|s| s.partner_tags.is_none() && s.relation == "same")
         .collect();
+    // A registry's page about a place isn't the place's website; see
+    // [contact::heritage_changes].
+    let mut registry_pages: Vec<&str> = Vec::new();
+    let is_page = |k: &str| k == "website" || k == "contact:website";
+    let registry_tags: Vec<Tags> = business
+        .iter()
+        .filter(|s| contact::is_registry(&s.spider))
+        .map(|s| {
+            if let Some((_, v)) = s.tags.iter().find(|(k, _)| is_page(k)) {
+                registry_pages.push(v.as_str());
+            }
+            s.tags
+                .iter()
+                .filter(|(k, _)| !is_page(k))
+                .cloned()
+                .collect()
+        })
+        .collect();
     let contacts: Vec<contact::ContactSource> = business
         .iter()
+        .filter(|s| !contact::is_registry(&s.spider))
         .map(|s| contact::ContactSource { tags: &s.tags })
+        .chain(
+            registry_tags
+                .iter()
+                .map(|tags| contact::ContactSource { tags }),
+        )
         .collect();
     let changes = contact::contact_changes(
         osm,
@@ -176,6 +200,13 @@ pub(crate) fn decide(element: &mut Element, ctx: &RuleContext) -> Option<Decisio
         element.position,
         &mut decision.warnings,
     );
+    let mut changes = changes;
+    changes.extend(contact::heritage_changes(
+        osm,
+        &registry_pages,
+        ctx.shared_osm_values,
+        &mut decision.warnings,
+    ));
     if !changes.is_empty() {
         decision.topics.push("contact");
         decision.changes.extend(changes);

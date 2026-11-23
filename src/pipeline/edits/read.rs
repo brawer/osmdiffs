@@ -44,6 +44,7 @@ pub(super) fn is_rule_key(key: &str) -> bool {
             | "addr:country"
     ) || key == "post_office"
         || key.starts_with("post_office:")
+        || key == "heritage:website"
 }
 
 fn rule_tags(tags: &[(String, String)]) -> Tags {
