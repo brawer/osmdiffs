@@ -102,6 +102,55 @@ pub(super) fn shared_osm_values<'a>(osm: impl Iterator<Item = &'a Tags>) -> Hash
         .collect()
 }
 
+/// The words of email addresses that AllThePlaces gives in more than
+/// two places at one domain, in the same position of a two-word local
+/// part, such as `migrol` in `migrol.sion@migrolino.com` and
+/// `migrol.martigny@migrolino.com`. Such a word names the chain or the
+/// store, not a person; see [is_personal_email].
+pub(super) fn shared_email_words<'a>(atp: impl Iterator<Item = &'a Tags>) -> HashSet<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for tags in atp {
+        let source = ContactSource { tags };
+        let Some(value) = source.value("email") else {
+            continue;
+        };
+        for part in value.split(';') {
+            let Some(email) = normalize_email(part) else {
+                continue;
+            };
+            if !seen.insert(email.clone()) {
+                continue;
+            }
+            for key in email_word_keys(&email) {
+                *counts.entry(key).or_default() += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n > MAX_OSM_SHARE)
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// For a normalized address with a two-word local part, a key per
+/// word: `email`, the domain, the word's position and the word.
+fn email_word_keys(email: &str) -> Vec<String> {
+    let Some((local, domain)) = email.split_once('@') else {
+        return Vec::new();
+    };
+    let words: Vec<&str> = local.split(['.', '_']).collect();
+    if words.len() != 2 {
+        return Vec::new();
+    }
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| format!("email\t{domain}\t{i}\t{w}"))
+        .collect()
+}
+
 fn shared_key(family: &str, value: &str) -> String {
     format!("{family}\t{}", value.trim().to_lowercase())
 }
@@ -307,7 +356,116 @@ pub(super) fn contact_changes(
         };
         changes.push(Change::new(key, Some(old), Some(new_value), reason));
     }
+    for change in &changes {
+        if change.key.trim_start_matches("contact:") != "email" {
+            continue;
+        }
+        if change.reason == Reason::Differs {
+            warnings.push("replaces_email".to_string());
+        }
+        if change
+            .new
+            .as_deref()
+            .is_some_and(|v| v.split(';').any(|p| is_personal_email(p, osm, shared)))
+        {
+            warnings.push("personal_email".to_string());
+        }
+    }
     changes
+}
+
+/// Words that name a role or a place rather than a person, in the
+/// local part of an email address such as `hotel.zurich@example.com`.
+const ROLE_WORDS: &[&str] = &[
+    "admin",
+    "agendamento",
+    "anfrage",
+    "apotheke",
+    "atendimento",
+    "booking",
+    "bookings",
+    "boutique",
+    "branch",
+    "centro",
+    "contact",
+    "contato",
+    "customer",
+    "events",
+    "filiale",
+    "front",
+    "frontdesk",
+    "gerente",
+    "geschaeft",
+    "guest",
+    "hello",
+    "hotel",
+    "info",
+    "kontakt",
+    "laden",
+    "loja",
+    "magasin",
+    "mail",
+    "manager",
+    "office",
+    "order",
+    "orders",
+    "reception",
+    "recepcao",
+    "reservas",
+    "reservation",
+    "reservations",
+    "restaurant",
+    "rooms",
+    "sales",
+    "service",
+    "shop",
+    "stay",
+    "store",
+    "support",
+    "team",
+    "vendas",
+    "welcome",
+];
+
+/// Whether an email address looks like one person's, as
+/// `jens.eichmann@amag.ch`: a local part of two words of letters,
+/// joined by `.` or `_`, neither of which names a role, the chain or
+/// the store. A word names the chain or store if it is part of the
+/// domain (`omega.geneve@omega.ch`), of the OSM feature's `name` or
+/// `brand` (`lacoste.ribershop@gmail.com`), or recurs at the domain
+/// (see [shared_email_words]). Such an address may be what the store
+/// wants in OSM, but a person should look before it goes in. The test
+/// still flags some store addresses, so it only gives a warning.
+fn is_personal_email(part: &str, osm: &Tags, shared: &HashSet<String>) -> bool {
+    let Some(email) = normalize_email(part) else {
+        return false;
+    };
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    let words: Vec<&str> = local.split(['.', '_']).collect();
+    if words.len() != 2 {
+        return false;
+    }
+    let names: Vec<String> = osm
+        .iter()
+        .filter(|(k, _)| k == "name" || k == "brand")
+        .map(|(_, v)| {
+            v.to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect()
+        })
+        .collect();
+    let keys = email_word_keys(&email);
+    words.iter().zip(&keys).all(|(w, key)| {
+        w.chars().count() >= 2
+            && w.chars().all(char::is_alphabetic)
+            && !ROLE_WORDS.contains(w)
+            && !domain.contains(w)
+            && !names.iter().any(|n| n.contains(w))
+            && !shared.contains(key)
+    })
 }
 
 #[cfg(test)]
@@ -594,6 +752,75 @@ mod tests {
         .map(|c| c.reason.as_str())
         .collect();
         assert_eq!(got, ["generic_value"]);
+    }
+
+    #[test]
+    fn warns_about_replaced_and_personal_emails() {
+        let run = |osm: &[(&str, &str)], atp: &[(&str, &str)]| {
+            let (osm, atp) = (tags(osm), tags(atp));
+            let mut warnings = Vec::new();
+            let changes = contact_changes(
+                &osm,
+                &[ContactSource { tags: &atp }],
+                &Nondescript::none(),
+                &HashSet::new(),
+                None,
+                &mut warnings,
+            );
+            (changes.len(), warnings)
+        };
+        assert_eq!(
+            run(
+                &[("email", "rooms@atriahotel.com")],
+                &[("email", "reservationblr@radisson.com")]
+            ),
+            (1, vec!["replaces_email".to_string()])
+        );
+        assert_eq!(
+            run(&[], &[("email", "Jens.Eichmann@amag.ch")]),
+            (1, vec!["personal_email".to_string()])
+        );
+        assert_eq!(
+            run(&[], &[("email", "hotel.zurich@example.ch")]),
+            (1, vec![])
+        );
+        assert_eq!(run(&[], &[("email", "h5261@accor.com")]), (1, vec![]));
+    }
+
+    #[test]
+    fn test_is_personal_email() {
+        let none = HashSet::new();
+        let personal = |e: &str| is_personal_email(e, &Vec::new(), &none);
+        assert!(personal("nicholas.destefano@marriott.com"));
+        assert!(personal("matheus_couto@orvelvw.com.br"));
+        assert!(!personal("reservations.cpdubaimarina@ihg.com"));
+        assert!(!personal("info@example.ch"));
+        assert!(!personal("cy.mhtch.gm@marriott.com"));
+        assert!(!personal("e409607@minden.edeka.de"));
+        assert!(!personal("omega.geneve@omega.ch"));
+        // The store's name.
+        let osm = tags(&[("name", "Lacoste")]);
+        assert!(!is_personal_email(
+            "lacoste.ribershop@gmail.com",
+            &osm,
+            &none
+        ));
+        // A word that recurs at the domain names stores, not people.
+        let atp: Vec<Tags> = ["migrol.sion", "migrol.martigny", "migrol.aigle"]
+            .iter()
+            .map(|l| tags(&[("email", &format!("{l}@migrolino.com"))]))
+            .collect();
+        let shared = shared_email_words(atp.iter());
+        assert!(!is_personal_email(
+            "migrol.bex@migrolino.com",
+            &Vec::new(),
+            &shared
+        ));
+        assert!(is_personal_email(
+            "anna.muster@migrolino.com",
+            &Vec::new(),
+            &shared
+        ));
     }
 
     #[test]

@@ -142,8 +142,9 @@ pub(crate) struct Decision {
 pub(crate) struct RuleContext<'a> {
     pub nondescript: &'a Nondescript,
     pub nsi: &'a NsiNames,
-    /// Contact values that several OSM features carry; see
-    /// [contact::shared_osm_values].
+    /// Contact values that several OSM features carry, and words that
+    /// recur in AllThePlaces email addresses; see
+    /// [contact::shared_osm_values] and [contact::shared_email_words].
     pub shared_osm_values: &'a HashSet<String>,
 }
 
@@ -280,7 +281,14 @@ pub fn make_edits(
     let mut elements = read::collect_elements(conflated, unhealthy, &bar)?;
     bar.finish();
     let num_elements = elements.len();
-    let shared_osm_values = contact::shared_osm_values(elements.values().map(|e| &e.tags));
+    let mut shared_osm_values = contact::shared_osm_values(elements.values().map(|e| &e.tags));
+    shared_osm_values.extend(contact::shared_email_words(
+        elements
+            .values()
+            .flat_map(|e| e.sources.iter())
+            .filter(|s| s.partner_tags.is_none())
+            .map(|s| &s.tags),
+    ));
     let ctx = RuleContext {
         nondescript: &nondescript,
         nsi: &nsi,
