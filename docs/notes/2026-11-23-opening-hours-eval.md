@@ -27,6 +27,10 @@ blocks `maes_dkv` (32,267 fuel stations, all `24/7`, agreeing 86%) and
 additions in Switzerland, and a Shell station in Isiolo, Kenya, that
 OSM has as `07:00-22:00` was to become `24/7`.
 
+Decided 2026-11-23: evals normally run on regional statistics. Planet
+counts are only worth building when a rule depends on a per-spider
+threshold, as here, and only to estimate what production will do.
+
 ## Counts
 
 Counts are of `opening_hours` changes, by reason, with the planet gate.
@@ -120,9 +124,6 @@ open it around the clock. A review can start with `small` and
 
 ## Open questions
 
-- **Regional gate in eval runs.** The eval runs judge spiders on the
-  region only. Should the eval setup always use the planet counts, as
-  this note does?
 - **`other_days` from spiders with holes.** Should a week in which
   AllThePlaces closes a weekday between two open ones, which OSM has
   open, get a warning? It would catch the Lidl case, but also shops
