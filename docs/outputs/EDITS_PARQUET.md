@@ -22,7 +22,10 @@ never for unreviewed bulk uploads.
 Today the file holds only tag changes on existing elements, of three
 topics:
 
-- `contact`: `phone`, `fax`, `email` and `website`.
+- `contact`: `phone`, `fax`, `email` and `website`, and
+  `heritage:website` for the page of an official register, such as
+  the US National Register of Historic Places, which is a record about
+  the place rather than its own website.
 - `wikidata`: the Wikidata IDs of `brand`, `operator` and `network`.
 - `post_partner`: the service tags of a shop that has a postal
   counter, such as `post_office=post_partner` and `post_office:brand`.
@@ -154,7 +157,9 @@ networks gets `post_office:brand=DHL;DPD`.
 
 | `warning` | Meaning |
 | --- | --- |
-| `sources_disagree:<family>` | Sources gave different values for `phone`, `fax`, `email` or `website`, so that key isn't edited. |
+| `sources_disagree:<family>` | Sources gave different values for `phone`, `fax`, `email`, `website` or `heritage:website`, so that key isn't edited. |
+| `replaces_email` | The edit replaces an email address that isn't generic. Both may be right, such as a hotel's own address and its chain's; look before applying. |
+| `personal_email` | A new email address looks like a person's, such as `first.last@example.com`. The store published it, but look before it goes into OSM. Some store addresses get this warning too. |
 | `wikidata_unmatched` | Lining up the Wikidata IDs would drop one of OSM's IDs, so they aren't edited. |
 
 Warnings appear on an edit whose other changes still go out.
