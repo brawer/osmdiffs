@@ -89,7 +89,29 @@ test:
   accessibility guide.
 - The old `url` key only counts for agreement and is never edited.
 
-## Open questions
+## After review
+
+Sascha decided on the open questions below on 2026-11-23:
+
+- Non-generic email replacements stay, with the warning
+  `replaces_email`. It fires 187 times in the ten regions, 142 of them
+  in Switzerland.
+- Addresses that look like a person's get the warning
+  `personal_email`. A local part of two words is flagged, unless one
+  of the words is a role (`info`, `reservations`, `filiale` and so on),
+  part of the domain or the store's name, or recurs in more than two of
+  the chain's addresses. It fires 197 times in the ten regions. Of 40
+  sampled, 22 were people's names. The rest were store addresses such
+  as `basel.plaza@losteria.ch`, so it stays a warning.
+- Registry spiders write their page to `heritage:website`, never to
+  `website`: today only `national_register_of_historic_places`, whose
+  NPGallery pages are the register's record of the property, with the
+  nomination form. In Massachusetts this gives 131 additions and 20
+  replacements of a generic `heritage:website`, and no more `website`
+  changes. Filed upstream as
+  [alltheplaces#20746](https://github.com/alltheplaces/alltheplaces/issues/20746).
+
+## Open questions (as first written)
 
 - **Email replacements.** Should the step replace an OSM email at all
   when it isn't generic? Addresses at another domain are often both
