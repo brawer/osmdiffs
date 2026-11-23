@@ -74,7 +74,8 @@
 use super::tiles::round_importance;
 use crate::matchers::is_kind_key;
 use crate::utils::parquet::{
-    get_binary, get_f32, get_string, get_struct, get_tags, get_u32, get_u64,
+    get_binary, get_f32, get_optional_f32, get_optional_string, get_string, get_struct, get_tags,
+    get_u32, get_u64,
 };
 use crate::{TileLayer, make_progress_bar};
 use anyhow::{Context, Result};
@@ -992,28 +993,6 @@ fn osm_side(batch: &RecordBatch, osm: &StructArray, row: usize) -> Result<OsmSid
         // doc comment).
         osm_geometry_wkb: get_binary(batch, "osm_geometry", row)?,
     })
-}
-
-/// The string at `row` of the column `name` of `src`, or `None` if null.
-fn get_optional_string(src: &StructArray, name: &str, row: usize) -> Result<Option<String>> {
-    let column = src
-        .column_by_name(name)
-        .with_context(|| format!("missing column '{name}'"))?;
-    if column.is_null(row) {
-        return Ok(None);
-    }
-    get_string(src, name, row).map(Some)
-}
-
-/// The float at `row` of the column `name` of `src`, or `None` if null.
-fn get_optional_f32(src: &StructArray, name: &str, row: usize) -> Result<Option<f32>> {
-    let column = src
-        .column_by_name(name)
-        .with_context(|| format!("missing column '{name}'"))?;
-    if column.is_null(row) {
-        return Ok(None);
-    }
-    get_f32(src, name, row).map(Some)
 }
 
 /// Like [`get_optional_string`], but also `None` if `src` has no

@@ -391,6 +391,32 @@ fn run_pipeline_steps(
         upload::upload_spider_stats(&spider_stats, &date, progress)
     })?);
 
+    // Proposed edits, leaving out spiders that look broken this week.
+    let edits = run_step("make_edits", || {
+        let unhealthy =
+            spider_churn::unhealthy_spiders(&spider_stats, previous_spider_stats, workdir);
+        if !unhealthy.is_empty() {
+            log::info!(
+                spiders = unhealthy.iter().cloned().collect::<Vec<_>>().join(",").as_str();
+                "make_edits: leaving out unhealthy spiders"
+            );
+        }
+        let bom = provenance::build_bom_for_edits_parquet(workdir, pipeline_run_id)
+            .context("could not assemble provenance BOM for edits.parquet")?
+            .to_string();
+        edits::make_edits(
+            &conflated,
+            &spider_stats,
+            &unhealthy,
+            &bom,
+            progress,
+            workdir,
+        )
+    })?;
+    published.push(run_step("upload_edits", || {
+        upload::upload_edits(&edits, &date, progress)
+    })?);
+
     // Standalone provenance BOM for conflated.parquet (paired to it by
     // content hash), then the manifest -- both after every dated file is
     // up, so a partial run never advertises a file that isn't there.

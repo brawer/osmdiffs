@@ -440,6 +440,8 @@ The `PUBLIC_S3_*` bucket, under `data/`:
 | `data/conflated-<YYYYMMDD>-<hash8>.parquet` | the data product |
 | `data/conflated-<YYYYMMDD>-<hash8>.cdx.json` | its CycloneDX provenance BOM as a standalone sidecar (`<hash8>` is the Parquet's, so the two names pair) |
 | `data/conflated-<YYYYMMDD>-<hash8>.pmtiles` | visualization of the above; debugging aid |
+| `data/spider-stats-<YYYYMMDD>-<hash8>.parquet` | per-spider statistics; debugging aid |
+| `data/edits-<YYYYMMDD>-<hash8>.parquet` | suggested edits; experimental format, may change without notice |
 | `data/datapackage.json` | the manifest, overwritten each run, uploaded last |
 
 `<YYYYMMDD>` is `max(AllThePlaces run start, OSM planet replication)` —

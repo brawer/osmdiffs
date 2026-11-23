@@ -29,7 +29,9 @@ pub(crate) use emails::{is_email_key, normalize_email, parse_emails};
 pub(crate) use phones::{is_phone_key, parse_phone_number, parse_phone_numbers};
 #[cfg(test)]
 pub(crate) use urls::url_hash;
-pub(crate) use urls::{is_website_key, normalize_url, parse_urls, parse_website_domains};
+pub(crate) use urls::{
+    is_website_key, normalize_url, parse_urls, parse_website_domains, registrable_domain,
+};
 
 /// Score factor of a contact match whose main categories are equal.
 /// Below 1.0, so a `brand:wikidata` match at the same distance wins.
@@ -64,6 +66,23 @@ impl Nondescript {
             phones: None,
             emails: None,
             websites: None,
+        }
+    }
+
+    /// Whether every phone number, email address or website in
+    /// `value` of the contact tag `key` is nondescript, as for a brand
+    /// hotline or a brand's home page. A value without any part that
+    /// parses counts as nondescript too, since it says nothing about
+    /// one place.
+    pub(crate) fn is_nondescript_value(&self, key: &str, value: &str) -> bool {
+        if is_phone_key(key) {
+            parse_phone_numbers(value).all(|n| self.is_phone(n))
+        } else if is_email_key(key) {
+            parse_emails(value).all(|h| self.is_email(h))
+        } else if is_website_key(key) {
+            parse_urls(value).all(|h| self.is_website(h))
+        } else {
+            false
         }
     }
 

@@ -372,6 +372,48 @@ fn try_summarize(current: &Path, previous: &str, workdir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The spiders whose data this week doesn't look healthy, so that the
+/// edits step leaves them out: spiders that lost features since last
+/// week and don't use older data instead, and spiders whose match rate
+/// dropped, which usually means they changed their tags. Empty if
+/// there is no previous file or it can't be read; [summarize] logs that.
+pub fn unhealthy_spiders(
+    current: &Path,
+    previous: Option<&str>,
+    workdir: &Path,
+) -> std::collections::BTreeSet<String> {
+    let Some(previous) = previous else {
+        return Default::default();
+    };
+    let weeks = || -> Result<_> { Ok((read(&workdir.join(previous))?, read(current)?)) };
+    let Ok((old, new)) = weeks() else {
+        return Default::default();
+    };
+    unhealthy(&old, &new)
+}
+
+fn unhealthy(
+    previous: &HashMap<String, Week>,
+    current: &HashMap<String, Week>,
+) -> std::collections::BTreeSet<String> {
+    let mut spiders = std::collections::BTreeSet::new();
+    for (spider, c) in current {
+        let p = previous.get(spider);
+        let lost = change(p, Some(c)).is_some_and(Change::is_loss) && c.fallback.is_none();
+        let dropped = p.is_some_and(|p| {
+            p.rows >= MIN_RATE_ROWS
+                && matches!(
+                    (p.match_rate(), c.match_rate()),
+                    (Some(before), Some(after)) if before - after >= MIN_RATE_DROP
+                )
+        });
+        if lost || dropped {
+            spiders.insert(spider.clone());
+        }
+    }
+    spiders
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +582,36 @@ mod tests {
         summarize(&current, None, workdir.path());
         assert!(try_summarize(&current, "missing.parquet", workdir.path()).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn test_unhealthy() {
+        let rows = |rows: u64, matched: u64| Week {
+            features: Some(1000),
+            rows,
+            matched,
+            ..Week::default()
+        };
+        let previous: HashMap<String, Week> = [
+            ("halved", week(Some(1000))),
+            ("halved_fallback", week(Some(1000))),
+            ("rate", rows(1000, 900)),
+            ("fine", rows(1000, 900)),
+        ]
+        .into_iter()
+        .map(|(s, w)| (s.to_string(), w))
+        .collect();
+        let current: HashMap<String, Week> = [
+            ("halved", week(Some(100))),
+            ("halved_fallback", fell_back(Some(1000), Breakage::Dropped)),
+            ("rate", rows(1000, 300)),
+            ("fine", rows(1000, 880)),
+            ("new", week(Some(5))),
+        ]
+        .into_iter()
+        .map(|(s, w)| (s.to_string(), w))
+        .collect();
+        let got: Vec<String> = unhealthy(&previous, &current).into_iter().collect();
+        assert_eq!(got, ["halved", "rate"]);
     }
 }
