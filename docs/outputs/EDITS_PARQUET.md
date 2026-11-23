@@ -19,7 +19,7 @@ human review, or for imports that follow the
 [OSM Import Guidelines](https://wiki.openstreetmap.org/wiki/Import/Guidelines),
 never for unreviewed bulk uploads.
 
-Today the file holds only tag changes on existing elements, of three
+Today the file holds only tag changes on existing elements, of four
 topics:
 
 - `contact`: `phone`, `fax`, `email` and `website`, and
@@ -27,11 +27,13 @@ topics:
   the US National Register of Historic Places, which is a record about
   the place rather than its own website.
 - `wikidata`: the Wikidata IDs of `brand`, `operator` and `network`.
+- `opening_hours`: the weekly schedule, keeping OpenStreetMap's rules
+  for public and school holidays and fixed dates; see
+  [Opening hours](#opening-hours).
 - `post_partner`: the service tags of a shop that has a postal
   counter, such as `post_office=post_partner` and `post_office:brand`.
 
-Creates of missing places, deletes of closed ones and opening hours
-will follow.
+Creates of missing places and deletes of closed ones will follow.
 
 Like [`conflated.parquet`](CONFLATED_PARQUET.md), this is a
 [GeoParquet 2.0-rc.1](https://github.com/opengeospatial/geoparquet/blob/v2.0.0-rc.1/format-specs/geoparquet.md)
@@ -46,7 +48,7 @@ above, for tools that never read this page.
 ```text
 id            UTF8                 non-null, stable across weeks (see below)
 action        UTF8                 non-null: "modify" (later also "create", "delete")
-topics        LIST<UTF8>           non-null: "contact", "wikidata", "post_partner"
+topics        LIST<UTF8>           non-null: "contact", "wikidata", "opening_hours", "post_partner"
 
 osm           STRUCT               nullable; null only for creates, which don't exist yet
   type        UTF8                 non-null: "node" | "way" | "relation"
@@ -66,6 +68,7 @@ changes       LIST<STRUCT>         non-null, sorted by key
   old         UTF8                 nullable: null means OSM has no such tag
   new         UTF8                 nullable: null means remove the tag
   reason      UTF8                 non-null, see below
+  atp         UTF8                 nullable: AllThePlaces' value, set only for "needs_review"
 
 sources       LIST<STRUCT>         non-null, at least one
   spider      UTF8                 non-null, the AllThePlaces spider
@@ -111,6 +114,14 @@ element's type and ID and the sorted keys in `changes`.
 | `added_value` | OSM lists several values; we add AllThePlaces' value to the list rather than replacing it. |
 | `misaligned` | OSM's `brand:wikidata` (or `operator:`, `network:`) doesn't line up value by value with `brand`; we rebuild the list in the order of the names, never dropping one of OSM's IDs. |
 | `wikidata_only` | Every change of the edit is a `:wikidata` key. A reviewer may want to handle these separately, since they don't change what a map shows. |
+| `small` | `opening_hours`: open on the same days, and on each day the times differ by an hour or less in all. |
+| `over_60_min` | `opening_hours`: open on the same days, but on some day the times differ by more than an hour. |
+| `other_days` | `opening_hours`: open on some day in one value and closed in the other. |
+| `public_holidays` | `opening_hours`: the same week, but AllThePlaces has other hours on public holidays. |
+| `needs_review` | `opening_hours`: OSM's value has rules that we don't rewrite by machine, such as seasons (`Apr-Oct`), comments, `sunrise` or syntax we can't parse. `new` is the same as `old`, so applying the change does nothing; `atp` holds AllThePlaces' value, for a person to decide. Never apply these automatically. |
+
+A challenge can start with the large `opening_hours` differences,
+`other_days` and `over_60_min`, and leave `small` ones for later.
 
 ## When we suggest nothing
 
@@ -140,10 +151,64 @@ element's type and ID and the sorted keys in `changes`.
 - We can't tell every Wikidata ID of a list, for example
   `brand=Audi;Volkswagen` where only Audi's ID is known.
 - Charging stations, for now.
+- The opening hours mean the same; see [Opening hours](#opening-hours).
+- The spider's opening hours often disagree with OpenStreetMap's on
+  the places both have: less than 70% of its matched pairs agree, in
+  schedule or within an hour a day, or there are fewer than 10 such
+  pairs to judge from. This screens out spiders that give a
+  drive-through's hours for the restaurant, or lose days to holidays.
+- The spider gives the same opening hours for more than 98% of its
+  places, such as `24/7` for every fuel station of a fuel-card
+  network. Such a value says nothing about the one place, even where
+  it agrees with OpenStreetMap.
+
+  On the planet file of 2026-11-02, these two rules would have let
+  through 1,249 of 2,580 spiders, with 68% of the matched pairs.
 
 New phone and fax numbers are written in international format, grouped
 as is usual in the country, such as `+41 44 123 45 67`. Where OSM keeps
 contacts as `contact:phone` and so on, new values go there too.
+
+## Opening hours
+
+We compare weekly schedules, not text, and an edit never removes
+detail that OpenStreetMap has and AllThePlaces lacks. Rules for public
+holidays (`PH`), school holidays (`SH`) and fixed dates (`Dec 24
+08:00-12:00`, `Dec 25,26 off`, `easter off`) are exceptions on top of
+the week: we keep them verbatim, after AllThePlaces' week. Many
+sources summarize public holidays as Sundays, so an AllThePlaces `PH`
+rule only counts when its times differ from its Sunday's. The other
+way round, a rule where OSM names holidays together with weekdays, as
+in `Su,PH 10:00-16:00`, says "as on those days": when AllThePlaces has
+other times for those days, the holidays follow them if the days all
+have the same times, or else Sunday's if the rule names Sunday.
+
+| Case | OSM | AllThePlaces | Result |
+| --- | --- | --- | --- |
+| Notation only | `Mo-Fr 08:00-18:00; Sa 08:00-18:00` | `Mo-Sa 08:00-18:00` | no edit |
+| Always open | `24/7` | `Mo-Su 00:00-24:00` | no edit |
+| OSM has PH, ATP doesn't | `Mo-Sa 08:00-20:00; Su,PH 10:00-16:00` | `Mo-Sa 08:00-20:00; Su 10:00-16:00` | no edit |
+| ATP folds PH into Sunday | `Mo-Sa 08:00-20:00; Su 10:00-16:00; PH off` | `Mo-Sa 08:00-20:00; Su,PH 10:00-16:00` | no edit: ATP's PH equals its Sunday, so we read it as a summary and keep OSM's |
+| Week differs, OSM has PH | `Mo-Fr 08:00-18:00; PH off` | `Mo-Fr 07:30-18:30` | `Mo-Fr 07:30-18:30; PH off` |
+| PH as on Sunday, Sunday differs | `Mo-Sa 08:00-20:00; Su,PH 10:00-16:00` | `Mo-Sa 08:00-20:00; Su 10:00-18:00` | `Mo-Sa 08:00-20:00; Su,PH 10:00-18:00` |
+| PH shares a rule with a day ATP has closed | `Mo-Fr 08:00-18:00; Tu,PH 09:00-11:00` | `Mo,We-Fr 08:00-18:00` | `Mo,We-Fr 08:00-18:00; PH 09:00-11:00` |
+| ATP has its own PH rule | `Mo-Fr 08:00-18:00` | `Mo-Fr 08:00-18:00; PH 10:00-14:00` | add the PH rule |
+| Fixed dates, same week | `Mo-Fr 08:00-18:00; Dec 24 off` | `Mo-Fr 08:00-18:00` | no edit |
+| Fixed dates, week differs | `Mo-Fr 08:00-18:00; Dec 25,26 off` | `Mo-Fr 08:00-19:00` | `Mo-Fr 08:00-19:00; Dec 25,26 off` |
+| School holidays | `Mo-Fr 08:00-18:00; SH Mo-Fr 09:00-12:00` | `Mo-Fr 07:00-18:00` | `Mo-Fr 07:00-18:00; SH Mo-Fr 09:00-12:00` |
+| Rules that change the week | `Apr-Oct Mo-Su 10:00-18:00; Nov-Mar Mo-Fr 10:00-16:00` | anything else | `needs_review` |
+
+Additional rules after a comma, as in `Mo-Fr 09:00-20:00, Sa
+09:00-18:00`, are read as OSM's specification says: they add to the
+times of their days. New values are written in the usual notation,
+`24/7` or one rule per set of days with the same times, so
+AllThePlaces' `Mo 08:00-18:00; Tu 08:00-18:00; ...` becomes
+`Mo-Fr 08:00-18:00`, and a holiday rule with the times of the week's
+last rule joins it, as in `Su,PH 10:00-16:00`. Where OSM has no
+`opening_hours`, the new value
+is AllThePlaces' week, plus its own `PH` rule if it has one. We don't
+touch `check_date:opening_hours`; whoever applies an edit after
+checking it may set it.
 
 ## Sources
 
@@ -157,7 +222,7 @@ networks gets `post_office:brand=DHL;DPD`.
 
 | `warning` | Meaning |
 | --- | --- |
-| `sources_disagree:<family>` | Sources gave different values for `phone`, `fax`, `email`, `website` or `heritage:website`, so that key isn't edited. |
+| `sources_disagree:<family>` | Sources gave different values for `phone`, `fax`, `email`, `website`, `heritage:website` or `opening_hours`, so that key isn't edited. |
 | `replaces_email` | The edit replaces an email address that isn't generic. Both may be right, such as a hotel's own address and its chain's; look before applying. |
 | `personal_email` | A new email address looks like a person's, such as `first.last@example.com`. The store published it, but look before it goes into OSM. Some store addresses get this warning too. |
 | `wikidata_unmatched` | Lining up the Wikidata IDs would drop one of OSM's IDs, so they aren't edited. |

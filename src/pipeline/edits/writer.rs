@@ -169,6 +169,7 @@ fn change_fields() -> Fields {
         Field::new("old", DataType::Utf8, NULLABLE),
         Field::new("new", DataType::Utf8, NULLABLE),
         Field::new("reason", DataType::Utf8, NOT_NULLABLE),
+        Field::new("atp", DataType::Utf8, NULLABLE),
     ]
     .into()
 }
@@ -369,6 +370,7 @@ fn changes_column(field: &Field, edits: &[Edit]) -> ArrayRef {
             strings(all().map(|c| c.old.as_deref())),
             strings(all().map(|c| c.new.as_deref())),
             strings(all().map(|c| Some(c.reason.as_str()))),
+            strings(all().map(|c| c.atp.as_deref())),
         ],
         None,
     );

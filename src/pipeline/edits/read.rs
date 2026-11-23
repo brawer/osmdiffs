@@ -45,6 +45,7 @@ pub(super) fn is_rule_key(key: &str) -> bool {
     ) || key == "post_office"
         || key.starts_with("post_office:")
         || key == "heritage:website"
+        || key == "opening_hours"
 }
 
 fn rule_tags(tags: &[(String, String)]) -> Tags {
@@ -346,10 +347,16 @@ mod tests {
             "post_office:brand:wikidata",
             "addr:country",
             "url",
+            "opening_hours",
         ] {
             assert!(is_rule_key(key), "{key}");
         }
-        for key in ["opening_hours", "addr:street", "building", "brand:en"] {
+        for key in [
+            "opening_hours:covid19",
+            "addr:street",
+            "building",
+            "brand:en",
+        ] {
             assert!(!is_rule_key(key), "{key}");
         }
     }

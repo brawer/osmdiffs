@@ -11,7 +11,6 @@
 use crate::matchers::contact::{
     AtpContacts, Nondescript, is_email_key, is_phone_key, is_website_key,
 };
-use crate::utils::opening_hours::{has_rich_syntax, same_schedule};
 
 /// Whether the ATP and OSM values of `key` say the same, compared as
 /// the matchers compare them, so that a different way of writing the
@@ -28,7 +27,6 @@ use crate::utils::opening_hours::{has_rich_syntax, same_schedule};
 /// `mobile` because AllThePlaces mixes them up, this compares one key
 /// at a time: a phone number that agrees must not hide a fax number
 /// that doesn't.
-#[allow(dead_code)] // Until the edits step uses it.
 pub(crate) fn values_agree(
     key: &str,
     atp_value: &str,
@@ -45,11 +43,6 @@ pub(crate) fn values_agree(
             .chain(country.map(|c| ("addr:country", c)));
         let contacts = AtpContacts::from_tags(atp, position, &Nondescript::none());
         return contacts.agrees(std::iter::once((key, osm_value)));
-    }
-    if key == "opening_hours" {
-        // OSM's value may say more than ATP's, such as its hours on
-        // public holidays; don't replace it (brawer/osmdiffs#321).
-        return has_rich_syntax(osm_value) || same_schedule(atp_value, osm_value);
     }
     false
 }
@@ -77,11 +70,6 @@ mod tests {
             "website",
             "https://www.example.ch/",
             "http://example.ch"
-        ));
-        assert!(agree(
-            "opening_hours",
-            "Mo-Fr 08:00-18:00; Sa 09:00-12:00",
-            "Mo-Fr 08:00-18:00;Sa 09:00-12:00"
         ));
     }
 
@@ -114,33 +102,6 @@ mod tests {
             "https://www.dm.at/store/a070/wien",
             "https://www.dm.at"
         ));
-    }
-
-    #[test]
-    fn opening_hours_compared_as_schedules() {
-        assert!(agree("opening_hours", "Mo-Su 00:00-24:00", "24/7"));
-        assert!(agree(
-            "opening_hours",
-            "Mo-Sa 07:30-21:00",
-            "Mo-Fr 07:30-21:00; Sa 07:30-21:00"
-        ));
-        // One rule in common isn't enough.
-        assert!(!agree(
-            "opening_hours",
-            "Mo-Fr 08:00-18:00; Sa 09:00-12:00",
-            "Mo-Fr 08:00-18:00; Sa 10:00-12:00"
-        ));
-    }
-
-    #[test]
-    fn opening_hours_with_holidays_left_alone() {
-        assert!(agree(
-            "opening_hours",
-            "Mo-Fr 09:00-19:00",
-            "Mo-Fr 08:30-19:00; PH off; Dec 24 07:30-16:00"
-        ));
-        // A value that just doesn't parse is still replaced.
-        assert!(!agree("opening_hours", "Mo-Fr 09:00-19:00", "Até 22:00 hs"));
     }
 
     #[test]
