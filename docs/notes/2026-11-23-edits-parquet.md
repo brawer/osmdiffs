@@ -268,7 +268,9 @@ up with the names, value by value. We never change the names themselves.
   off`, `easter off`) are exceptions on top of the week, so we keep them verbatim and edit the weekday part: OSM `Tu,PH
   09:00-11:00` with ATP closed on Tuesday becomes ATP's week plus `PH 09:00-11:00`. Only rules that change the week
   itself (seasons like `Apr-Oct`, week numbers, `sunrise`, comments) block a machine-made value; those rows get `reason
-  = needs_review` and no `new` value, for a human task instead of an automatic fix.
+  = needs_review`, for a human task instead of an automatic fix. Their `new` equals `old`, so that a converter which
+  applies every change does no harm, and a new column `changes.atp` carries ATP's value (decided 2026-11-23, since a null
+  `new` means "remove the tag").
 - The new value is ATP's weekly schedule plus OSM's existing `PH` and `SH` rules, unless ATP has its own. Details in the
   next section.
 - Per spider, only when its opening hours agree with OSM often enough on matched pairs (from `spider-stats` kinds),
@@ -287,7 +289,8 @@ hours, that means comparing weekly schedules and handling holiday rules separate
 | ATP folds PH into Sunday | `Mo-Sa 08:00-20:00; Su 10:00-16:00; PH off` | `Mo-Sa 08:00-20:00; Su,PH 10:00-16:00` | no edit: ATP's PH equals its Sunday, so we read it as a summary and keep OSM's |
 | Week differs, OSM has PH | `Mo-Fr 08:00-18:00; PH off` | `Mo-Fr 07:30-18:30` | `Mo-Fr 07:30-18:30; PH off` |
 | ATP has its own PH rule | `Mo-Fr 08:00-18:00` | `Mo-Fr 08:00-18:00; PH 10:00-14:00` | add the PH rule |
-| OSM richer than parser | `Mo-Fr 08:00-18:00; Dec 24 off` | anything | no edit |
+| Fixed dates kept | `Mo-Fr 08:00-18:00; Dec 24 off` | `Mo-Fr 08:00-19:00` | `Mo-Fr 08:00-19:00; Dec 24 off` (same week: no edit) |
+| OSM changes the week | `Apr-Oct Mo-Su 10:00-18:00; Nov-Mar off` | anything else | `needs_review`, `new` equal to `old`, ATP's value in `changes.atp` |
 | Phone format | `044 123 45 67` | `+41 44 123 45 67` | no edit |
 | Phone missing | (none) | `+41441234567` | add `+41 44 123 45 67` (international, grouped) |
 | Website noise | `http://www.example.ch/` | `https://example.ch/?utm_source=x` | no edit |

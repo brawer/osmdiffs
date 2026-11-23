@@ -80,21 +80,7 @@ pub(crate) fn difference(a: &str, b: &str) -> Option<Difference> {
     let (Some(a), Some(b)) = (parse(a), parse(b)) else {
         return Some(Difference::Unparsed);
     };
-    if a == b {
-        return Some(Difference::SameSchedule);
-    }
-    if (0..7).any(|d| a.0[d].is_empty() != b.0[d].is_empty()) {
-        return Some(Difference::OtherDays);
-    }
-    let most = (0..7)
-        .map(|d| minutes_in_one(&a.0[d], &b.0[d]))
-        .max()
-        .unwrap_or(0);
-    Some(if most <= SMALL_MINUTES {
-        Difference::Small
-    } else {
-        Difference::Over60Min
-    })
+    Some(week_difference(&a, &b).unwrap_or(Difference::SameSchedule))
 }
 
 /// The minutes that lie in exactly one of the sorted, non-overlapping
@@ -111,23 +97,6 @@ fn minutes_in_one(a: &[(u16, u16)], b: &[(u16, u16)]) -> u32 {
         }
     }
     total(a) + total(b) - 2 * both
-}
-
-/// Whether an `opening_hours` value says more than AllThePlaces can,
-/// such as public or school holidays, dates, months, comments or times
-/// relative to sunrise. Replacing such a value with AllThePlaces' would
-/// lose that information; see brawer/osmdiffs#321.
-pub(crate) fn has_rich_syntax(value: &str) -> bool {
-    const WORDS: &[&str] = &[
-        "PH", "SH", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
-        "Dec", "week", "easter", "sunrise", "sunset", "dawn", "dusk",
-    ];
-    if value.contains('"') || value.contains("||") {
-        return true;
-    }
-    value
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .any(|word| WORDS.contains(&word))
 }
 
 /// Parses an `opening_hours` value into its weekly schedule, or `None`
@@ -163,6 +132,247 @@ pub(crate) fn parse(value: &str) -> Option<Week> {
         return None;
     }
 
+    Some(normalize(&days))
+}
+
+/// An `opening_hours` value split into its weekly schedule and the
+/// rules on top of it, which hold for some days of the year only: on
+/// public holidays (`PH off`), school holidays (`SH Mo-Fr 09:00-12:00`)
+/// or fixed dates (`Dec 24 08:00-12:00`, `Dec 25,26 off`, `easter
+/// off`). See [split].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Schedule {
+    pub week: Week,
+    /// The times of each day from Monday to Sunday before they spill
+    /// over midnight, as the rules give them: to tell whether a
+    /// public-holiday rule just repeats Sunday's, and to write times
+    /// that a holiday shares with weekdays.
+    pub days: [Vec<(u16, u16)>; 7],
+    /// The times on public holidays, from the last rule that names
+    /// `PH`, such as `PH off` or `Su,PH 10:00-16:00`.
+    pub public_holidays: Option<Vec<(u16, u16)>>,
+    /// The rules on top of the week, in their order. A rule that names
+    /// weekdays and holidays, such as `Su,PH 10:00-16:00`, gives its
+    /// week part to [Schedule::week] and its holiday part,
+    /// `PH 10:00-16:00`, to this list.
+    pub exceptions: Vec<Exception>,
+}
+
+/// A rule that holds on top of the week; see [Schedule].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Exception {
+    /// The rule as written, or its holiday part.
+    pub rule: String,
+    /// Whether the rule names public holidays.
+    pub public_holidays: bool,
+    /// For the holiday part of a rule that also names weekdays, such
+    /// as `Su,PH 10:00-16:00`: the holidays (`PH`) and the weekdays.
+    pub shared: Option<(String, [bool; 7])>,
+}
+
+/// Splits an `opening_hours` value into its weekly schedule and the
+/// rules on top of it, or `None` if it has a rule that changes the
+/// week itself, such as seasons (`Apr-Oct`), week numbers, times
+/// relative to `sunrise`, comments or fallback rules (`||`), if it has
+/// no rule for weekdays at all, or if it doesn't parse. Unlike [parse],
+/// which leaves holiday rules out, this keeps them, so that an edit
+/// can carry them over.
+pub(crate) fn split(value: &str) -> Option<Schedule> {
+    if value.contains('"') || value.contains("||") {
+        return None;
+    }
+    let mut days: [Vec<(u16, u16)>; 7] = Default::default();
+    let mut any_week_rule = false;
+    let mut public_holidays = None;
+    let mut exceptions = Vec::new();
+    let rules = value
+        .split(';')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .flat_map(|r| additional_rules(r).into_iter().enumerate());
+    for (k, rule) in rules {
+        // An additional rule, after a comma, adds to the times of its
+        // days rather than replacing them.
+        let additive = k > 0;
+        let set = |day: &mut Vec<(u16, u16)>, ranges: &[(u16, u16)]| {
+            if !additive {
+                day.clear();
+            }
+            day.extend_from_slice(ranges);
+        };
+        if rule == "24/7" {
+            for d in days.iter_mut() {
+                set(d, &[(0, MINUTES_PER_DAY)]);
+            }
+            any_week_rule = true;
+            continue;
+        }
+        if is_date_rule(rule)? {
+            exceptions.push(Exception {
+                rule: rule.to_string(),
+                public_holidays: false,
+                shared: None,
+            });
+            continue;
+        }
+        let (selector, times) = split_rule(rule);
+        let Some(selector) = selector else {
+            let ranges = parse_times(times?)?;
+            for d in days.iter_mut() {
+                set(d, &ranges);
+            }
+            any_week_rule = true;
+            continue;
+        };
+        let holidays: Vec<&str> = selector
+            .split(',')
+            .map(str::trim)
+            .filter(|p| *p == "PH" || *p == "SH")
+            .collect();
+        let names_ph = holidays.contains(&"PH");
+        match parse_days(selector)? {
+            Some(selected) => {
+                let ranges = parse_times(times?)?;
+                for (d, chosen) in selected.iter().enumerate() {
+                    if *chosen {
+                        set(&mut days[d], &ranges);
+                    }
+                }
+                any_week_rule = true;
+                if !holidays.is_empty() {
+                    exceptions.push(Exception {
+                        rule: format!("{} {}", holidays.join(","), times?.trim()),
+                        public_holidays: names_ph,
+                        shared: Some((holidays.join(","), selected)),
+                    });
+                    if names_ph {
+                        public_holidays = Some(ranges);
+                    }
+                }
+            }
+            None => {
+                // Holidays only, maybe narrowed down by weekdays, as
+                // in `SH Mo-Fr 09:00-12:00`.
+                let times = times?;
+                let (weekdays, times) = match split_rule(times) {
+                    (Some(w), Some(t)) => (Some(w), t),
+                    _ => (None, times),
+                };
+                if let Some(w) = weekdays {
+                    parse_days(w)??;
+                }
+                let ranges = parse_times(times)?;
+                if names_ph && weekdays.is_none() {
+                    public_holidays = Some(ranges);
+                }
+                exceptions.push(Exception {
+                    rule: rule.to_string(),
+                    public_holidays: names_ph,
+                    shared: None,
+                });
+            }
+        }
+    }
+    if !any_week_rule {
+        return None;
+    }
+    Some(Schedule {
+        week: normalize(&days),
+        days,
+        public_holidays,
+        exceptions,
+    })
+}
+
+/// Splits a rule at the commas that start an additional rule, as in
+/// `Mo-Fr 08:00-12:00, Sa 09:00-12:00`: those followed by a day or
+/// holiday rather than a time. Commas within a selector (`Mo,We
+/// 08:00-12:00`) or between times (`08:00-12:00, 13:00-18:00`) stay.
+fn additional_rules(rule: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (i, _) in rule.match_indices(',') {
+        let before = &rule[start..i];
+        let after = rule[i + 1..].trim_start();
+        let has_times =
+            before.contains(':') || before.ends_with("off") || before.ends_with("closed");
+        if has_times && after.starts_with(|c: char| c.is_ascii_uppercase()) {
+            parts.push(before.trim());
+            start = i + 1;
+        }
+    }
+    parts.push(rule[start..].trim());
+    parts
+}
+
+/// Whether `rule` is for fixed dates, such as `Dec 24 08:00-12:00`,
+/// `Dec 24-26 off`, `Dec 25,Jan 01 off` or `easter off`, or `None` if it
+/// is about dates in a way that changes the week, such as a season
+/// (`Apr-Oct Mo-Fr 10:00-18:00`), a long stretch of dates that isn't
+/// closed (`May 01-Sep 30 10:00-18:00`), or a year.
+fn is_date_rule(rule: &str) -> Option<bool> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let first = rule
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .next()
+        .unwrap_or("");
+    let rest = if first == "easter" {
+        rule["easter".len()..].trim()
+    } else if MONTHS.contains(&first) {
+        // Dates up to the first space that isn't followed by a day.
+        let mut end = rule.len();
+        for (i, c) in rule.char_indices() {
+            if c == ' ' {
+                let next = rule[i + 1..].trim_start();
+                let after_month = rule[..i]
+                    .trim_end()
+                    .ends_with(|c: char| c.is_ascii_alphabetic());
+                if after_month && next.starts_with(|c: char| c.is_ascii_digit()) {
+                    continue;
+                }
+                end = i;
+                break;
+            }
+        }
+        let dates = &rule[..end];
+        let ranges = dates.contains('-');
+        for item in dates.split(',') {
+            for date in item.split('-') {
+                let date = date.trim();
+                let (month, day) = match date.split_once(' ') {
+                    Some((m, d)) => (Some(m), d),
+                    None => (None, date),
+                };
+                if month.is_some_and(|m| !MONTHS.contains(&m)) {
+                    return None;
+                }
+                // A month without a day is a season.
+                let day: u8 = day.trim().parse().ok()?;
+                if !(1..=31).contains(&day) {
+                    return None;
+                }
+            }
+        }
+        let rest = rule[end..].trim();
+        if ranges && !(rest == "off" || rest == "closed") {
+            return None;
+        }
+        rest
+    } else {
+        return Some(false);
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    parse_times(rest)?;
+    Some(true)
+}
+
+/// Spills times past midnight over to the next day and merges
+/// overlapping ranges.
+fn normalize(days: &[Vec<(u16, u16)>; 7]) -> Week {
     let mut week = Week::default();
     for (d, ranges) in days.iter().enumerate() {
         for &(start, end) in ranges {
@@ -185,7 +395,125 @@ pub(crate) fn parse(value: &str) -> Option<Week> {
         }
         *ranges = merged;
     }
-    Some(week)
+    week
+}
+
+/// How two weekly schedules differ, or `None` if they are the same.
+pub(crate) fn week_difference(a: &Week, b: &Week) -> Option<Difference> {
+    if a == b {
+        return None;
+    }
+    if (0..7).any(|d| a.0[d].is_empty() != b.0[d].is_empty()) {
+        return Some(Difference::OtherDays);
+    }
+    let most = (0..7)
+        .map(|d| minutes_in_one(&a.0[d], &b.0[d]))
+        .max()
+        .unwrap_or(0);
+    Some(if most <= SMALL_MINUTES {
+        Difference::Small
+    } else {
+        Difference::Over60Min
+    })
+}
+
+/// Writes a weekly schedule in the usual notation: `24/7`, or one rule
+/// per set of days with the same times, such as `Mo-Fr 08:00-18:00;
+/// Sa 09:00-12:00`. Times past midnight are written as such, `Fr
+/// 18:00-02:00`, rather than as two days. [parse] reads it back as the
+/// same week.
+pub(crate) fn format_week(week: &Week) -> String {
+    let full = vec![(0, MINUTES_PER_DAY)];
+    if week.0.iter().all(|d| *d == full) {
+        return "24/7".to_string();
+    }
+    let days = days_as_written(week);
+    let mut rules: Vec<(Vec<usize>, String)> = Vec::new();
+    for (d, ranges) in days.iter().enumerate() {
+        if ranges.is_empty() {
+            continue;
+        }
+        let t = format_times(ranges);
+        match rules.iter_mut().find(|(_, other)| *other == t) {
+            Some((ds, _)) => ds.push(d),
+            None => rules.push((vec![d], t)),
+        }
+    }
+    if rules.is_empty() {
+        return "off".to_string();
+    }
+    rules
+        .iter()
+        .map(|(ds, t)| {
+            if ds.len() == 7 {
+                return format!("Mo-Su {t}");
+            }
+            let mut parts = Vec::new();
+            let mut i = 0;
+            while i < ds.len() {
+                let mut j = i;
+                while j + 1 < ds.len() && ds[j + 1] == ds[j] + 1 {
+                    j += 1;
+                }
+                match j - i {
+                    0 => parts.push(DAYS[ds[i]].to_string()),
+                    1 => {
+                        parts.push(DAYS[ds[i]].to_string());
+                        parts.push(DAYS[ds[j]].to_string());
+                    }
+                    _ => parts.push(format!("{}-{}", DAYS[ds[i]], DAYS[ds[j]])),
+                }
+                i = j + 1;
+            }
+            format!("{} {t}", parts.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The times of each day as [format_week] writes them: a range that
+/// runs to midnight is joined with the next day's from midnight, so
+/// that `Fr 18:00-02:00` is Friday's, not split over two days.
+pub(crate) fn days_as_written(week: &Week) -> [Vec<(u16, u16)>; 7] {
+    let full = vec![(0, MINUTES_PER_DAY)];
+    // Join a day's last range that runs to midnight with the next
+    // day's first one from midnight, unless that day is open all day.
+    let mut days: [Vec<(u16, u16)>; 7] = week.0.clone();
+    for d in 0..7 {
+        let next = (d + 1) % 7;
+        let Some(&(start, MINUTES_PER_DAY)) = days[d].last() else {
+            continue;
+        };
+        if start == 0 || days[next] == full {
+            continue;
+        }
+        if let Some(&(0, e)) = days[next].first() {
+            days[d].last_mut().unwrap().1 = MINUTES_PER_DAY + e;
+            days[next].remove(0);
+        }
+    }
+    days
+}
+
+/// Writes times such as those of [Schedule::public_holidays]:
+/// `10:00-14:00` or `off`.
+pub(crate) fn format_times(ranges: &[(u16, u16)]) -> String {
+    if ranges.is_empty() {
+        return "off".to_string();
+    }
+    let time = |m: u16| format!("{:02}:{:02}", m / 60, m % 60);
+    ranges
+        .iter()
+        .map(|&(s, e)| {
+            let e = if e > MINUTES_PER_DAY {
+                e - MINUTES_PER_DAY
+            } else {
+                e
+            };
+            format!("{}-{}", time(s), time(e))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Splits a rule into its day selector, if it starts with one, and the
@@ -377,13 +705,96 @@ mod tests {
     }
 
     #[test]
-    fn test_has_rich_syntax() {
-        assert!(has_rich_syntax("Mo-Fr 08:00-18:00; PH off"));
-        assert!(has_rich_syntax("Mo-Sa 09:00-19:00; Dec 24 07:30-16:00"));
-        assert!(has_rich_syntax("Mo-Fr 08:00-18:00 \"by appointment\""));
-        assert!(has_rich_syntax("Mo-Su sunrise-sunset"));
-        assert!(!has_rich_syntax("Mo-Fr 08:00-18:00; Sa 09:00-12:00"));
-        assert!(!has_rich_syntax("24/7"));
-        assert!(!has_rich_syntax("Até 22:00 hs"));
+    fn test_split() {
+        let s = split("Mo-Sa 08:00-20:00; Su,PH 10:00-16:00; Dec 24 08:00-12:00").unwrap();
+        assert_eq!(s.week, parse("Mo-Sa 08:00-20:00; Su 10:00-16:00").unwrap());
+        assert_eq!(s.days[6], vec![(600, 960)]);
+        let mut sunday = [false; 7];
+        sunday[6] = true;
+        assert_eq!(s.exceptions[0].shared, Some(("PH".to_string(), sunday)));
+        assert_eq!(s.public_holidays, Some(vec![(600, 960)]));
+        let rules: Vec<&str> = s.exceptions.iter().map(|e| e.rule.as_str()).collect();
+        assert_eq!(rules, ["PH 10:00-16:00", "Dec 24 08:00-12:00"]);
+        assert!(s.exceptions[0].public_holidays);
+        assert!(!s.exceptions[1].public_holidays);
+
+        let s = split("24/7; PH off").unwrap();
+        assert_eq!(s.public_holidays, Some(vec![]));
+        let s = split("Mo-Fr 08:00-18:00; SH Mo-Fr 09:00-12:00; PH,SH off").unwrap();
+        assert_eq!(s.public_holidays, Some(vec![]));
+        assert_eq!(s.exceptions.len(), 2);
+        // Additional rules, after a comma, add to their days.
+        let week = |v: &str| split(v).map(|s| s.week);
+        assert_eq!(
+            week("Mo-Fr 09:00-20:00, Sa 09:00-18:00"),
+            parse("Mo-Fr 09:00-20:00; Sa 09:00-18:00")
+        );
+        assert_eq!(
+            week("Mo,Tu,Th 10:00-12:30, We,Fr 10:00-14:00, Mo,Tu,Th 14:00-18:00; Sa,Su,PH off"),
+            parse("Mo,Tu,Th 10:00-12:30,14:00-18:00; We,Fr 10:00-14:00")
+        );
+        let s = split("Mo-Fr 10:00-20:00, PH off").unwrap();
+        assert_eq!(s.exceptions[0].rule, "PH off");
+        assert_eq!(
+            week("Mo-Fr 08:00-12:00, 13:00-18:00"),
+            parse("Mo-Fr 08:00-12:00,13:00-18:00")
+        );
+        for value in [
+            "Mo-Fr 08:00-18:00; Dec 25,26 off",
+            "Mo-Fr 08:00-18:00; Dec 24-26 off",
+            "Mo-Fr 08:00-18:00; Dec 24-Jan 02 off",
+            "Mo-Fr 08:00-18:00; Dec 25,Jan 01 off",
+            "Mo-Fr 08:00-18:00; easter off",
+            "08:00-18:00",
+        ] {
+            assert!(split(value).is_some(), "{value}");
+        }
+        for value in [
+            "",
+            "PH off",
+            "Dec 25 off",
+            "Apr-Oct Mo-Su 10:00-18:00; Nov-Mar Mo-Fr 10:00-16:00",
+            "Mo-Fr 08:00-18:00; May 01-Sep 30 Sa 10:00-12:00",
+            "Mo-Fr 08:00-18:00; May 01-Sep 30 10:00-12:00",
+            "Mo-Fr 08:00-18:00; 2026 Dec 24 off",
+            "Mo-Fr 08:00-18:00; week 01-10 Sa 09:00-12:00",
+            "Mo-Fr 08:00-18:00 \"by appointment\"",
+            "Mo-Fr 08:00-18:00 || \"by appointment\"",
+            "Mo-Su sunrise-sunset",
+            "Mo-Fr 08:00-18:00; PH +1 day off",
+            "Mo-Fr 08:00-18:00; easter +1 day off",
+            "Até 22:00 hs",
+        ] {
+            assert!(split(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn test_format_week() {
+        let cases = [
+            ("Mo-Su 00:00-24:00", "24/7"),
+            ("Mo-Fr 08:00-18:00; Sa 08:00-18:00", "Mo-Sa 08:00-18:00"),
+            ("Mo 08:00-12:00; We 08:00-12:00", "Mo,We 08:00-12:00"),
+            ("Sa,Su 10:00-16:00", "Sa,Su 10:00-16:00"),
+            (
+                "Mo-Fr 08:00-12:00,13:00-18:00; Sa 09:00-12:00; Su 09:00-12:00",
+                "Mo-Fr 08:00-12:00,13:00-18:00; Sa,Su 09:00-12:00",
+            ),
+            ("Mo-Su 07:00-23:00; We off", "Mo,Tu,Th-Su 07:00-23:00"),
+            ("Fr 18:00-02:00", "Fr 18:00-02:00"),
+            ("Mo-Su 18:00-02:00", "Mo-Su 18:00-02:00"),
+            ("Mo-Su 07:00-24:00", "Mo-Su 07:00-24:00"),
+            (
+                "Mo-Fr 00:00-24:00; Sa 08:00-12:00",
+                "Mo-Fr 00:00-24:00; Sa 08:00-12:00",
+            ),
+            ("Mo-Su off", "off"),
+        ];
+        for (value, want) in cases {
+            let week = parse(value).unwrap();
+            let got = format_week(&week);
+            assert_eq!(got, want, "{value}");
+            assert_eq!(parse(&got), Some(week), "{value} reads back");
+        }
     }
 }

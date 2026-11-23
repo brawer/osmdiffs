@@ -6,8 +6,9 @@
 //!
 //! So far, the step proposes modifies of OSM features that AllThePlaces
 //! matched: contact tags ([contact]), the Wikidata IDs of brands,
-//! operators and networks ([wikidata]), and the service tags of postal
-//! partners ([post_partner]).
+//! operators and networks ([wikidata]), opening hours
+//! ([opening_hours]), and the service tags of postal partners
+//! ([post_partner]).
 //!
 //! It reads `conflated.parquet` twice. The first pass collects, per OSM
 //! feature, the AllThePlaces rows that matched it and the few OSM tags
@@ -18,6 +19,7 @@
 
 mod agreement;
 mod contact;
+mod opening_hours;
 mod post_partner;
 mod read;
 mod wikidata;
@@ -53,6 +55,20 @@ pub(crate) enum Reason {
     Misaligned,
     /// The edit only touches Wikidata IDs.
     WikidataOnly,
+    /// Opening hours on the same days, differing by at most an hour a
+    /// day.
+    Small,
+    /// Opening hours on the same days, differing by more than an hour
+    /// on some day.
+    Over60Min,
+    /// Open on some day in one value and closed in the other.
+    OtherDays,
+    /// The same week, but other hours on public holidays.
+    PublicHolidays,
+    /// OSM's value has rules we don't edit by machine, such as
+    /// seasons or comments; `new` is the same as `old`, and `atp` says
+    /// what AllThePlaces has, for a person to decide.
+    NeedsReview,
 }
 
 impl Reason {
@@ -64,18 +80,26 @@ impl Reason {
             Reason::AddedValue => "added_value",
             Reason::Misaligned => "misaligned",
             Reason::WikidataOnly => "wikidata_only",
+            Reason::Small => "small",
+            Reason::Over60Min => "over_60_min",
+            Reason::OtherDays => "other_days",
+            Reason::PublicHolidays => "public_holidays",
+            Reason::NeedsReview => "needs_review",
         }
     }
 }
 
 /// One tag change: `old` is OSM's value, `None` if OSM has no such
-/// tag; `new` is the value to set, `None` to remove the tag.
+/// tag; `new` is the value to set, `None` to remove the tag. `atp` is
+/// AllThePlaces' value as written, for changes that a person must
+/// decide ([Reason::NeedsReview]).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Change {
     pub key: String,
     pub old: Option<String>,
     pub new: Option<String>,
     pub reason: Reason,
+    pub atp: Option<String>,
 }
 
 impl Change {
@@ -85,6 +109,7 @@ impl Change {
             old: old.map(str::to_string),
             new,
             reason,
+            atp: None,
         }
     }
 }
@@ -146,6 +171,8 @@ pub(crate) struct RuleContext<'a> {
     /// recur in AllThePlaces email addresses; see
     /// [contact::shared_osm_values] and [contact::shared_email_words].
     pub shared_osm_values: &'a HashSet<String>,
+    /// The spiders whose opening hours we trust.
+    pub opening_hours: &'a opening_hours::Gate,
 }
 
 /// Decides the edit for one OSM feature, or `None` if there is
@@ -221,6 +248,20 @@ pub(crate) fn decide(element: &mut Element, ctx: &RuleContext) -> Option<Decisio
     );
     if !changes.is_empty() {
         decision.topics.push("wikidata");
+        decision.changes.extend(changes);
+    }
+    let hours_sources: Vec<(&str, &Tags)> = business
+        .iter()
+        .map(|s| (s.spider.as_str(), &s.tags))
+        .collect();
+    let changes = opening_hours::opening_hours_changes(
+        osm,
+        &hours_sources,
+        ctx.opening_hours,
+        &mut decision.warnings,
+    );
+    if !changes.is_empty() {
+        decision.topics.push("opening_hours");
         decision.changes.extend(changes);
     }
 
@@ -320,10 +361,12 @@ pub fn make_edits(
             .filter(|s| s.partner_tags.is_none())
             .map(|s| &s.tags),
     ));
+    let hours_gate = opening_hours::Gate::open(spider_stats)?;
     let ctx = RuleContext {
         nondescript: &nondescript,
         nsi: &nsi,
         shared_osm_values: &shared_osm_values,
+        opening_hours: &hours_gate,
     };
 
     let mut decisions: HashMap<(String, u64), Decision> = HashMap::new();
@@ -352,6 +395,7 @@ pub fn make_edits(
         changes = stats.changes,
         contact = stats.topic("contact"),
         wikidata = stats.topic("wikidata"),
+        opening_hours = stats.topic("opening_hours"),
         post_partner = stats.topic("post_partner"),
         bytes_written = std::fs::metadata(&out)?.len();
         "make_edits: done"
@@ -387,6 +431,7 @@ mod tests {
                 nondescript: &nondescript,
                 nsi: &nsi,
                 shared_osm_values: &HashSet::new(),
+                opening_hours: &opening_hours::Gate::trusting(&["valora"]),
             },
         )
     }
