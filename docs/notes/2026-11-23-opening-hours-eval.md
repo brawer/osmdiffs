@@ -107,7 +107,8 @@ test:
 
 - `lidl` skips days with special hours and so writes them as closed:
   138 stores in Saxony are `Mo-Tu,Th-Sa`, after Buß- und Bettag on
-  Wednesday. Draft report in the project's `atp-bug-reports/lidl_holiday_closed.md`.
+  Wednesday. Filed as
+  [alltheplaces#20747](https://github.com/alltheplaces/alltheplaces/issues/20747).
   The gate doesn't catch it, since most Lidl stores agree with OSM.
 - `jacques_wein_depot_de` gives `Mo 00:00-24:00` for at least 13 of its German
   stores, most likely a closed Monday that the API sends as
