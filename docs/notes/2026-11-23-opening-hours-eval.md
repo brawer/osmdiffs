@@ -122,9 +122,10 @@ Both turn into `other_days` changes that close a shop on a weekday or
 open it around the clock. A review can start with `small` and
 `over_60_min`, and look harder at `other_days`.
 
-## Open questions
+## Decided
 
-- **`other_days` from spiders with holes.** Should a week in which
-  AllThePlaces closes a weekday between two open ones, which OSM has
-  open, get a warning? It would catch the Lidl case, but also shops
-  that close on Wednesdays.
+- **No special warning for `other_days`.** Spider data can go wrong in
+  too many ways for one heuristic to be worth it, such as a week with a
+  hole where a holiday was. Such bugs are filed upstream instead, and
+  the `other_days` reason already lets a review look harder at these
+  changes (decided 2026-11-23).
