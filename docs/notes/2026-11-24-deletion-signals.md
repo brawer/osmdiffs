@@ -4,7 +4,7 @@ Ideas for telling which OpenStreetMap features describe places that no
 longer exist, written after a first attempt at milestone 5 of the
 [edits.parquet plan](2026-11-23-edits-parquet.md) was too imprecise to
 merge ([#1038](https://github.com/brawer/osmdiffs/pull/1038); its eval is in
-[Deletes on the eval regions](2026-11-23-deletes-eval.md)). The
+[Suggesting deletions of closed places: a first attempt](2026-11-23-deletion-suggestions-eval.md)). The
 quick checks below used the AllThePlaces run of 2026-11-14, the ten
 [eval regions](2026-11-06-eval-regions.md), and the 14 places from the
 hand check whose status could be looked up on the web. Fourteen places

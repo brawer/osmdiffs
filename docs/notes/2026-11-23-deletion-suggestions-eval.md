@@ -1,4 +1,4 @@
-# Deletes on the eval regions (not shipped)
+# Suggesting deletions of closed places: a first attempt and its evaluation
 
 **Status:** we did not merge this. The edits it made were too
 imprecise to publish. The follow-up note,
