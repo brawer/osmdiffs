@@ -110,9 +110,9 @@ test:
   Wednesday. Filed as
   [alltheplaces#20747](https://github.com/alltheplaces/alltheplaces/issues/20747).
   The gate doesn't catch it, since most Lidl stores agree with OSM.
-- `jacques_wein_depot_de` gives `Mo 00:00-24:00` for at least 13 of its German
-  stores, most likely a closed Monday that the API sends as
-  `0000`-`0000`.
+- `jacques_wein_depot_de` gives `Mo 00:00-24:00` for 108 of its 369
+  stores, most likely a closed Monday. Filed as
+  [alltheplaces#20748](https://github.com/alltheplaces/alltheplaces/issues/20748).
 
 Both turn into `other_days` changes that close a shop on a weekday or
 open it around the clock. A review can start with `small` and
