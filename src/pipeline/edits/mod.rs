@@ -8,7 +8,10 @@
 //! matched: contact tags ([contact]), the Wikidata IDs of brands,
 //! operators and networks ([wikidata]), opening hours
 //! ([opening_hours]), and the service tags of postal partners
-//! ([post_partner]).
+//! ([post_partner]). It also proposes deletes of features that are
+//! likely gone, from the deletion candidates ([delete]); for those, it
+//! reads the planet file once to learn which ways and relations use
+//! them ([crate::pipeline::osm::references]).
 //!
 //! It reads `conflated.parquet` twice. The first pass collects, per OSM
 //! feature, the AllThePlaces rows that matched it and the few OSM tags
@@ -19,6 +22,7 @@
 
 mod agreement;
 mod contact;
+mod delete;
 mod opening_hours;
 mod post_partner;
 mod read;
@@ -30,9 +34,10 @@ pub(crate) use writer::DISCLAIMER;
 use crate::make_progress_bar;
 use crate::matchers::brand_names::NsiNames;
 use crate::matchers::contact::Nondescript;
+use crate::pipeline::conflate::MIN_LOCAL_SHARE;
 use anyhow::{Context, Result};
 use indicatif::MultiProgress;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -69,6 +74,9 @@ pub(crate) enum Reason {
     /// seasons or comments; `new` is the same as `old`, and `atp` says
     /// what AllThePlaces has, for a person to decide.
     NeedsReview,
+    /// The feature is likely gone: its tag is removed, or the whole
+    /// element is deleted.
+    Obsolete,
 }
 
 impl Reason {
@@ -85,6 +93,7 @@ impl Reason {
             Reason::OtherDays => "other_days",
             Reason::PublicHolidays => "public_holidays",
             Reason::NeedsReview => "needs_review",
+            Reason::Obsolete => "obsolete",
         }
     }
 }
@@ -310,6 +319,347 @@ pub(crate) fn modify_id(osm_type: &str, osm_id: u64, changes: &[Change]) -> Stri
     crate::utils::sha256_hex(text.as_bytes())[..16].to_string()
 }
 
+/// The ID of a delete: stable across weeks while the feature is a
+/// candidate, even when someone changes its tags meanwhile.
+pub(crate) fn delete_id(osm_type: &str, osm_id: u64) -> String {
+    let text = format!("delete/{osm_type}/{osm_id}");
+    crate::utils::sha256_hex(text.as_bytes())[..16].to_string()
+}
+
+/// The ATP spider of the Swiss public transport register, which the
+/// Swiss transit deletion signals are about.
+const SWISS_TRANSIT_SPIDER: &str = "opentransportdata_swiss";
+
+/// The spiders whose features come from an older AllThePlaces run,
+/// because this week's run of the spider broke (`fallback_reason` in
+/// `spider_stats`). Their lists say nothing about what closed since.
+fn fallback_spiders(spider_stats: &Path) -> Result<BTreeSet<String>> {
+    use arrow::array::{Array, StringArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let file = std::fs::File::open(spider_stats)
+        .with_context(|| format!("could not open {spider_stats:?}"))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+    let mut out = BTreeSet::new();
+    for batch in reader {
+        let batch = batch?;
+        let column = |name: &str| {
+            batch
+                .column_by_name(name)
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>().cloned())
+                .with_context(|| format!("no string column {name}"))
+        };
+        let (spiders, reasons) = (column("spider")?, column("fallback_reason")?);
+        for row in 0..batch.num_rows() {
+            if reasons.is_valid(row) {
+                out.insert(spiders.value(row).to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// How long before a spider's fetch a survey of the feature, or its
+/// first version, counts as recent; see [recently_checked].
+const RECENT_CHECK_DAYS: i64 = 180;
+
+/// Whether someone confirmed the feature on the ground, by its
+/// `check_date` or `survey:date`, in the [RECENT_CHECK_DAYS] before
+/// `fetched_millis` or later.
+fn recently_checked(tags: &[(String, String)], fetched_millis: i64) -> bool {
+    let Ok(fetched) = time::OffsetDateTime::from_unix_timestamp(fetched_millis / 1000) else {
+        return false;
+    };
+    let since = (fetched - time::Duration::days(RECENT_CHECK_DAYS)).date();
+    let since = format!(
+        "{:04}-{:02}-{:02}",
+        since.year(),
+        u8::from(since.month()),
+        since.day()
+    );
+    tags.iter()
+        .filter(|(k, _)| k == "check_date" || k == "survey:date")
+        // ISO dates compare as text; `2026-10` counts as October.
+        .any(|(_, v)| v.trim() >= since.as_str() && v.trim().starts_with("20"))
+}
+
+/// Why a deletion candidate gets no edit, for the log.
+#[derive(Debug, Default)]
+struct DeleteCounts {
+    candidates: usize,
+    low_local_share: usize,
+    no_spider: usize,
+    unhealthy_spider: usize,
+    fallback_spider: usize,
+    edited_after_fetch: usize,
+    recently_checked: usize,
+    recently_added: usize,
+    matched_as_same: usize,
+    no_rule: usize,
+    charging_station: usize,
+    deletes: usize,
+    strips: usize,
+    reviews: usize,
+    host_still_listed: usize,
+    unmatched_nearby: usize,
+}
+
+/// How close an unmatched AllThePlaces feature must be to a deletion
+/// candidate for [unmatched_nearby].
+const UNMATCHED_NEARBY_M: f64 = 50.0;
+
+/// The spiders among `spiders` that list a feature that nothing in OSM
+/// matched, of the same kind as `candidate` and within
+/// [UNMATCHED_NEARBY_M] of it. For Swiss transit stops any feature of
+/// the register counts, since it may list a platform where OSM has a
+/// stop position.
+fn unmatched_nearby(
+    candidate: &read::Candidate,
+    spiders: &BTreeMap<String, i64>,
+    unmatched: &read::Unmatched,
+) -> Vec<String> {
+    let Some(point) = read::centroid(&candidate.geometry_wkb) else {
+        return Vec::new();
+    };
+    let any_kind = candidate.rule.starts_with("swiss_transit");
+    let category = crate::matchers::category::main_category(
+        candidate
+            .osm
+            .tags
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str())),
+    );
+    let agrees = |other: Option<&str>| {
+        any_kind
+            || matches!((category.as_deref(), other), (Some(a), Some(b))
+                if crate::matchers::category::categories_agree(a, b))
+    };
+    spiders
+        .keys()
+        .filter(|s| unmatched.any_near(s, point, UNMATCHED_NEARBY_M, agrees))
+        .cloned()
+        .collect()
+}
+
+/// The spiders whose lists say that `candidate` is gone, with the time
+/// each fetched the brand's earliest feature.
+fn delete_spiders(
+    candidate: &read::Candidate,
+    brand_spiders: &read::BrandSpiders,
+) -> BTreeMap<String, i64> {
+    if candidate.rule.starts_with("swiss_transit") {
+        return brand_spiders
+            .by_spider
+            .get_key_value(SWISS_TRANSIT_SPIDER)
+            .map(|(s, t)| (s.clone(), *t))
+            .into_iter()
+            .collect();
+    }
+    let by_name = candidate.rule == "name";
+    let mut spiders: BTreeMap<String, i64> = BTreeMap::new();
+    for key in read::brand_keys(&candidate.osm.tags) {
+        if key.starts_with("name:") != by_name {
+            continue;
+        }
+        for (spider, &fetched) in brand_spiders.by_key.get(&key).into_iter().flatten() {
+            let t = spiders.entry(spider.clone()).or_insert(fetched);
+            *t = (*t).min(fetched);
+        }
+    }
+    spiders
+}
+
+/// The deletes, and the edits that strip POI tags from elements that
+/// stay, for the deletion candidates of `pass`. Reads the planet file
+/// once for the reference counts; see [crate::pipeline::osm::references].
+fn make_deletes(
+    pass: &mut read::FirstPass,
+    unhealthy: &BTreeSet<String>,
+    fallback: &BTreeSet<String>,
+    planet: &Path,
+    progress: &MultiProgress,
+) -> Result<(Vec<writer::Edit>, DeleteCounts)> {
+    use crate::pipeline::osm::references::{Wanted, scan_references};
+    let mut counts = DeleteCounts {
+        candidates: pass.candidates.len(),
+        ..DeleteCounts::default()
+    };
+    // The guards first, so that the planet pass looks up fewer elements.
+    let mut kept: Vec<(read::Candidate, BTreeMap<String, i64>)> = Vec::new();
+    let mut keys: Vec<(String, u64)> = pass.candidates.keys().cloned().collect();
+    keys.sort();
+    for key in keys {
+        let candidate = pass.candidates.remove(&key).expect("candidate");
+        if candidate.rule.is_empty() {
+            counts.no_rule += 1;
+            continue;
+        }
+        // No charging station edits for now; see the plan's decisions.
+        if candidate
+            .osm
+            .tags
+            .iter()
+            .any(|(k, v)| k == "amenity" && v == "charging_station")
+        {
+            counts.charging_station += 1;
+            continue;
+        }
+        if candidate
+            .local_share
+            .is_some_and(|s| f64::from(s) < MIN_LOCAL_SHARE)
+        {
+            counts.low_local_share += 1;
+            continue;
+        }
+        if pass
+            .elements
+            .get(&key)
+            .is_some_and(|e| e.sources.iter().any(|s| s.relation == "same"))
+        {
+            counts.matched_as_same += 1;
+            continue;
+        }
+        let spiders = delete_spiders(&candidate, &pass.brand_spiders);
+        if spiders.is_empty() {
+            counts.no_spider += 1;
+            continue;
+        }
+        if spiders.keys().any(|s| unhealthy.contains(s)) {
+            counts.unhealthy_spider += 1;
+            continue;
+        }
+        if spiders.keys().any(|s| fallback.contains(s)) {
+            counts.fallback_spider += 1;
+            continue;
+        }
+        // Someone edited the feature after the spider looked; they
+        // likely saw it.
+        let earliest = spiders.values().copied().min().unwrap_or(i64::MAX);
+        if candidate.osm.timestamp_millis > earliest {
+            counts.edited_after_fetch += 1;
+            continue;
+        }
+        if recently_checked(&candidate.osm.tags, earliest) {
+            counts.recently_checked += 1;
+            continue;
+        }
+        // Someone added the feature shortly before the spider looked.
+        if candidate.osm.version == 1
+            && candidate.osm.timestamp_millis > earliest - RECENT_CHECK_DAYS * 86_400_000
+        {
+            counts.recently_added += 1;
+            continue;
+        }
+        kept.push((candidate, spiders));
+    }
+
+    let mut wanted = Wanted::default();
+    for (c, _) in &kept {
+        match c.osm.osm_type.as_str() {
+            "node" => {
+                wanted.nodes.insert(c.osm.osm_id);
+            }
+            "way" => {
+                wanted.ways.insert(c.osm.osm_id);
+                wanted
+                    .nodes
+                    .extend(c.osm.way_members.iter().flatten().copied());
+            }
+            "relation" => {
+                wanted.relations.insert(c.osm.osm_id);
+                for m in c.osm.relation_members.iter().flatten() {
+                    match m.member_type.as_str() {
+                        "node" => {
+                            wanted.nodes.insert(m.id);
+                        }
+                        "way" => {
+                            wanted.way_details.insert(m.id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let refs = if kept.is_empty() {
+        Default::default()
+    } else {
+        scan_references(planet, wanted, progress)?
+    };
+
+    let mut edits = Vec::new();
+    for (candidate, spiders) in kept {
+        let Some(mut decision) = delete::decide_delete(&candidate.osm, &refs) else {
+            continue;
+        };
+        // The spider lists a place of the same kind right there: more
+        // likely a match we missed, or the same place under a new
+        // brand, than a place that is gone. A person decides.
+        let nearby = unmatched_nearby(&candidate, &spiders, &pass.unmatched);
+        if !nearby.is_empty() && decision.warnings.is_empty() {
+            counts.unmatched_nearby += 1;
+            let warnings: Vec<String> = nearby
+                .iter()
+                .map(|s| format!("unmatched_nearby:{s}"))
+                .collect();
+            decision = delete::review(&candidate.osm, &warnings[0]);
+            decision.warnings = warnings;
+        }
+        let key = (candidate.osm.osm_type.clone(), candidate.osm.osm_id);
+        // A delete wins over a modify of the same element, since no
+        // source matched it as `same`.
+        pass.elements.remove(&key);
+        let mut warnings = decision.warnings;
+        if let Some(hosted) = pass.hosts.get(&key) {
+            counts.host_still_listed += 1;
+            warnings.extend(hosted.iter().map(|s| format!("host_still_listed:{s}")));
+        }
+        warnings.sort();
+        if decision.action == "delete" {
+            counts.deletes += 1;
+        } else if decision
+            .changes
+            .iter()
+            .any(|c| c.reason == Reason::NeedsReview)
+        {
+            counts.reviews += 1;
+        } else {
+            counts.strips += 1;
+        }
+        let sources = spiders
+            .into_iter()
+            .map(|(spider, fetched_millis)| Source {
+                spider,
+                fetched_millis,
+                relation: "deletion_candidate".to_string(),
+                rule: Some(candidate.rule.clone()),
+                importance: candidate.importance,
+                ..Source::default()
+            })
+            .collect();
+        let id = match decision.action {
+            "delete" => delete_id(&key.0, key.1),
+            _ => modify_id(&key.0, key.1, &decision.changes),
+        };
+        let position = read::centroid(&candidate.geometry_wkb);
+        edits.push(writer::Edit {
+            id,
+            action: decision.action,
+            topics: vec!["obsolete_poi"],
+            osm: candidate.osm,
+            changes: decision.changes,
+            sources,
+            geometry_wkb: candidate.geometry_wkb,
+            atp_geometry_wkb: None,
+            warnings,
+            importance: candidate.importance,
+            deleted_members: decision.deleted_members,
+            s2_cell_id: position.map(read::s2_cell_id).unwrap_or(0),
+        });
+    }
+    Ok((edits, counts))
+}
+
 /// The files `make_edits` reads besides `conflated.parquet`.
 fn inputs(workdir: &Path) -> Vec<PathBuf> {
     let mut paths = super::atp::nondescript::paths(workdir);
@@ -320,7 +670,8 @@ fn inputs(workdir: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Builds `edits.parquet` in `workdir` from `conflated`, leaving out
+/// Builds `edits.parquet` in `workdir` from `conflated` and the
+/// `planet` file it was made from, leaving out
 /// the rows of `unhealthy` spiders (see
 /// [super::spider_churn::unhealthy_spiders], which reads
 /// `spider_stats`). `provenance_bom` goes
@@ -328,6 +679,7 @@ fn inputs(workdir: &Path) -> Vec<PathBuf> {
 pub fn make_edits(
     conflated: &Path,
     spider_stats: &Path,
+    planet: &Path,
     unhealthy: &BTreeSet<String>,
     provenance_bom: &str,
     progress: &MultiProgress,
@@ -335,7 +687,7 @@ pub fn make_edits(
 ) -> Result<PathBuf> {
     let out = workdir.join("edits.parquet");
     let extra = inputs(workdir);
-    let mut all_inputs: Vec<&Path> = vec![conflated, spider_stats];
+    let mut all_inputs: Vec<&Path> = vec![conflated, spider_stats, planet];
     all_inputs.extend(extra.iter().map(PathBuf::as_path));
     if super::is_current(&[&out], &all_inputs)? {
         return Ok(out);
@@ -350,8 +702,11 @@ pub fn make_edits(
         NsiNames::default()
     };
     let bar = make_progress_bar(progress, "edits.collect", 0, "rows");
-    let mut elements = read::collect_elements(conflated, unhealthy, &bar)?;
+    let mut pass = read::collect_elements(conflated, unhealthy, &bar)?;
     bar.finish();
+    let fallback = fallback_spiders(spider_stats)?;
+    let (deletes, delete_counts) = make_deletes(&mut pass, unhealthy, &fallback, planet, progress)?;
+    let mut elements = pass.elements;
     let num_elements = elements.len();
     let mut shared_osm_values = contact::shared_osm_values(elements.values().map(|e| &e.tags));
     shared_osm_values.extend(contact::shared_email_words(
@@ -379,6 +734,7 @@ pub fn make_edits(
     let bar = make_progress_bar(progress, "edits.write", 0, "rows");
     let mut edits = read::complete_edits(conflated, elements, decisions, &bar)?;
     bar.finish();
+    edits.extend(deletes);
     // Along the Hilbert curve of S2 cells, as `conflated.parquet`.
     edits.sort_by(|a, b| {
         (a.s2_cell_id, &a.osm.osm_type, a.osm.osm_id).cmp(&(
@@ -397,6 +753,23 @@ pub fn make_edits(
         wikidata = stats.topic("wikidata"),
         opening_hours = stats.topic("opening_hours"),
         post_partner = stats.topic("post_partner"),
+        obsolete_poi = stats.topic("obsolete_poi"),
+        deletion_candidates = delete_counts.candidates,
+        deletes = delete_counts.deletes,
+        poi_tag_removals = delete_counts.strips,
+        delete_reviews = delete_counts.reviews,
+        host_still_listed = delete_counts.host_still_listed,
+        unmatched_nearby = delete_counts.unmatched_nearby,
+        skipped_low_local_share = delete_counts.low_local_share,
+        skipped_no_spider = delete_counts.no_spider,
+        skipped_unhealthy_spider = delete_counts.unhealthy_spider,
+        skipped_fallback_spider = delete_counts.fallback_spider,
+        skipped_edited_after_fetch = delete_counts.edited_after_fetch,
+        skipped_recently_checked = delete_counts.recently_checked,
+        skipped_recently_added = delete_counts.recently_added,
+        skipped_matched_as_same = delete_counts.matched_as_same,
+        skipped_no_rule = delete_counts.no_rule,
+        skipped_charging_station = delete_counts.charging_station,
         bytes_written = std::fs::metadata(&out)?.len();
         "make_edits: done"
     );
@@ -506,6 +879,53 @@ mod tests {
             ..Element::default()
         };
         assert_eq!(ctx_decide(&mut one), ctx_decide(&mut two));
+    }
+
+    #[test]
+    fn test_recently_checked() {
+        // 2026-11-14 12:00 UTC.
+        let fetched = 1_794_657_600_000;
+        let check = |date: &str| recently_checked(&tags(&[("check_date", date)]), fetched);
+        assert!(check("2026-11-20"));
+        assert!(check("2026-06-01"));
+        assert!(!check("2026-05-01"));
+        assert!(!check("2019-01-01"));
+        assert!(!check("yes"));
+        assert!(!recently_checked(&tags(&[("shop", "bakery")]), fetched));
+    }
+
+    #[test]
+    fn test_delete_spiders() {
+        let mut spiders = read::BrandSpiders::default();
+        let add = |s: &mut read::BrandSpiders, spider: &str, t: i64, key: &str| {
+            s.by_key
+                .entry(key.to_string())
+                .or_default()
+                .insert(spider.to_string(), t);
+            s.by_spider.insert(spider.to_string(), t);
+        };
+        add(&mut spiders, "beck", 5, "Q1");
+        add(&mut spiders, "beck_name", 7, "name:beck");
+        add(&mut spiders, SWISS_TRANSIT_SPIDER, 9, "Q2");
+        let candidate = |rule: &str| read::Candidate {
+            osm: writer::OsmSide {
+                tags: tags(&[("brand", "Beck"), ("brand:wikidata", "Q1")]),
+                ..writer::OsmSide::default()
+            },
+            rule: rule.to_string(),
+            ..read::Candidate::default()
+        };
+        let names = |rule: &str| -> Vec<(String, i64)> {
+            delete_spiders(&candidate(rule), &spiders)
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(names("wikidata"), [("beck".to_string(), 5)]);
+        assert_eq!(names("name"), [("beck_name".to_string(), 7)]);
+        assert_eq!(
+            names("swiss_transit_stop"),
+            [(SWISS_TRANSIT_SPIDER.to_string(), 9)]
+        );
     }
 
     #[test]

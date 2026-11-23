@@ -35,7 +35,7 @@ use std::hash::{Hash, Hasher};
 
 /// A candidate is kept when at least this share of the OSM features of
 /// its brand within the radius were matched by ATP.
-pub(super) const MIN_LOCAL_SHARE: f64 = 0.5;
+pub(crate) const MIN_LOCAL_SHARE: f64 = 0.5;
 
 /// The radius is at least this many meters, so that a dense brand's
 /// candidates still see enough neighbours.

@@ -979,7 +979,9 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
 }
 
 /// Checks `make_edits`'s output against the fixture data: the three
-/// matched shops each get one contact tag that OSM lacks.
+/// matched shops each get one contact tag that OSM lacks, and the
+/// Denner that the Denner spider no longer lists, a lone node, gets a
+/// delete that removes all its tags.
 fn assert_edits_parquet(path: &Path) -> Result<()> {
     use arrow::array::{Array, ListArray, RecordBatch, StringArray, StructArray, UInt64Array};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -1029,7 +1031,11 @@ fn assert_edits_parquet(path: &Path) -> Result<()> {
             ));
         }
     }
+    // The second Denner, node/13426824598, is a deletion candidate, but
+    // it is at version 1 and was added within 180 days of the spider's
+    // fetch: the shop may be newer than the spider's list, so no delete.
     assert_eq!(edits.len(), 3, "{edits:#?}");
+    assert!(edits.iter().all(|e| e.0 == "modify" && e.1 != 13426824598));
     let media_markt = edits
         .iter()
         .find(|e| e.1 == 737021556)

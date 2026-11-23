@@ -57,6 +57,15 @@ pub(crate) struct OsmSide {
     pub relation_members: Option<Vec<RelationMember>>,
 }
 
+/// An element deleted together with the one an edit is about, such
+/// as an untagged node of a deleted way.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DeletedMember {
+    pub member_type: &'static str,
+    pub id: u64,
+    pub version: u32,
+}
+
 /// One row of `edits.parquet`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Edit {
@@ -70,6 +79,8 @@ pub(crate) struct Edit {
     pub atp_geometry_wkb: Option<Vec<u8>>,
     pub warnings: Vec<String>,
     pub importance: f32,
+    /// For a delete, the members that go with the element.
+    pub deleted_members: Vec<DeletedMember>,
     /// Sort key only, not written.
     pub s2_cell_id: u64,
 }
@@ -188,6 +199,15 @@ fn source_fields() -> Fields {
     .into()
 }
 
+fn deleted_member_fields() -> Fields {
+    vec![
+        Field::new("type", DataType::Utf8, NOT_NULLABLE),
+        Field::new("id", DataType::UInt64, NOT_NULLABLE),
+        Field::new("version", DataType::UInt32, NOT_NULLABLE),
+    ]
+    .into()
+}
+
 fn host_fields() -> Fields {
     vec![
         Field::new("type", DataType::Utf8, NOT_NULLABLE),
@@ -218,6 +238,7 @@ pub(super) fn schema() -> Schema {
         Field::new_struct("host", host_fields(), NULLABLE),
         string_list_field("warnings"),
         Field::new("importance", DataType::Float32, NOT_NULLABLE),
+        struct_list_field("deleted_members", deleted_member_fields()),
     ])
 }
 
@@ -412,6 +433,30 @@ fn sources_column(field: &Field, edits: &[Edit]) -> ArrayRef {
     )
 }
 
+fn deleted_members_column(field: &Field, edits: &[Edit]) -> ArrayRef {
+    let all = || edits.iter().flat_map(|e| e.deleted_members.iter());
+    let mut ids = UInt64Builder::new();
+    let mut versions = UInt32Builder::new();
+    for m in all() {
+        ids.append_value(m.id);
+        versions.append_value(m.version);
+    }
+    let values = StructArray::new(
+        deleted_member_fields(),
+        vec![
+            strings(all().map(|m| Some(m.member_type))),
+            Arc::new(ids.finish()),
+            Arc::new(versions.finish()),
+        ],
+        None,
+    );
+    list(
+        field,
+        edits.iter().map(|e| e.deleted_members.len()),
+        Arc::new(values),
+    )
+}
+
 fn batch(schema: &SchemaRef, edits: &[Edit]) -> Result<RecordBatch> {
     let field = |name: &str| schema.field_with_name(name).expect("field").clone();
     let mut geometry = BinaryBuilder::new();
@@ -441,6 +486,7 @@ fn batch(schema: &SchemaRef, edits: &[Edit]) -> Result<RecordBatch> {
         Arc::new(host),
         string_list(&field("warnings"), &warnings),
         Arc::new(importance.finish()),
+        deleted_members_column(&field("deleted_members"), edits),
     ];
     Ok(RecordBatch::try_new(schema.clone(), columns)?)
 }
@@ -548,6 +594,7 @@ mod tests {
             atp_geometry_wkb: Some(point(8.5001, 47.4)),
             warnings: vec![],
             importance: 0.5,
+            deleted_members: Vec::new(),
             s2_cell_id: 0,
         };
         let relation = Edit {
@@ -566,9 +613,22 @@ mod tests {
             warnings: vec!["wikidata_unmatched".into()],
             ..edit.clone()
         };
-        let stats = write(&path, &[edit, relation], "{}")?;
-        assert_eq!(stats.changes, 2);
+        let delete = Edit {
+            id: "00000000000000ff".into(),
+            action: "delete",
+            topics: vec!["obsolete_poi"],
+            changes: vec![Change::new("shop", Some("bakery"), None, Reason::Obsolete)],
+            deleted_members: vec![DeletedMember {
+                member_type: "node",
+                id: 1,
+                version: 2,
+            }],
+            ..edit.clone()
+        };
+        let stats = write(&path, &[edit, relation, delete], "{}")?;
+        assert_eq!(stats.changes, 3);
         assert_eq!(stats.topic("contact"), 2);
+        assert_eq!(stats.topic("obsolete_poi"), 1);
 
         let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
         let metadata = builder
@@ -589,8 +649,16 @@ mod tests {
                 .contains("\"primary_column\":\"geometry\"")
         );
         let batches: Vec<RecordBatch> = builder.build()?.collect::<Result<_, _>>()?;
-        assert_eq!(batches[0].num_rows(), 2);
-        assert_eq!(batches[0].schema().fields().len(), 11);
+        assert_eq!(batches[0].num_rows(), 3);
+        assert_eq!(batches[0].schema().fields().len(), 12);
+        let deleted = batches[0]
+            .column_by_name("deleted_members")
+            .expect("deleted_members")
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("a list");
+        assert_eq!(deleted.value_length(0), 0);
+        assert_eq!(deleted.value_length(2), 1);
         Ok(())
     }
 }

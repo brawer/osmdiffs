@@ -146,7 +146,10 @@ the matching.
   feature (`osm` is null).
 - `deletion_candidate`: nothing in AllThePlaces matched the
   OpenStreetMap feature, and something suggests that it is gone (`atp`
-  is null).
+  is null). A host can be a deletion candidate while other rows place
+  something `located_in` it, such as a closed supermarket that a
+  parcel service still lists a counter in; a host is evidence of a
+  building, not of the business in it.
 
 More relations may come. Treat values you don't know as "none of
 these".

@@ -20,6 +20,7 @@ mod fetch;
 mod id_tagging_schema;
 mod index;
 mod prune;
+pub(crate) mod references;
 
 use prune::Prunings;
 

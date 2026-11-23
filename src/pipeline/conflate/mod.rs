@@ -71,7 +71,8 @@ mod s2_util;
 mod writer;
 use deletion::{AtpCoverage, Candidate, Reason, deletion_reason, local_keys, place_country};
 use diagnostics::{Diagnostics, Missing};
-use local_coverage::{LocalCoverage, LocalKey, MIN_LOCAL_SHARE};
+pub(crate) use local_coverage::MIN_LOCAL_SHARE;
+use local_coverage::{LocalCoverage, LocalKey};
 use located_in::{
     Host, charging_station_host, department_brands, enclosing_host, find_departments,
     located_in_tag, post_partner_host,
@@ -401,8 +402,12 @@ fn produce_rows(
         if let Some(host) = host
             && let Some(r) = find_host(atp, host, osm)?
         {
-            // The host exists, whether or not ATP has it.
-            matched.insert(r);
+            // The host exists, but this says nothing about whether
+            // the host's own business is still there: a REWE that DHL
+            // still lists a counter in may have closed. So the host
+            // isn't counted as matched, and can still be a deletion
+            // candidate; `make_edits` warns that something is still
+            // listed in it.
             located_in_rows.fetch_add(1, Ordering::Relaxed);
             send_row(
                 atp,

@@ -407,6 +407,7 @@ fn run_pipeline_steps(
         edits::make_edits(
             &conflated,
             &spider_stats,
+            &inputs.osm.path,
             &unhealthy,
             &bom,
             progress,

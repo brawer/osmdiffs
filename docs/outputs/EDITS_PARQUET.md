@@ -19,8 +19,8 @@ human review, or for imports that follow the
 [OSM Import Guidelines](https://wiki.openstreetmap.org/wiki/Import/Guidelines),
 never for unreviewed bulk uploads.
 
-Today the file holds only tag changes on existing elements, of four
-topics:
+Today the file holds tag changes on existing elements, and deletes
+of elements that are likely gone, of five topics:
 
 - `contact`: `phone`, `fax`, `email` and `website`, and
   `heritage:website` for the page of an official register, such as
@@ -32,8 +32,11 @@ topics:
   [Opening hours](#opening-hours).
 - `post_partner`: the service tags of a shop that has a postal
   counter, such as `post_office=post_partner` and `post_office:brand`.
+- `obsolete_poi`: a place that AllThePlaces no longer lists, although
+  it lists its brand, network or operator nearby; see
+  [Deletes](#deletes).
 
-Creates of missing places and deletes of closed ones will follow.
+Creates of missing places will follow.
 
 Like [`conflated.parquet`](CONFLATED_PARQUET.md), this is a
 [GeoParquet 2.0-rc.1](https://github.com/opengeospatial/geoparquet/blob/v2.0.0-rc.1/format-specs/geoparquet.md)
@@ -47,8 +50,8 @@ above, for tools that never read this page.
 
 ```text
 id            UTF8                 non-null, stable across weeks (see below)
-action        UTF8                 non-null: "modify" (later also "create", "delete")
-topics        LIST<UTF8>           non-null: "contact", "wikidata", "opening_hours", "post_partner"
+action        UTF8                 non-null: "modify" | "delete" (later also "create")
+topics        LIST<UTF8>           non-null: "contact", "wikidata", "opening_hours", "post_partner", "obsolete_poi"
 
 osm           STRUCT               nullable; null only for creates, which don't exist yet
   type        UTF8                 non-null: "node" | "way" | "relation"
@@ -86,6 +89,10 @@ host          STRUCT               nullable, always null for now
   type, id, name                   the OSM element a new place sits in
 warnings      LIST<UTF8>           non-null, may be empty, see below
 importance    FLOAT                non-null, 0.0 to 1.0, the highest of the sources
+deleted_members LIST<STRUCT>       non-null, empty unless action is "delete"
+  type        UTF8                 non-null: "node" | "way"
+  id          UINT64               non-null
+  version     UINT32               non-null
 ```
 
 The tags after the edit are `osm.tags` with `changes` applied. The
@@ -102,7 +109,9 @@ sometimes an API rather than a page for people.
 `id` stays the same from week to week as long as the edit touches the
 same keys of the same element, so a MapRoulette challenge rebuilt every
 week keeps the status of its tasks. For a modify, it is made from the
-element's type and ID and the sorted keys in `changes`.
+element's type and ID and the sorted keys in `changes`. For a delete,
+it is made from the element's type and ID alone, so that it survives
+someone retagging the element meanwhile.
 
 ## Reasons
 
@@ -118,7 +127,8 @@ element's type and ID and the sorted keys in `changes`.
 | `over_60_min` | `opening_hours`: open on the same days, but on some day the times differ by more than an hour. |
 | `other_days` | `opening_hours`: open on some day in one value and closed in the other. |
 | `public_holidays` | `opening_hours`: the same week, but AllThePlaces has other hours on public holidays. |
-| `needs_review` | `opening_hours`: OSM's value has rules that we don't rewrite by machine, such as seasons (`Apr-Oct`), comments, `sunrise` or syntax we can't parse. `new` is the same as `old`, so applying the change does nothing; `atp` holds AllThePlaces' value, for a person to decide. Never apply these automatically. |
+| `needs_review` | A person must decide; `new` is the same as `old`, so applying the change does nothing. Never apply these automatically. For `opening_hours`, OSM's value has rules that we don't rewrite by machine, such as seasons (`Apr-Oct`), comments, `sunrise` or syntax we can't parse, and `atp` holds AllThePlaces' value. For `obsolete_poi`, the changes list the tags that a delete would remove, and a warning says why we didn't. |
+| `obsolete` | The place is likely gone: the tag is removed (`new` is null), or with action `delete`, the whole element is. |
 
 A challenge can start with the large `opening_hours` differences,
 `other_days` and `over_60_min`, and leave `small` ones for later.
@@ -210,6 +220,70 @@ is AllThePlaces' week, plus its own `PH` rule if it has one. We don't
 touch `check_date:opening_hours`; whoever applies an edit after
 checking it may set it.
 
+## Deletes
+
+A `deletion_candidate` in [`conflated.parquet`](CONFLATED_PARQUET.md)
+is an OpenStreetMap feature that no AllThePlaces feature matched,
+although AllThePlaces lists its brand, network or operator with the
+same kind of place nearby, or (in Switzerland) the national public
+transport register lacks it. What we suggest depends on the element:
+
+| Element | Edit |
+| --- | --- |
+| A node that no way or relation uses, with nothing but POI tags | `delete` |
+| A bare way: nothing but POI tags, no tagged node | `delete`, with its untagged nodes that no other way or relation uses in `deleted_members` |
+| A bare relation, without relations among its members | `delete`, with its untagged members, and their untagged nodes, that nothing else uses in `deleted_members` |
+| An element that keeps something else, such as `building`, `landuse`, `entrance` or an address with `addr:housenumber` | `modify` removing the POI tags |
+| A node in a way, such as a stop on a road | `modify` removing all its tags |
+| An element that a relation uses, such as a stop in a route | `modify` with `needs_review`, warning `relation_member` |
+| A bare way with a tagged node, such as an entrance | `modify` with `needs_review`, warning `tagged_member_node` |
+| A bare way or relation that would keep only its address | `modify` with `needs_review`, warning `address_only` |
+| A bare relation with relations among its members | `modify` with `needs_review`, warning `has_subrelation` |
+
+POI tags are everything except the building (`building`,
+`building:*`, `roof:*`, `height`, `levels`), the address (`addr:*`),
+`landuse`, `man_made`, `natural`, `barrier`, `area`, `indoor`,
+`level`, `layer`, `entrance`, `door`, roads and railways (`highway`
+and `railway`, but not stops, platforms and stations), and notes and
+sources. An address counts only with a house number or house name:
+a street and city alone just say roughly where the place was, and go
+with it. Likewise `level`, `layer`, `ele` and `height` stay while
+something else stays, but alone they don't keep an element, nor
+does `indoor=yes`.
+
+`sources` lists the spiders that list the brand (or, for Swiss
+transit stops, the register), with `relation` `deletion_candidate`,
+`rule` the signal (`wikidata`, `name`, `swiss_transit_id` or
+`swiss_transit_stop`) and `fetched` the spider's earliest fetch of
+the brand. We suggest no delete when:
+
+- someone edited the element after a spider fetched the brand: they
+  likely saw the place;
+- a spider of the brand looks broken this week (see below);
+- fewer than half of the brand's OpenStreetMap features nearby were
+  matched (`match.evidence.local_share` below 0.5);
+- some AllThePlaces feature matched the element as `same`;
+- this week's AllThePlaces run had to fall back to an older run for a
+  spider of the brand (`fallback_reason` in `spider_stats`): an older
+  run can miss places, as one did for Japan Post in November 2026;
+- the element is a charging station, since charging networks list
+  their own chargers and roaming partners' unevenly;
+- `check_date` or `survey:date` is within 180 days of the fetch;
+- the element is at version 1 and was added within 180 days of the
+  fetch: the place may be newer than the spider's list.
+
+When AllThePlaces lists a feature of the same spider and kind within
+50 m that matched nothing, the place may have moved, been rebranded,
+or be a missed match. Such an edit becomes a `modify` with
+`needs_review` and the warning `unmatched_nearby:<spider>`. For Swiss
+transit stops, any unmatched register stop within 50 m counts.
+
+A delete needs someone on the ground, or recent street-level imagery,
+since a place missing from a store locator is weaker evidence than a
+page that lists it. When AllThePlaces still places something inside
+the element, such as a parcel counter in a closed supermarket, the edit
+goes out with the warning `host_still_listed:<spider>`.
+
 ## Sources
 
 When several AllThePlaces features match one OSM element, they make
@@ -226,6 +300,12 @@ networks gets `post_office:brand=DHL;DPD`.
 | `replaces_email` | The edit replaces an email address that isn't generic. Both may be right, such as a hotel's own address and its chain's; look before applying. |
 | `personal_email` | A new email address looks like a person's, such as `first.last@example.com`. The store published it, but look before it goes into OSM. Some store addresses get this warning too. |
 | `wikidata_unmatched` | Lining up the Wikidata IDs would drop one of OSM's IDs, so they aren't edited. |
+| `host_still_listed:<spider>` | A delete of a place that the spider still lists something in, such as a parcel counter in a supermarket. The host may be gone and the spider out of date, or the host's brand may have dropped it from its list by mistake. |
+| `relation_member` | An `obsolete_poi` element that a relation uses; deleting it would break the relation. A person decides. |
+| `tagged_member_node` | An `obsolete_poi` way without other tags, one of whose nodes has tags, such as an entrance. A person decides whether the way is a building. |
+| `address_only` | An `obsolete_poi` way or relation that would keep only its address. |
+| `has_subrelation` | An `obsolete_poi` relation with relations among its members. |
+| `unmatched_nearby:<spider>` | An `obsolete_poi` element with an unmatched feature of the spider, of the same kind, within 50 m: likely a move, a rebrand or a missed match. A person decides. |
 
 Warnings appear on an edit whose other changes still go out.
 
@@ -234,6 +314,7 @@ Warnings appear on an edit whose other changes still go out.
 | Action | OSMChange | MapRoulette |
 | --- | --- | --- |
 | modify | `<modify>` of the whole element: `osm.modified.version`, `osm.tags` with `changes` applied, plus `lat`/`lon` from `geometry` (node), `<nd ref>` from `way_members` (way) or `<member>` from `relation_members` (relation) | tag-fix task: `setTags` for each `new`, `unsetTags` for each null `new` |
+| delete | `<delete>` of the element with `osm.modified.version`, then of each of `deleted_members` with its `version`, ways before nodes, in a changeset of its own | change-file task with that OSMChange |
 
 A tool applying a modify should first check that the live element's
 version still equals `osm.modified.version`, or at least that each
