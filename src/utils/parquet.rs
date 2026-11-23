@@ -136,3 +136,32 @@ pub(crate) fn get_tags(
     }
     Ok(tags)
 }
+
+/// Whether the column `name` of `src` is null at `row`.
+fn is_null(src: &impl ColumnSource, name: &str, row: usize) -> Result<bool> {
+    Ok(column(src, name)?.is_null(row))
+}
+
+/// The string at `row` of the column `name` of `src`, or `None` if null.
+pub(crate) fn get_optional_string(
+    src: &impl ColumnSource,
+    name: &str,
+    row: usize,
+) -> Result<Option<String>> {
+    if is_null(src, name, row)? {
+        return Ok(None);
+    }
+    get_string(src, name, row).map(Some)
+}
+
+/// The float at `row` of the column `name` of `src`, or `None` if null.
+pub(crate) fn get_optional_f32(
+    src: &impl ColumnSource,
+    name: &str,
+    row: usize,
+) -> Result<Option<f32>> {
+    if is_null(src, name, row)? {
+        return Ok(None);
+    }
+    get_f32(src, name, row).map(Some)
+}

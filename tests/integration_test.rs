@@ -183,6 +183,7 @@ fn test_pipeline() -> Result<()> {
     let workdir = run_pipeline_on_fixtures(&[])?;
 
     assert_conflated_parquet(&workdir.path().join("conflated.parquet"))?;
+    assert_edits_parquet(&workdir.path().join("edits.parquet"))?;
     assert_conflated_tile_layers(workdir.path())?;
     assert!(
         workdir.path().join("conflated.pmtiles").exists(),
@@ -225,8 +226,8 @@ fn assert_publish_artifacts(workdir: &Path) -> Result<()> {
     assert_eq!(manifest["name"], "osmdiffs");
 
     let resources = manifest["resources"].as_array().context("no resources")?;
-    // conflated + bom + conflated-tiles + spider-stats
-    assert_eq!(resources.len(), 4, "manifest resources: {resources:#?}");
+    // conflated + bom + conflated-tiles + spider-stats + edits
+    assert_eq!(resources.len(), 5, "manifest resources: {resources:#?}");
     // Resource name -> the workdir file it was uploaded from (the local
     // copies keep their undated names; only the S3 key and the manifest
     // path carry the date+hash).
@@ -234,6 +235,7 @@ fn assert_publish_artifacts(workdir: &Path) -> Result<()> {
         "conflated" => "conflated.parquet",
         "conflated-tiles" => "conflated.pmtiles",
         "spider-stats" => "spider-stats.parquet",
+        "edits" => "edits.parquet",
         "bom" => "", // exists under its manifest path
         other => panic!("unexpected resource {other}"),
     };
@@ -584,6 +586,7 @@ fn test_kept_workdir_rebuilds_after_newer_osm() -> Result<()> {
         "matched.jsonl",
         "conflated.pmtiles",
         "spider-stats.parquet",
+        "edits.parquet",
     ] {
         assert!(first.contains_key(name), "{name} was not produced");
     }
@@ -972,6 +975,69 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+/// Checks `make_edits`'s output against the fixture data: the three
+/// matched shops each get one contact tag that OSM lacks.
+fn assert_edits_parquet(path: &Path) -> Result<()> {
+    use arrow::array::{Array, ListArray, RecordBatch, StringArray, StructArray, UInt64Array};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path)?)?;
+    let metadata: BTreeMap<String, Option<String>> = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .into_iter()
+        .flatten()
+        .map(|kv| (kv.key.clone(), kv.value.clone()))
+        .collect();
+    assert_eq!(
+        metadata.get("format_status").cloned().flatten().as_deref(),
+        Some("experimental")
+    );
+    assert!(metadata.contains_key("org.cyclonedx.bom"));
+    let mut edits = Vec::new();
+    for batch in builder.build()? {
+        let batch: RecordBatch = batch?;
+        let column = |name: &str| batch.column_by_name(name).expect(name).clone();
+        let action = column("action");
+        let action = action.as_any().downcast_ref::<StringArray>().unwrap();
+        let osm = column("osm");
+        let osm = osm.as_any().downcast_ref::<StructArray>().unwrap();
+        let ids = osm.column_by_name("id").unwrap();
+        let ids = ids.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let changes = column("changes");
+        let changes = changes.as_any().downcast_ref::<ListArray>().unwrap();
+        for row in 0..batch.num_rows() {
+            let change = changes.value(row);
+            let change = change.as_any().downcast_ref::<StructArray>().unwrap();
+            let strings = |name: &str| -> Vec<Option<String>> {
+                let c = change.column_by_name(name).unwrap();
+                let c = c.as_any().downcast_ref::<StringArray>().unwrap();
+                (0..c.len())
+                    .map(|i| c.is_valid(i).then(|| c.value(i).to_string()))
+                    .collect()
+            };
+            edits.push((
+                action.value(row).to_string(),
+                ids.value(row),
+                strings("key"),
+                strings("old"),
+                strings("new"),
+            ));
+        }
+    }
+    assert_eq!(edits.len(), 3, "{edits:#?}");
+    let media_markt = edits
+        .iter()
+        .find(|e| e.1 == 737021556)
+        .expect("an edit of MediaMarkt, way/737021556");
+    assert_eq!(media_markt.0, "modify");
+    assert_eq!(media_markt.2, [Some("phone".to_string())]);
+    assert_eq!(media_markt.3, [None]);
+    assert_eq!(media_markt.4, [Some("+41 848 544 455".to_string())]);
     Ok(())
 }
 

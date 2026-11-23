@@ -45,6 +45,13 @@ whole planet, within a week, and turn it into edit proposals for
 volunteers to review — turning “maybe someone notices eventually” into
 a standing, repeatable check.
 
+The edits this project publishes, `edits.parquet`, are data for that
+review: for volunteers checking one place at a time, or for imports
+that follow the
+[OSM Import Guidelines](https://wiki.openstreetmap.org/wiki/Import/Guidelines),
+with their community discussion and review. The project itself never
+uploads to OpenStreetMap.
+
 ### What conflation is
 
 “Conflation” is the general [GIS](https://en.wikipedia.org/wiki/Geographic_information_system)
@@ -255,10 +262,16 @@ graph TD
     SPIDER_STATS --> SPIDER_STATS_PARQUET[spider-stats.parquet]
     SPIDER_STATS_PARQUET --> UPLOAD_SPIDER_STATS(upload_spider_stats) --> S3A
 
+    CONFLATED --> MAKE_EDITS(make_edits)
+    SPIDER_STATS_PARQUET --> MAKE_EDITS
+    MAKE_EDITS --> EDITS_PARQUET[edits.parquet]
+    EDITS_PARQUET --> UPLOAD_EDITS(upload_edits) --> S3A
+
     CONFLATED --> UPLOAD_BOM(upload_conflated_bom) --> S3A
     UPLOAD_CONFLATED --> UPLOAD_DATAPACKAGE
     UPLOAD_CONFLATED_TILES --> UPLOAD_DATAPACKAGE
     UPLOAD_SPIDER_STATS --> UPLOAD_DATAPACKAGE
+    UPLOAD_EDITS --> UPLOAD_DATAPACKAGE
     UPLOAD_BOM --> UPLOAD_DATAPACKAGE(upload_datapackage<br/>data/datapackage.json) --> S3A
 
     classDef process fill:#fce4ec,stroke:#ad1457,stroke-width:2px,color:#4a0e28,font-weight:bold;
@@ -615,7 +628,21 @@ fetch away.
   rate, (`same` + `located_in`) / `rows`, dropped by 20 points or more
   from at least 100 rows. Without last week's file, it logs that and
   goes on.
-- **`upload_conflated` / `upload_conflated_tiles` / `upload_spider_stats`**
+- **`make_edits`**
+  ([`src/pipeline/edits/`](../src/pipeline/edits/)) — reads
+  `conflated.parquet` and writes `edits.parquet`, one row per
+  OpenStreetMap element with the tag changes AllThePlaces suggests for
+  it: contact tags, Wikidata IDs of brands, operators and networks,
+  and the service tags of postal partners
+  ([plan](notes/2026-11-23-edits-parquet.md)). It skips spiders whose
+  run looks broken against last week's `spider-stats.parquet` (the
+  same tests as `summarize_spider_churn`). Two passes over
+  `conflated.parquet`: the first decides the changes from the columns
+  the rules need, the second reads the full OSM side of the elements
+  that get an edit. See
+  [`docs/outputs/EDITS_PARQUET.md`](outputs/EDITS_PARQUET.md) for the
+  schema.
+- **`upload_conflated` / `upload_conflated_tiles` / `upload_spider_stats` / `upload_edits`**
   ([`src/pipeline/upload.rs`](../src/pipeline/upload.rs)) — push the
   data output, its tiles and the spider statistics to the public (`PUBLIC_S3_*`)
   bucket, each under a dated, content-hashed key
@@ -766,10 +793,11 @@ Related documentation:
 
 We wanted to get the pipeline running end to end before polishing any
 single piece of it. As of this writing, it does: it produces
-`conflated.parquet`, a PMTiles archive of it for visual review, and
-per-spider statistics, each uploaded to S3 at the end of a run. Proposed
-edits are being rebuilt as `edits.parquet`; see
-[the plan](notes/2026-11-23-edits-parquet.md). What’s still ahead follows from
+`conflated.parquet`, a PMTiles archive of it for visual review,
+per-spider statistics, and `edits.parquet` with suggested tag changes,
+each uploaded to S3 at the end of a run. Edits so far cover contact
+tags, Wikidata IDs and postal partners; creates, deletes and opening
+hours follow [the plan](notes/2026-11-23-edits-parquet.md). What’s still ahead follows from
 that same choice — several pieces are deliberately simple placeholders
 until the full pipeline was proven out:
 

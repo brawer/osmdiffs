@@ -391,6 +391,18 @@ const CONFLATED_TILES: Publish = Publish {
     sha512: false,
 };
 
+const EDITS: Publish = Publish {
+    name: "edits",
+    stem: "edits",
+    ext: "parquet",
+    title: "edits.parquet \u{2014} proposed OpenStreetMap edits (GeoParquet)",
+    description: super::edits::DISCLAIMER,
+    format: "parquet",
+    mediatype: "application/vnd.apache.parquet",
+    describes: None,
+    sha512: false,
+};
+
 const SPIDER_STATS: Publish = Publish {
     name: "spider-stats",
     stem: "spider-stats",
@@ -443,6 +455,10 @@ pub fn upload_conflated(
     progress: &MultiProgress,
 ) -> Result<PublishedFile> {
     publish(&CONFLATED, conflated, date, progress)
+}
+
+pub fn upload_edits(edits: &Path, date: &str, progress: &MultiProgress) -> Result<PublishedFile> {
+    publish(&EDITS, edits, date, progress)
 }
 
 pub fn upload_spider_stats(

@@ -211,6 +211,28 @@ pub fn build_bom_for_conflated_parquet(
     }))
 }
 
+/// Builds the CycloneDX provenance document embedded in
+/// `edits.parquet`: the one of `conflated.parquet`, with `edits.parquet`
+/// as the output component. Its inputs are the same, since the edits
+/// come from `conflated.parquet` and nothing else.
+pub fn build_bom_for_edits_parquet(workdir: &Path, pipeline_run_id: &str) -> Result<Value> {
+    let mut bom = build_bom_for_conflated_parquet(workdir, pipeline_run_id, None)?;
+    let component = &mut bom["metadata"]["component"];
+    component["bom-ref"] = json!("edits.parquet");
+    component["name"] = json!("edits.parquet");
+    component["description"] = json!("Proposed OpenStreetMap edits from AllThePlaces data.");
+    component["externalReferences"][0]["url"] = json!(format!(
+        "{REPO_URL}/blob/main/docs/outputs/EDITS_PARQUET.md"
+    ));
+    bom["dependencies"][0]["ref"] = json!("edits.parquet");
+    for formula in bom["formulation"].as_array_mut().into_iter().flatten() {
+        for workflow in formula["workflows"].as_array_mut().into_iter().flatten() {
+            workflow["outputs"] = json!([{"resource": {"ref": "edits.parquet"}}]);
+        }
+    }
+    Ok(bom)
+}
+
 /// The input-anchored timestamp every reproducible artifact keys off:
 /// `max(AllThePlaces run start, OSM planet replication)`, i.e. the
 /// freshness of whichever input was updated most recently. The BOM uses

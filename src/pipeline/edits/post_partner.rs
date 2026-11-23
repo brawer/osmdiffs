@@ -4,13 +4,10 @@
 //! that OSM lacks, and nothing else: the partner's opening hours or
 //! phone may be the counter's, not the store's.
 //!
-//! Moved unchanged from the old `edit_suggesters` module (see git
-//! history) when `suggest_edits` was removed; the new edits step uses
-//! it from milestone 3 of `docs/notes/2026-11-23-edits-parquet.md` on.
+//! The rules came from the old `edit_suggesters` module (see git
+//! history). [partner_changes] turns their result into [Change]s.
 
-// Until the edits step uses it.
-#![allow(dead_code)]
-
+use super::{Change, Reason, Tags};
 use crate::matchers::post_partner::{PostalBrand, is_post_partner};
 
 /// Whether an AllThePlaces feature with `atp_tags`, matched with
@@ -145,6 +142,23 @@ pub(crate) fn merge_edits(tags: &mut Vec<(String, String)>, other: Vec<(String, 
     {
         tags.retain(|(k, _)| k != LISTS[1]);
     }
+}
+
+/// The changes that set `new`, the merged `post_office` tags of the
+/// partners in one OSM feature with tags `osm`.
+pub(crate) fn partner_changes(osm: &Tags, new: Tags) -> Vec<Change> {
+    new.into_iter()
+        .filter_map(|(key, value)| {
+            let old = osm.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str());
+            let reason = match old {
+                Some(old) if old == value => return None,
+                Some(old) if value.starts_with(&format!("{old};")) => Reason::AddedValue,
+                Some(_) => Reason::Differs,
+                None => Reason::MissingInOsm,
+            };
+            Some(Change::new(&key, old, Some(value), reason))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -303,6 +317,29 @@ mod tests {
                 ("post_office:brand", "DHL;DPD"),
                 ("phone", "+49 30 1234567")
             ])
+        );
+    }
+
+    #[test]
+    fn test_partner_changes() {
+        let osm = tags(&[("shop", "kiosk"), ("post_office:brand", "Hermes")]);
+        let changes = partner_changes(
+            &osm,
+            tags(&[
+                ("post_office", "post_partner"),
+                ("post_office:brand", "Hermes;DHL"),
+            ]),
+        );
+        let got: Vec<(&str, Option<&str>, Reason)> = changes
+            .iter()
+            .map(|c| (c.key.as_str(), c.old.as_deref(), c.reason))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("post_office", None, Reason::MissingInOsm),
+                ("post_office:brand", Some("Hermes"), Reason::AddedValue),
+            ]
         );
     }
 }
