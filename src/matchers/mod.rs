@@ -94,6 +94,16 @@ impl MatchMask {
     /// [MatchMask::importance].
     const IMPORTANT: MatchMask = MatchMask(1 << 10);
 
+    /// Modifier bit: places that matter less to map users than others
+    /// of their category, such as insurance agencies, which match like
+    /// shops. Lowers [MatchMask::importance] to at most
+    /// [MatchMask::MINOR_IMPORTANCE].
+    const MINOR: MatchMask = MatchMask(1 << 12);
+
+    /// The highest importance of a feature with the `MINOR` bit:
+    /// below shops (0.7) and fuel stations (0.6), above parking (0.4).
+    const MINOR_IMPORTANCE: f32 = 0.5;
+
     /// The category bits; see the type's documentation.
     const CATEGORY_BITS: u16 = Self::SHOP.0
         | Self::RESTAURANT.0
@@ -130,7 +140,8 @@ impl MatchMask {
     /// How much a feature with this mask matters to map users, judged by
     /// its kind alone, from 0.0 to 1.0: 1.0 if `IMPORTANT` is set,
     /// otherwise the highest importance among its category bits, or 0.3
-    /// if it has none. Deliberately coarse; it is one of several
+    /// if it has none, but at most [MatchMask::MINOR_IMPORTANCE] if
+    /// `MINOR` is set. Deliberately coarse; it is one of several
     /// signals for ranking features
     /// ([brawer/osmdiffs#713](https://github.com/brawer/osmdiffs/issues/713)),
     /// along with the location's and the brand's popularity.
@@ -138,12 +149,17 @@ impl MatchMask {
         if self.0 & Self::IMPORTANT.0 != 0 {
             return 1.0;
         }
-        Self::CATEGORY_IMPORTANCE
+        let importance = Self::CATEGORY_IMPORTANCE
             .iter()
             .filter(|(bit, _)| self.0 & bit.0 != 0)
             .map(|&(_, importance)| importance)
             .reduce(f32::max)
-            .unwrap_or(0.3)
+            .unwrap_or(0.3);
+        if self.0 & Self::MINOR.0 != 0 {
+            importance.min(Self::MINOR_IMPORTANCE)
+        } else {
+            importance
+        }
     }
 
     pub fn add_tag(&mut self, key: &str, value: &str) {
@@ -282,10 +298,12 @@ impl MatchMask {
             // Offices that behave like shops: a branded place at an
             // address, often with a web page per branch; see
             // [brawer/osmdiffs#1018](https://github.com/brawer/osmdiffs/issues/1018).
-            ("office", "estate_agent") => Self::SHOP.0,
-            ("office", "financial_advisor") => Self::SHOP.0,
-            ("office", "insurance") => Self::SHOP.0,
-            ("office", "tax_advisor") => Self::SHOP.0,
+            // They matter less to map users than shops.
+            // TODO(#1051): `office=employment_agency` too.
+            ("office", "estate_agent") => Self::SHOP.0 | Self::MINOR.0,
+            ("office", "financial_advisor") => Self::SHOP.0 | Self::MINOR.0,
+            ("office", "insurance") => Self::SHOP.0 | Self::MINOR.0,
+            ("office", "tax_advisor") => Self::SHOP.0 | Self::MINOR.0,
 
             ("power", "cable") => 0,
             ("power", "line") => 0,
@@ -771,8 +789,12 @@ mod tests {
             "tax_advisor",
         ] {
             let office = mask(&[("office", kind)]);
-            assert_eq!(office, MatchMask::SHOP, "office={kind}");
-            assert_eq!(office.importance(), 0.7, "office={kind}");
+            assert!(office.intersects(&MatchMask::SHOP), "office={kind}");
+            assert!(
+                match_distance(&office) == match_distance(&MatchMask::SHOP),
+                "office={kind}"
+            );
+            assert_eq!(office.importance(), 0.5, "office={kind}");
         }
         // Other offices are not matched yet.
         assert!(mask(&[("office", "company")]).is_empty());
@@ -816,6 +838,13 @@ mod tests {
         assert_eq!(importance(&[("natural", "tree")]), 0.1);
         // The highest category wins.
         assert_eq!(importance(&[("shop", "yes"), ("amenity", "fuel")]), 0.7);
+        // Minor places stay below shops, but not above their category.
+        assert_eq!(importance(&[("office", "insurance")]), 0.5);
+        assert_eq!(importance(&[("office", "insurance"), ("shop", "yes")]), 0.5);
+        assert_eq!(
+            importance(&[("office", "insurance"), ("emergency", "defibrillator")]),
+            1.0
+        );
         // Every category bit has an importance.
         let listed = MatchMask::CATEGORY_IMPORTANCE
             .iter()

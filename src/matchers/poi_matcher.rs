@@ -364,6 +364,9 @@ impl<'a> PoiMatcher<'a> {
         if !self.brand_wikidata.is_empty() && osm_has_brand {
             let osm_brand: Vec<u64> = osm_brand.collect();
             if osm_brand.iter().any(|id| self.brand_wikidata.contains(id)) {
+                // TODO(#1049): Prefer a candidate whose phone, email or
+                // website agrees over a closer one that only shares the
+                // brand, as when OSM maps two offices of one agency.
                 return (1.0, "brand_wikidata");
             }
             if osm_brand
