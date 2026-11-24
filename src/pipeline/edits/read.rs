@@ -1,9 +1,7 @@
 //! The two passes over `conflated.parquet`; see the module doc of
 //! [super].
 
-use super::create::{
-    self, Candidate, DeletionCandidates, HostFeature, MatchedSites, Positions, Skip,
-};
+use super::create::{self, Candidate, DeletionCandidates, HostFeature, MatchedSites, Positions};
 use super::post_partner::{PostPartnerEditSuggester, has_partner_edits};
 use super::writer::{Edit, OsmSide, RelationMember};
 use super::{Decision, Element, Source, Tags};
@@ -20,7 +18,7 @@ use geo_traits::to_geo::ToGeoGeometry;
 use indicatif::ProgressBar;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::path::Path;
 
@@ -110,8 +108,9 @@ pub(super) struct FirstPass {
     pub deletion_candidates: DeletionCandidates,
     pub positions: Positions,
     pub matched_sites: MatchedSites,
-    /// Candidates left out in the first pass; see [create::early_skip].
-    pub early_skips: BTreeMap<Skip, usize>,
+    /// Candidates left out in the first pass, counted with the others;
+    /// see [create::early_skip].
+    pub early_skips: create::CreateStats,
 }
 
 /// From `match.evidence.similar_osm`, the distance to the nearest OSM
@@ -360,7 +359,10 @@ pub(super) fn first_pass(
                     // Kinds we never create, and places that OSM
                     // likely has, are only counted, to save memory.
                     match create::early_skip(&candidate) {
-                        Some(skip) => *pass.early_skips.entry(skip).or_default() += 1,
+                        Some(skip) => {
+                            pass.early_skips.count_candidate(&candidate);
+                            pass.early_skips.count_skip(&candidate.source.spider, skip);
+                        }
                         None => pass.candidates.push(*candidate),
                     }
                 }
