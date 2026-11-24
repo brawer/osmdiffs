@@ -1,6 +1,7 @@
 # Plan: edits.parquet
 
-Status: plan, agreed on 2026-11-23. Implementation follows the milestones below, one PR each.
+Status: agreed on 2026-11-23. Milestones 1 to 4 and 6 have shipped; deletes (5), and with them 7, are postponed, and 8
+waits for matchers. See [Milestones](#milestones).
 
 ## Goals and non-goals
 
@@ -363,6 +364,23 @@ the planet once it holds up.
 8. Host-service modifies for ATMs and money transfer, once matchers for them exist (postal partners come in milestone
    3). Until then, creates and deletes leave these kinds out (the 2026-11-16 run has about 140 such deletion candidates,
    such as 71 `money_transfer` nodes, which are unmatched only for lack of a matcher).
+
+### Status
+
+As of 2026-11-24:
+
+| milestone | status | PR or issue | eval |
+| --- | --- | --- | --- |
+| 1. Remove the old edit suggesters | done | [#1033](https://github.com/brawer/osmdiffs/pull/1033) | none, output unchanged |
+| 2. `atp.fetched.source_uri` | done | [#1034](https://github.com/brawer/osmdiffs/pull/1034) | none, a new column |
+| 3. `edits` step, contact and Wikidata modifies, postal partners | done | [#1036](https://github.com/brawer/osmdiffs/pull/1036) | [2026-11-23-edits-eval.md](2026-11-23-edits-eval.md) |
+| 4. Opening hours | done | [#1037](https://github.com/brawer/osmdiffs/pull/1037) | [2026-11-23-opening-hours-eval.md](2026-11-23-opening-hours-eval.md) |
+| 5. Deletes | postponed: too imprecise | [#1044](https://github.com/brawer/osmdiffs/issues/1044); first attempt [#1038](https://github.com/brawer/osmdiffs/pull/1038), closed | [2026-11-23-deletion-suggestions-eval.md](2026-11-23-deletion-suggestions-eval.md), and ideas for better signals in [2026-11-24-deletion-signals.md](2026-11-24-deletion-signals.md) ([#1039](https://github.com/brawer/osmdiffs/pull/1039)) |
+| 6. Creates | done | [#1040](https://github.com/brawer/osmdiffs/pull/1040), with per-spider counts and weekly checks in [#1041](https://github.com/brawer/osmdiffs/pull/1041); NSI tags missing, [#1047](https://github.com/brawer/osmdiffs/issues/1047) | [2026-11-24-create-suggestions-eval.md](2026-11-24-create-suggestions-eval.md) |
+| 7. Persistence for deletes | waits for 5 | [#1045](https://github.com/brawer/osmdiffs/issues/1045) | |
+| 8. Host services for ATMs and money transfer | waits for matchers | [#1046](https://github.com/brawer/osmdiffs/issues/1046), ATM matcher [#991](https://github.com/brawer/osmdiffs/issues/991) | |
+
+What to check after each weekly run is in [`WEEKLY_REVIEW.md`](../WEEKLY_REVIEW.md).
 
 For each milestone we sample 50 edits per kind across the eval regions, check them by hand against the store pages and
 OSM, and record the precision in a `docs/notes/` entry, as with the matching rules.
