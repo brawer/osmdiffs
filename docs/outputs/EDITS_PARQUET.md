@@ -35,7 +35,12 @@ four topics:
   counter, such as `post_office=post_partner` and `post_office:brand`.
 
 A new element has the topic `new_poi`; see
-[New places](#new-places). Deletes of closed places may follow.
+[New places](#new-places). It covers places that people visit, such
+as shops, restaurants, banks, fuel stations or hotels. Infrastructure
+such as post boxes, charging stations or transit stops gets no creates
+today; once it does, it will have a topic of its own, since mappers
+check it differently and its imports follow other rules. Deletes of
+closed places may follow.
 
 Like [`conflated.parquet`](CONFLATED_PARQUET.md), this is a
 [GeoParquet 2.0-rc.1](https://github.com/opengeospatial/geoparquet/blob/v2.0.0-rc.1/format-specs/geoparquet.md)
