@@ -526,7 +526,6 @@ impl<'a> OsmFeatureIndex<'a> {
     /// for {node,way,relation}, same encoding as `Feature.id` elsewhere in
     /// this codebase (see `make_feature_id`/`feature_to_osm_id` in
     /// `pipeline::osm::assemble`). O(1), array read only -- no decode.
-    #[allow(unused)]
     pub fn feature_id(&self, r: LocalFeatureRef) -> u64 {
         u64::from_le(self.id[r.0 as usize])
     }

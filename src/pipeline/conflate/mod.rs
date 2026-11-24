@@ -68,6 +68,7 @@ pub(super) mod evidence;
 mod local_coverage;
 mod located_in;
 mod s2_util;
+mod similar;
 mod writer;
 use deletion::{AtpCoverage, Candidate, Reason, deletion_reason, local_keys, place_country};
 use diagnostics::{Diagnostics, Missing};
@@ -404,10 +405,11 @@ fn produce_rows(
             // The host exists, whether or not ATP has it.
             matched.insert(r);
             located_in_rows.fetch_add(1, Ordering::Relaxed);
+            let similar = similar::nearest_similar(atp, Some(r), osm)?;
             send_row(
                 atp,
                 Some(r),
-                MatchInfo::located_in(host.rule()),
+                MatchInfo::located_in(host.rule()).with_similar(similar),
                 osm,
                 signals,
                 &out,
@@ -417,7 +419,9 @@ fn produce_rows(
         if !report_missing {
             return Ok(false);
         }
-        send_row(atp, None, MatchInfo::missing_in_osm(), osm, signals, &out)?;
+        let similar = similar::nearest_similar(atp, None, osm)?;
+        let matching = MatchInfo::missing_in_osm().with_similar(similar);
+        send_row(atp, None, matching, osm, signals, &out)?;
         Ok(true)
     };
 

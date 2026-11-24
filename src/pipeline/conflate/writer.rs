@@ -26,6 +26,7 @@ use std::{
 };
 
 use super::ConflatedFeature;
+use super::similar::Similar;
 use crate::{
     geometry::GeometryTally,
     matchers::{OsmCandidate, Rules},
@@ -83,6 +84,7 @@ pub struct ParquetWriter {
     match_local_shares: Float32Builder,
     match_positions: StringBuilder,
     match_position_shifts: Float32Builder,
+    match_similar: ListBuilder<StructBuilder>,
 
     importance: Float32Builder,
 }
@@ -151,6 +153,10 @@ pub(super) struct MatchInfo {
     /// How far the ATP position was moved east for [Self::position], in
     /// degrees of longitude. Subtract it to get AllThePlaces' own.
     pub(super) position_shift_deg: Option<f32>,
+    /// For `missing_in_osm` and `located_in` rows, the OSM features
+    /// nearby that are most like the ATP feature; see
+    /// `conflate::similar`.
+    pub(super) similar: Vec<Similar>,
 }
 
 impl MatchInfo {
@@ -167,6 +173,7 @@ impl MatchInfo {
             local_share: None,
             position: None,
             position_shift_deg: None,
+            similar: Vec::new(),
         }
     }
 
@@ -189,7 +196,13 @@ impl MatchInfo {
             local_share: None,
             position: None,
             position_shift_deg: None,
+            similar: Vec::new(),
         }
+    }
+
+    /// This row, with `similar` for `match.evidence.similar_osm`.
+    pub(super) fn with_similar(self, similar: Vec<Similar>) -> Self {
+        MatchInfo { similar, ..self }
     }
 
     pub(super) fn located_in(rule: &str) -> Self {
@@ -201,6 +214,7 @@ impl MatchInfo {
             local_share: None,
             position: None,
             position_shift_deg: None,
+            similar: Vec::new(),
         }
     }
 
@@ -213,8 +227,38 @@ impl MatchInfo {
             local_share: local_share.map(|s| s as f32),
             position: None,
             position_shift_deg: None,
+            similar: Vec::new(),
         }
     }
+}
+
+/// Appends `similar` to `builder`, a null if there is none.
+fn append_similar(builder: &mut ListBuilder<StructBuilder>, similar: &[Similar]) {
+    if similar.is_empty() {
+        builder.append(false);
+        return;
+    }
+    let entries = builder.values();
+    for s in similar {
+        entries
+            .field_builder::<StringBuilder>(0)
+            .expect("similar_osm.type")
+            .append_value(&s.osm_type);
+        entries
+            .field_builder::<UInt64Builder>(1)
+            .expect("similar_osm.id")
+            .append_value(s.osm_id);
+        entries
+            .field_builder::<Float32Builder>(2)
+            .expect("similar_osm.distance_m")
+            .append_value(s.distance_m);
+        entries
+            .field_builder::<StringBuilder>(3)
+            .expect("similar_osm.by")
+            .append_value(s.by.as_str());
+        entries.append(true);
+    }
+    builder.append(true);
 }
 
 /// A single row in the conflated parquet file.
@@ -393,6 +437,20 @@ impl ParquetWriter {
             match_local_shares: Float32Builder::with_capacity(max_rows_per_group),
             match_positions: StringBuilder::with_capacity(max_rows_per_group, 0),
             match_position_shifts: Float32Builder::with_capacity(max_rows_per_group),
+            match_similar: ListBuilder::new(StructBuilder::new(
+                schema::similar_fields(),
+                vec![
+                    Box::new(StringBuilder::new()),  // type
+                    Box::new(UInt64Builder::new()),  // id
+                    Box::new(Float32Builder::new()), // distance_m
+                    Box::new(StringBuilder::new()),  // by
+                ],
+            ))
+            .with_field(Field::new(
+                "item",
+                DataType::Struct(schema::similar_fields()),
+                /* nullable */ false,
+            )),
 
             importance: Float32Builder::with_capacity(max_rows_per_group),
         })
@@ -590,6 +648,7 @@ impl ParquetWriter {
             .append_option(row.matching.position.as_deref());
         self.match_position_shifts
             .append_option(row.matching.position_shift_deg);
+        append_similar(&mut self.match_similar, &row.matching.similar);
 
         self.importance.append_value(importance);
         self.rows_in_group += 1;
@@ -780,6 +839,7 @@ impl ParquetWriter {
                 Arc::new(self.match_local_shares.finish()) as ArrayRef,
                 Arc::new(self.match_positions.finish()) as ArrayRef,
                 Arc::new(self.match_position_shifts.finish()) as ArrayRef,
+                Arc::new(self.match_similar.finish()) as ArrayRef,
             ],
             None,
         )?;
@@ -1133,6 +1193,11 @@ mod schema {
                 Field::new("local_share", DataType::Float32, NULLABLE),
                 Field::new("position", DataType::Utf8, NULLABLE),
                 Field::new("position_shift_deg", DataType::Float32, NULLABLE),
+                Field::new_list(
+                    "similar_osm",
+                    Field::new("item", DataType::Struct(similar_fields()), NOT_NULLABLE),
+                    NULLABLE,
+                ),
             ],
             NOT_NULLABLE,
         );
@@ -1163,6 +1228,17 @@ mod schema {
     /// OSM gave the member no role -- OSM itself only has an empty
     /// string for that, not a null of its own, but the public schema
     /// draws the distinction).
+    /// The fields of one `match.evidence.similar_osm` list entry.
+    pub fn similar_fields() -> Fields {
+        vec![
+            Field::new("type", DataType::Utf8, NOT_NULLABLE),
+            Field::new("id", DataType::UInt64, NOT_NULLABLE),
+            Field::new("distance_m", DataType::Float32, NOT_NULLABLE),
+            Field::new("by", DataType::Utf8, NOT_NULLABLE),
+        ]
+        .into()
+    }
+
     pub fn relation_member_fields() -> Fields {
         vec![
             Field::new("type", DataType::Utf8, NOT_NULLABLE),

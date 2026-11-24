@@ -19,6 +19,7 @@
 
 mod agreement;
 mod contact;
+mod create;
 mod opening_hours;
 mod post_partner;
 mod read;
@@ -350,7 +351,14 @@ pub fn make_edits(
         NsiNames::default()
     };
     let bar = make_progress_bar(progress, "edits.collect", 0, "rows");
-    let mut elements = read::collect_elements(conflated, unhealthy, &bar)?;
+    let read::FirstPass {
+        mut elements,
+        candidates,
+        deletion_candidates,
+        positions,
+        matched_sites,
+        early_skips,
+    } = read::first_pass(conflated, unhealthy, &bar)?;
     bar.finish();
     let num_elements = elements.len();
     let mut shared_osm_values = contact::shared_osm_values(elements.values().map(|e| &e.tags));
@@ -376,16 +384,52 @@ pub fn make_edits(
         }
     }
 
+    let spider_gate = create::SpiderGate::open(spider_stats)?;
+    let (creates, mut create_stats) = create::make_creates(
+        candidates,
+        &create::CreateContext {
+            nondescript: &nondescript,
+            shared_osm_values: &shared_osm_values,
+            opening_hours: &hours_gate,
+            spiders: &spider_gate,
+            deletion_candidates: &deletion_candidates,
+            positions: &positions,
+            matched_sites: &matched_sites,
+        },
+    );
+    for (skip, n) in early_skips {
+        create_stats.candidates += n;
+        *create_stats.skipped.entry(skip).or_default() += n;
+    }
+    let skipped = |skip: create::Skip| create_stats.skipped.get(&skip).copied().unwrap_or(0);
+    log::info!(
+        candidates = create_stats.candidates,
+        creates = creates.len(),
+        merged = create_stats.merged,
+        deletion_candidates = deletion_candidates.len(),
+        skipped_kind = skipped(create::Skip::Kind),
+        skipped_similar_nearby = skipped(create::Skip::Similar),
+        skipped_spider_position = skipped(create::Skip::SpiderPosition),
+        skipped_shared_position = skipped(create::Skip::SharedPosition),
+        skipped_moved = skipped(create::Skip::Moved),
+        skipped_matched_site = skipped(create::Skip::MatchedSite),
+        skipped_host_far = skipped(create::Skip::HostFar),
+        skipped_coarse_position = skipped(create::Skip::CoarsePosition),
+        skipped_incomplete = skipped(create::Skip::Incomplete);
+        "make_edits: creates"
+    );
+
     let bar = make_progress_bar(progress, "edits.write", 0, "rows");
     let mut edits = read::complete_edits(conflated, elements, decisions, &bar)?;
     bar.finish();
+    edits.extend(creates);
     // Along the Hilbert curve of S2 cells, as `conflated.parquet`.
     edits.sort_by(|a, b| {
-        (a.s2_cell_id, &a.osm.osm_type, a.osm.osm_id).cmp(&(
-            b.s2_cell_id,
-            &b.osm.osm_type,
-            b.osm.osm_id,
-        ))
+        let key = |e: &writer::Edit| {
+            let osm = e.osm.as_ref().map(|o| (o.osm_type.clone(), o.osm_id));
+            (e.s2_cell_id, osm, e.id.clone())
+        };
+        key(a).cmp(&key(b))
     });
     let stats = writer::write(&out, &edits, provenance_bom).context("could not write edits")?;
     log::info!(
@@ -397,6 +441,7 @@ pub fn make_edits(
         wikidata = stats.topic("wikidata"),
         opening_hours = stats.topic("opening_hours"),
         post_partner = stats.topic("post_partner"),
+        new_poi = stats.topic("new_poi"),
         bytes_written = std::fs::metadata(&out)?.len();
         "make_edits: done"
     );
