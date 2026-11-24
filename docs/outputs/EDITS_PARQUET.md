@@ -277,8 +277,10 @@ be off. So we propose one only when nothing speaks against it:
   zones of the `gbfs` spider, the `standard_chartered_bank` spider,
   which gives every branch the brand of Standard Chartered Taiwan, the
   book boxes of `little_free_library`, a registry that keeps boxes
-  long after they are gone, many in private front yards, and banks whose name says they have
-  machines only, such as a Sparkasse “SB-Center”.
+  long after they are gone, many in private front yards, banks whose name says they have
+  machines only, such as a Sparkasse “SB-Center”, and offices without a street address,
+  which are often advisors who visit their customers, such as the
+  “AXA Épargne et Protection” advisors of `axa_fr`.
 
 A create carries what the place is (`shop`, `amenity`, `tourism`,
 `leisure`, `healthcare`, `craft`, `office`, and `cuisine`,
