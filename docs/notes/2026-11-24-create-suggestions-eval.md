@@ -161,9 +161,24 @@ Each of these came out of a hand check, and has a unit test:
 - The plan merges sources only on a shared phone or email; creates
   also merge on a shared brand, as when two spiders list one store.
 
+## Upstream
+
+Filed from this hand check, as data problems for any consumer of
+AllThePlaces:
+
+- `standard_chartered_bank` gives every branch the brand of Standard Chartered Taiwan: [alltheplaces#20767](https://github.com/alltheplaces/alltheplaces/issues/20767).
+- `stadt_zuerich_ch` tags 512 Kinderhorte `amenity=school`: [alltheplaces#20768](https://github.com/alltheplaces/alltheplaces/issues/20768).
+- `volksbank_raiffeisenbank_de` gives 338 Sparda-Bank branches the Volksbank Raiffeisenbank brand: [alltheplaces#20769](https://github.com/alltheplaces/alltheplaces/issues/20769).
+- `bp` lists 299 of its 602 Swiss stations twice, about 5 m apart: [alltheplaces#20770](https://github.com/alltheplaces/alltheplaces/issues/20770).
+- `valora` names its shops by internal labels such as `KK Gilching EKZ`: [alltheplaces#20771](https://github.com/alltheplaces/alltheplaces/issues/20771).
+- `oggi_sorvetes_br` names its shops by franchise labels such as `RJ BUZIOS CENTRO`: [alltheplaces#20772](https://github.com/alltheplaces/alltheplaces/issues/20772).
+- `maes_dkv` names every station `<BRAND> Station` and tags it `shop=yes`: [alltheplaces#20773](https://github.com/alltheplaces/alltheplaces/issues/20773).
+- `burger_king` puts the full address in `branch` in the US: [alltheplaces#20774](https://github.com/alltheplaces/alltheplaces/issues/20774).
+- `icici_bank_in` repeats the brand in `branch`: [alltheplaces#20775](https://github.com/alltheplaces/alltheplaces/issues/20775).
+- `starbucks_us` puts Target's store number in `branch`: [alltheplaces#20776](https://github.com/alltheplaces/alltheplaces/issues/20776).
+- `little_free_library` names about a third of its boxes after their stewards: [alltheplaces#20777](https://github.com/alltheplaces/alltheplaces/issues/20777).
+
 ## Follow-ups
 
-- Report the Standard Chartered brand, and `stadt_zuerich_ch` giving
-  Kinderhorte as schools, upstream.
 - Look at the remaining large spiders by hand once the planet run
   has creates, starting with `ja_bank_jp` and `chocozap_jp`.
