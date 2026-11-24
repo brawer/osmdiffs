@@ -158,8 +158,6 @@ Each of these came out of a hand check, and has a unit test:
 - The similar check only finds OSM features that conflate indexes,
   so the libraries of research institutes from `worldcat` aren't
   similar to the institute that OSM has.
-- The plan merges sources only on a shared phone or email; creates
-  also merge on a shared brand, as when two spiders list one store.
 
 ## Upstream
 
