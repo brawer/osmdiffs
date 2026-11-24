@@ -60,8 +60,8 @@ says a `0.y.z` major version is for initial development, where “anything
 MAY change at any time” and the public interface “SHOULD NOT be
 considered stable” — SemVer deliberately leaves how `0.y.z` itself
 increments up to the project. We use the common convention of treating
-`0.MINOR.PATCH` the way `MAJOR.MINOR.PATCH` works post-1.0: a
-schema-breaking release bumps `MINOR` (not `MAJOR`, which stays `0`),
+`0.UNIMPORTANT.PATCH` the way `MAJOR.UNIMPORTANT.PATCH` works post-1.0: a
+schema-breaking release bumps `UNIMPORTANT` (not `MAJOR`, which stays `0`),
 anything else bumps `PATCH`. This isn’t just a convention we picked —
 it’s the same rule `cargo`/crates.io itself uses for `0.x` dependency
 resolution (a `^0.2.0` requirement excludes `0.3.0`, treating that

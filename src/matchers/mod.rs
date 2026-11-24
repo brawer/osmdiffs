@@ -97,12 +97,12 @@ impl MatchMask {
     /// Modifier bit: places that matter less to map users than others
     /// of their category, such as insurance agencies, which match like
     /// shops. Lowers [MatchMask::importance] to at most
-    /// [MatchMask::MINOR_IMPORTANCE].
-    const MINOR: MatchMask = MatchMask(1 << 12);
+    /// [MatchMask::UNIMPORTANT_MAX].
+    const UNIMPORTANT: MatchMask = MatchMask(1 << 12);
 
-    /// The highest importance of a feature with the `MINOR` bit:
+    /// The highest importance of a feature with the `UNIMPORTANT` bit:
     /// below shops (0.7) and fuel stations (0.6), above parking (0.4).
-    const MINOR_IMPORTANCE: f32 = 0.5;
+    const UNIMPORTANT_MAX: f32 = 0.5;
 
     /// The category bits; see the type's documentation.
     const CATEGORY_BITS: u16 = Self::SHOP.0
@@ -140,8 +140,8 @@ impl MatchMask {
     /// How much a feature with this mask matters to map users, judged by
     /// its kind alone, from 0.0 to 1.0: 1.0 if `IMPORTANT` is set,
     /// otherwise the highest importance among its category bits, or 0.3
-    /// if it has none, but at most [MatchMask::MINOR_IMPORTANCE] if
-    /// `MINOR` is set. Deliberately coarse; it is one of several
+    /// if it has none, but at most [MatchMask::UNIMPORTANT_MAX] if
+    /// `UNIMPORTANT` is set. Deliberately coarse; it is one of several
     /// signals for ranking features
     /// ([brawer/osmdiffs#713](https://github.com/brawer/osmdiffs/issues/713)),
     /// along with the location's and the brand's popularity.
@@ -155,8 +155,8 @@ impl MatchMask {
             .map(|&(_, importance)| importance)
             .reduce(f32::max)
             .unwrap_or(0.3);
-        if self.0 & Self::MINOR.0 != 0 {
-            importance.min(Self::MINOR_IMPORTANCE)
+        if self.0 & Self::UNIMPORTANT.0 != 0 {
+            importance.min(Self::UNIMPORTANT_MAX)
         } else {
             importance
         }
@@ -300,10 +300,10 @@ impl MatchMask {
             // [brawer/osmdiffs#1018](https://github.com/brawer/osmdiffs/issues/1018).
             // They matter less to map users than shops.
             // TODO(#1051): `office=employment_agency` too.
-            ("office", "estate_agent") => Self::SHOP.0 | Self::MINOR.0,
-            ("office", "financial_advisor") => Self::SHOP.0 | Self::MINOR.0,
-            ("office", "insurance") => Self::SHOP.0 | Self::MINOR.0,
-            ("office", "tax_advisor") => Self::SHOP.0 | Self::MINOR.0,
+            ("office", "estate_agent") => Self::SHOP.0 | Self::UNIMPORTANT.0,
+            ("office", "financial_advisor") => Self::SHOP.0 | Self::UNIMPORTANT.0,
+            ("office", "insurance") => Self::SHOP.0 | Self::UNIMPORTANT.0,
+            ("office", "tax_advisor") => Self::SHOP.0 | Self::UNIMPORTANT.0,
 
             ("power", "cable") => 0,
             ("power", "line") => 0,
