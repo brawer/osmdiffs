@@ -159,6 +159,8 @@ pub(super) fn name_words(name: &str) -> HashSet<String> {
 }
 
 /// The distinctive words of the names that `tags` give a place.
+// TODO(#1050): Leave out place names, such as the town in an `official_name`
+// like `Orpi Anma Gestion Immo Crosne`, which hold back unrelated creates.
 fn tag_words<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> HashSet<String> {
     let mut words = HashSet::new();
     for (k, v) in tags {

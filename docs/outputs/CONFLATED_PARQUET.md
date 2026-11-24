@@ -340,7 +340,8 @@ It combines three signals:
   whose brand has no Wikipedia article, is ranked on the other two
   signals alone rather than pushed down.
 - **Kind of place**: a coarse, hand-made score by category, so that a
-  defibrillator, pharmacy or hospital ranks above a bench or a tree.
+  defibrillator, pharmacy or hospital ranks above a bench or a tree, and
+  a shop above an insurance, estate or tax agency.
 
 The exact weights and categories are an implementation detail that
 may change; see

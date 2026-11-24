@@ -18,8 +18,8 @@
 //!   when a spider puts every store at the center of its town;
 //! - OSM has no deletion candidate of the same brand within 200 m,
 //!   since that is likely the same place, moved or renamed;
-//! - the kind is one that OSM maps as a feature of its own
-//!   ([excluded_kind]).
+//! - the kind is one that OSM maps as a feature of its own, and an
+//!   office has a street address ([excluded_kind]).
 //!
 //! Features of one place merge into one create: within 30 m, of
 //! agreeing kinds, and sharing a phone number, an email address or a
@@ -235,6 +235,17 @@ pub(crate) fn excluded_kind(tags: &[(String, String)]) -> Option<&'static str> {
     }
     if get(tags, "disused:shop").is_some() || get(tags, "disused:amenity").is_some() {
         return Some("disused");
+    }
+    // An office without a street address is often an advisor who
+    // visits customers at home, such as the 4,389 "AXA Épargne et
+    // Protection" advisors of `axa_fr`, which the spider places at the
+    // town center; see docs/notes/2026-11-24-offices.md.
+    if get(tags, "office").is_some()
+        && ["addr:street_address", "addr:street", "addr:full"]
+            .iter()
+            .all(|key| get(tags, key).is_none())
+    {
+        return Some("office_without_address");
     }
     None
 }
@@ -1600,6 +1611,23 @@ mod tests {
         let (edits, stats) = run(vec![atm, stop, dott], &DeletionCandidates::default());
         assert!(edits.is_empty());
         assert_eq!(stats.skipped(Skip::Kind), 3);
+    }
+
+    #[test]
+    fn skips_offices_without_address() {
+        let advisor = [("office", "insurance"), ("brand", "AXA")];
+        assert_eq!(
+            excluded_kind(&tags(&advisor)),
+            Some("office_without_address")
+        );
+        let agency = [
+            ("office", "insurance"),
+            ("brand", "AXA"),
+            ("addr:street_address", "9 Avenue Victor Hugo"),
+        ];
+        assert_eq!(excluded_kind(&tags(&agency)), None);
+        // Shops without an address may still become creates.
+        assert_eq!(excluded_kind(&tags(&[("shop", "bakery")])), None);
     }
 
     #[test]
