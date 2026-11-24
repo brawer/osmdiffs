@@ -122,6 +122,15 @@ brands                   LIST<STRUCT> non-null
   offset_east_m          FLOAT    nullable — like offset_east_m above, for this brand and country
   offset_north_m         FLOAT    nullable
   bbox                   STRUCT   nullable — like bbox above, for this brand and country
+creates                  STRUCT   nullable — new places for edits.parquet, see below
+  candidates             UINT64   non-null — features that could have become a new place
+  creates                UINT64   non-null — new places with a feature of the spider among their sources
+  merged                 UINT64   non-null — ... and with features of other spiders too
+  similar_name_30m       UINT64   non-null — candidates with a similarly named OSM feature within 30 m
+  own_names              BOOLEAN  non-null — whether new places are named after the brand instead
+  skipped                LIST<STRUCT> non-null — candidates left out, by reason
+    reason               UTF8     non-null — "similar_nearby", "spider_position", ...
+    rows                 UINT64   non-null
 ```
 
 ### What became of the features
@@ -430,6 +439,50 @@ sum is all deletion candidates of the brand; but the kind of feature
 is not compared, so a spider with restaurants of a brand also gets
 the brand's shops that are candidates by name.
 
+### New places
+
+`creates` says what the edits step did with the spider's candidates
+for new places in [`edits.parquet`](EDITS_PARQUET.md#new-places): its
+`missing_in_osm` rows, and its `located_in` rows of a kind that can
+be a place of its own. The edits step reads this file to decide which
+spiders may propose new places, so it runs later and adds the column
+to the copy that gets published. The column is null for a spider
+without candidates, and in files published before 2026-11-24.
+
+A new place merges the features of several spiders when they describe
+one place, and counts in `creates` of each of them; so `creates`
+can add up to more than the new places in `edits.parquet`.
+
+`skipped` gives the reason why a candidate didn't become a new place,
+the first one that applies:
+
+| reason | the candidate |
+|---|---|
+| `kind` | is of a kind that OpenStreetMap doesn't map on its own, such as an ATM or a post partner counter, or comes from a spider that we leave out |
+| `similar_nearby` | has a similar OpenStreetMap feature nearby |
+| `spider_position` | comes from a spider whose positions aren't good enough, see `brands.offset_*` |
+| `shared_position` | sits at exactly the same point as another feature of the spider, as when a spider puts every store at the center of its town |
+| `matched_site` | lies next to a matched feature of the spider of another kind, such as the shop of a fuel station |
+| `moved` | has a deletion candidate of its brand nearby, so the place most likely moved |
+| `twin` | has a feature of the same spider and kind within 10 m: the spider lists the place twice |
+| `host_far` | is a tenant too far from its host |
+| `coarse_position` | has coordinates rounded to about 100 m or worse |
+| `incomplete` | has no main kind, or kinds that disagree |
+| `unnamed` | has no name, brand or operator |
+
+`similar_name_30m` counts the candidates with an OpenStreetMap feature
+within 30 m whose name shares a distinctive word, of any kind. Most of
+them are places that conflate failed to match, so a spider with many
+of them likely has kinds that differ from OpenStreetMap's. They count
+whether or not they became new places; most are skipped as
+`similar_nearby`.
+
+`own_names` is true for a spider whose names rarely agree with
+OpenStreetMap's (less than 10% of its matched features), such as
+internal labels like `kkiosk Faido EKZ MI`; its new places are named
+after the brand. If that changes from one week to the next, the spider
+most likely changed its names.
+
 ## Example
 
 With [DuckDB](https://duckdb.org/), the spiders with the most features
@@ -449,6 +502,18 @@ SELECT spider, not_for_osm, dataset_attributes['license'] AS license
 FROM 'spider-stats.parquet'
 WHERE not_for_osm > 0
 ORDER BY not_for_osm DESC;
+```
+
+The spiders with the most new places, and why the others were left
+out:
+
+```sql
+SELECT spider, creates.candidates, creates.creates,
+       creates.similar_name_30m, creates.skipped
+FROM 'spider-stats.parquet'
+WHERE creates IS NOT NULL
+ORDER BY creates.creates DESC
+LIMIT 20;
 ```
 
 And the brands of one spider:

@@ -19,7 +19,7 @@
 
 mod agreement;
 mod contact;
-mod create;
+pub(crate) mod create;
 mod opening_hours;
 mod post_partner;
 mod read;
@@ -335,10 +335,11 @@ pub fn make_edits(
     workdir: &Path,
 ) -> Result<PathBuf> {
     let out = workdir.join("edits.parquet");
+    let sidecar = super::spider_creates::sidecar_path(workdir);
     let extra = inputs(workdir);
     let mut all_inputs: Vec<&Path> = vec![conflated, spider_stats];
     all_inputs.extend(extra.iter().map(PathBuf::as_path));
-    if super::is_current(&[&out], &all_inputs)? {
+    if super::is_current(&[&out, &sidecar], &all_inputs)? {
         return Ok(out);
     }
     let start = Instant::now();
@@ -397,13 +398,10 @@ pub fn make_edits(
             matched_sites: &matched_sites,
         },
     );
-    for (skip, n) in early_skips {
-        create_stats.candidates += n;
-        *create_stats.skipped.entry(skip).or_default() += n;
-    }
-    let skipped = |skip: create::Skip| create_stats.skipped.get(&skip).copied().unwrap_or(0);
+    create_stats.add(&early_skips);
+    let skipped = |skip: create::Skip| create_stats.skipped(skip);
     log::info!(
-        candidates = create_stats.candidates,
+        candidates = create_stats.candidates(),
         creates = creates.len(),
         merged = create_stats.merged,
         deletion_candidates = deletion_candidates.len(),
@@ -411,13 +409,17 @@ pub fn make_edits(
         skipped_similar_nearby = skipped(create::Skip::Similar),
         skipped_spider_position = skipped(create::Skip::SpiderPosition),
         skipped_shared_position = skipped(create::Skip::SharedPosition),
+        skipped_twin = skipped(create::Skip::Twin),
         skipped_moved = skipped(create::Skip::Moved),
         skipped_matched_site = skipped(create::Skip::MatchedSite),
         skipped_host_far = skipped(create::Skip::HostFar),
         skipped_coarse_position = skipped(create::Skip::CoarsePosition),
-        skipped_incomplete = skipped(create::Skip::Incomplete);
+        skipped_incomplete = skipped(create::Skip::Incomplete),
+        skipped_unnamed = skipped(create::Skip::Unnamed);
         "make_edits: creates"
     );
+    super::spider_creates::write_sidecar(&create_stats, &sidecar)
+        .context("could not write per-spider create counts")?;
 
     let bar = make_progress_bar(progress, "edits.write", 0, "rows");
     let mut edits = read::complete_edits(conflated, elements, decisions, &bar)?;

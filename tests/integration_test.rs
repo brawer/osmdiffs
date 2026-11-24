@@ -234,7 +234,8 @@ fn assert_publish_artifacts(workdir: &Path) -> Result<()> {
     let local_name = |name: &str| match name {
         "conflated" => "conflated.parquet",
         "conflated-tiles" => "conflated.pmtiles",
-        "spider-stats" => "spider-stats.parquet",
+        // The edits step adds its counts to the published copy.
+        "spider-stats" => "spider-stats.published.parquet",
         "edits" => "edits.parquet",
         "bom" => "", // exists under its manifest path
         other => panic!("unexpected resource {other}"),

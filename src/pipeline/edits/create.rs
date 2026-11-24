@@ -110,7 +110,8 @@ pub(crate) struct HostFeature {
     pub geometry: Geometry<f64>,
 }
 
-/// Why a candidate didn't become a create; counted for the log.
+/// Why a candidate didn't become a create; counted for the log and
+/// for `spider-stats.parquet`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Skip {
     /// A kind that OSM doesn't map as a feature of its own, or that we
@@ -122,6 +123,9 @@ pub(crate) enum Skip {
     SpiderPosition,
     /// Another feature of the spider is at the same point.
     SharedPosition,
+    /// Another feature of the spider, of an agreeing kind, is within
+    /// [TWIN_RADIUS_M]; see [twins].
+    Twin,
     /// OSM has a deletion candidate of the same brand nearby.
     Moved,
     /// The spider lists a place of another kind right here that
@@ -133,8 +137,44 @@ pub(crate) enum Skip {
     /// The point has only three decimals, about 100 m, and no host
     /// says where the place is.
     CoarsePosition,
-    /// Merged sources disagree on the kind, or nothing names the place.
+    /// Merged sources disagree on the kind.
     Incomplete,
+    /// No `name`, `brand` or `operator` is left, as for a spider with
+    /// its own names and no brand.
+    Unnamed,
+}
+
+impl Skip {
+    pub(crate) const ALL: [Skip; 11] = [
+        Skip::Kind,
+        Skip::Similar,
+        Skip::SpiderPosition,
+        Skip::SharedPosition,
+        Skip::Twin,
+        Skip::Moved,
+        Skip::MatchedSite,
+        Skip::HostFar,
+        Skip::CoarsePosition,
+        Skip::Incomplete,
+        Skip::Unnamed,
+    ];
+
+    /// The name in the log and in `spider-stats.parquet`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Skip::Kind => "kind",
+            Skip::Similar => "similar_nearby",
+            Skip::SpiderPosition => "spider_position",
+            Skip::SharedPosition => "shared_position",
+            Skip::Twin => "twin",
+            Skip::Moved => "moved",
+            Skip::MatchedSite => "matched_site",
+            Skip::HostFar => "host_far",
+            Skip::CoarsePosition => "coarse_position",
+            Skip::Incomplete => "incomplete",
+            Skip::Unnamed => "unnamed",
+        }
+    }
 }
 
 fn get<'a>(tags: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -597,12 +637,102 @@ pub(crate) struct CreateContext<'a> {
     pub matched_sites: &'a MatchedSites,
 }
 
-/// Counts of the candidates, for the log and the evaluation.
+/// What happened to one spider's candidates.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SpiderCreates {
+    /// Features that could have become creates: `missing_in_osm` and
+    /// tenants with a category.
+    pub candidates: u64,
+    /// Creates that have a feature of the spider among their sources.
+    pub creates: u64,
+    /// Of [Self::creates], those with sources of other spiders too.
+    pub merged: u64,
+    /// Candidates left out, by reason.
+    pub skipped: BTreeMap<Skip, u64>,
+    /// Candidates with an OSM feature within 30 m whose name shares a
+    /// distinctive word, most likely a match that conflate missed.
+    pub similar_name_30m: u64,
+    /// Whether the spider's names were replaced by its brand; see
+    /// [SpiderGate::has_own_names].
+    pub own_names: bool,
+}
+
+impl SpiderCreates {
+    fn add(&mut self, other: &SpiderCreates) {
+        self.candidates += other.candidates;
+        self.creates += other.creates;
+        self.merged += other.merged;
+        for (skip, n) in &other.skipped {
+            *self.skipped.entry(*skip).or_default() += n;
+        }
+        self.similar_name_30m += other.similar_name_30m;
+        self.own_names |= other.own_names;
+    }
+}
+
+/// How close a feature that shares a word of its name must be to
+/// count in [SpiderCreates::similar_name_30m], in meters.
+pub(crate) const SIMILAR_NAME_NEAR_M: f32 = 30.0;
+
+/// Counts of the candidates, by spider, for the log and for
+/// `spider-stats.parquet`.
 #[derive(Debug, Default)]
 pub(crate) struct CreateStats {
-    pub candidates: usize,
-    pub skipped: BTreeMap<Skip, usize>,
-    pub merged: usize,
+    pub spiders: BTreeMap<String, SpiderCreates>,
+    /// Sources that merged into the create of another source.
+    pub merged: u64,
+}
+
+impl CreateStats {
+    fn spider(&mut self, spider: &str) -> &mut SpiderCreates {
+        if !self.spiders.contains_key(spider) {
+            self.spiders
+                .insert(spider.to_string(), SpiderCreates::default());
+        }
+        self.spiders.get_mut(spider).expect("just inserted")
+    }
+
+    /// Counts `candidate`, before any rule judged it.
+    pub(crate) fn count_candidate(&mut self, candidate: &Candidate) {
+        let s = self.spider(&candidate.source.spider);
+        s.candidates += 1;
+        if candidate
+            .similar_name_m
+            .is_some_and(|d| d <= SIMILAR_NAME_NEAR_M)
+        {
+            s.similar_name_30m += 1;
+        }
+    }
+
+    pub(crate) fn count_skip(&mut self, spider: &str, skip: Skip) {
+        *self.spider(spider).skipped.entry(skip).or_default() += 1;
+    }
+
+    /// Adds the counts of `other`.
+    pub(crate) fn add(&mut self, other: &CreateStats) {
+        for (spider, counts) in &other.spiders {
+            self.spider(spider).add(counts);
+        }
+        self.merged += other.merged;
+    }
+
+    /// Marks the spiders with their own names, among those counted.
+    fn mark_own_names(&mut self, gate: &SpiderGate) {
+        for (spider, s) in self.spiders.iter_mut() {
+            s.own_names = gate.has_own_names(spider);
+        }
+    }
+
+    pub(crate) fn candidates(&self) -> u64 {
+        self.spiders.values().map(|s| s.candidates).sum()
+    }
+
+    pub(crate) fn skipped(&self, skip: Skip) -> u64 {
+        self.spiders
+            .values()
+            .filter_map(|s| s.skipped.get(&skip))
+            .sum()
+    }
 }
 
 /// Why `candidate` can never become a create, judged by itself alone:
@@ -1075,37 +1205,52 @@ pub(crate) fn make_creates(
     candidates: Vec<Candidate>,
     ctx: &CreateContext,
 ) -> (Vec<Edit>, CreateStats) {
-    let mut stats = CreateStats {
-        candidates: candidates.len(),
-        ..CreateStats::default()
-    };
+    let mut stats = CreateStats::default();
     let mut kept: Vec<Candidate> = Vec::new();
     for candidate in candidates {
+        stats.count_candidate(&candidate);
         match skip_reason(&candidate, ctx) {
-            Some(skip) => *stats.skipped.entry(skip).or_default() += 1,
+            Some(skip) => stats.count_skip(&candidate.source.spider, skip),
             None => kept.push(candidate),
         }
     }
     let twins = twins(&kept);
-    *stats.skipped.entry(Skip::SharedPosition).or_default() += twins.len();
     let mut kept: Vec<Candidate> = kept
         .into_iter()
         .enumerate()
-        .filter(|(i, _)| !twins.contains(i))
-        .map(|(_, c)| c)
+        .filter_map(|(i, c)| {
+            if twins.contains(&i) {
+                stats.count_skip(&c.source.spider, Skip::Twin);
+                None
+            } else {
+                Some(c)
+            }
+        })
         .collect();
     kept.sort_by(|a, b| a.source.order_key().cmp(&b.source.order_key()));
     let mut edits = Vec::new();
     for group in merge_groups(&kept, ctx.nondescript) {
         let members: Vec<&Candidate> = group.iter().map(|&i| &kept[i]).collect();
-        if members.len() > 1 {
-            stats.merged += members.len() - 1;
-        }
         match create(&members, ctx) {
-            Ok(edit) => edits.push(edit),
-            Err(skip) => *stats.skipped.entry(skip).or_default() += members.len(),
+            Ok(edit) => {
+                for m in &members {
+                    let s = stats.spider(&m.source.spider);
+                    s.creates += 1;
+                    if members.len() > 1 {
+                        s.merged += 1;
+                    }
+                }
+                stats.merged += members.len() as u64 - 1;
+                edits.push(edit);
+            }
+            Err(skip) => {
+                for m in &members {
+                    stats.count_skip(&m.source.spider, skip);
+                }
+            }
         }
     }
+    stats.mark_own_names(ctx.spiders);
     (edits, stats)
 }
 
@@ -1181,7 +1326,7 @@ fn create(members: &[&Candidate], ctx: &CreateContext) -> std::result::Result<Ed
         .iter()
         .all(|k| get(&tags, k).is_none())
     {
-        return Err(Skip::Incomplete);
+        return Err(Skip::Unnamed);
     }
     let mut warnings = Vec::new();
     let empty = Tags::new();
@@ -1380,7 +1525,7 @@ mod tests {
             ],
         );
         let (edits, stats) = run(vec![c], &DeletionCandidates::default());
-        assert_eq!(stats.candidates, 1);
+        assert_eq!(stats.candidates(), 1);
         let [edit] = edits.as_slice() else {
             panic!("one create, got {edits:?}");
         };
@@ -1430,7 +1575,7 @@ mod tests {
         let (edits, stats) = run(candidates, &DeletionCandidates::default());
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].sources[0].spider, "b");
-        assert_eq!(stats.skipped[&Skip::Similar], 3);
+        assert_eq!(stats.skipped(Skip::Similar), 3);
     }
 
     #[test]
@@ -1454,7 +1599,7 @@ mod tests {
         );
         let (edits, stats) = run(vec![atm, stop, dott], &DeletionCandidates::default());
         assert!(edits.is_empty());
-        assert_eq!(stats.skipped[&Skip::Kind], 3);
+        assert_eq!(stats.skipped(Skip::Kind), 3);
     }
 
     #[test]
@@ -1475,7 +1620,7 @@ mod tests {
             },
         );
         assert!(edits.is_empty());
-        assert_eq!(stats.skipped[&Skip::SpiderPosition], 1);
+        assert_eq!(stats.skipped(Skip::SpiderPosition), 1);
     }
 
     #[test]
@@ -1484,7 +1629,7 @@ mod tests {
         let b = candidate("bakery", "2", ZURICH, &[("shop", "bakery"), ("name", "B")]);
         let (edits, stats) = run(vec![a, b], &DeletionCandidates::default());
         assert!(edits.is_empty());
-        assert_eq!(stats.skipped[&Skip::SharedPosition], 2);
+        assert_eq!(stats.skipped(Skip::SharedPosition), 2);
     }
 
     #[test]
@@ -1527,7 +1672,7 @@ mod tests {
         );
         let (edits, stats) = run(vec![c], &DeletionCandidates::default());
         assert!(edits.is_empty());
-        assert_eq!(stats.skipped[&Skip::CoarsePosition], 1);
+        assert_eq!(stats.skipped(Skip::CoarsePosition), 1);
         assert!(is_coarse((100.938, 13.228)));
         assert!(!is_coarse((100.9381, 13.228)));
     }
@@ -1544,7 +1689,7 @@ mod tests {
         deletions.add("Q432564", east(ZURICH, 150.0));
         let (edits, stats) = run(vec![c.clone()], &deletions);
         assert!(edits.is_empty());
-        assert_eq!(stats.skipped[&Skip::Moved], 1);
+        assert_eq!(stats.skipped(Skip::Moved), 1);
 
         let mut other = DeletionCandidates::default();
         other.add("Q432564", east(ZURICH, 300.0));
@@ -1850,7 +1995,7 @@ mod tests {
         let c = candidate("bp", "3", east(ZURICH, 500.0), &t);
         let (edits, stats) = run(vec![a, b, c], &DeletionCandidates::default());
         assert_eq!(edits.len(), 1);
-        assert_eq!(stats.skipped[&Skip::SharedPosition], 2);
+        assert_eq!(stats.skipped(Skip::Twin), 2);
     }
 
     #[test]

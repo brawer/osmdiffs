@@ -476,6 +476,9 @@ wiring up a cron. The first run against the real public bucket + CDN
 
 ## What to watch
 
+For the checks after each weekly run, including the spiders whose
+data likely has a bug, see [`WEEKLY_REVIEW.md`](WEEKLY_REVIEW.md).
+
 Everything below comes straight out of `pipeline.log` (see
 [`LOGGING.md`](LOGGING.md)) — no separate monitoring system needed to
 get started:

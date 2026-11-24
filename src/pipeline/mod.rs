@@ -50,6 +50,7 @@ mod previous_release;
 mod provenance;
 mod qrank;
 mod spider_churn;
+mod spider_creates;
 mod spider_stats;
 
 // Only these re-exported at the pipeline level (rather than making all
@@ -387,10 +388,6 @@ fn run_pipeline_steps(
         spider_churn::summarize(&spider_stats, previous_spider_stats, workdir);
         Ok(())
     })?;
-    published.push(run_step("upload_spider_stats", || {
-        upload::upload_spider_stats(&spider_stats, &date, progress)
-    })?);
-
     // Proposed edits, leaving out spiders that look broken this week.
     let edits = run_step("make_edits", || {
         let unhealthy =
@@ -416,6 +413,24 @@ fn run_pipeline_steps(
     published.push(run_step("upload_edits", || {
         upload::upload_edits(&edits, &date, progress)
     })?);
+
+    // Published after the edits step, which adds its per-spider counts
+    // of new places to the file it read.
+    let published_spider_stats = run_step("add_spider_creates", || {
+        spider_creates::publishable(
+            &spider_stats,
+            &spider_creates::sidecar_path(workdir),
+            workdir,
+        )
+    })?;
+    published.push(run_step("upload_spider_stats", || {
+        upload::upload_spider_stats(&published_spider_stats, &date, progress)
+    })?);
+    // Brand IDs in the wrong country, twins, and jumps since last week.
+    run_step("review_spider_creates", || {
+        spider_creates::review(&published_spider_stats, previous_spider_stats, workdir);
+        Ok(())
+    })?;
 
     // Standalone provenance BOM for conflated.parquet (paired to it by
     // content hash), then the manifest -- both after every dated file is
