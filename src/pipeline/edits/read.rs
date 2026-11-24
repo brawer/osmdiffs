@@ -1,6 +1,9 @@
 //! The two passes over `conflated.parquet`; see the module doc of
 //! [super].
 
+use super::create::{
+    self, Candidate, DeletionCandidates, HostFeature, MatchedSites, Positions, Skip,
+};
 use super::post_partner::{PostPartnerEditSuggester, has_partner_edits};
 use super::writer::{Edit, OsmSide, RelationMember};
 use super::{Decision, Element, Source, Tags};
@@ -17,7 +20,7 @@ use geo_traits::to_geo::ToGeoGeometry;
 use indicatif::ProgressBar;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rayon::prelude::*;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::Path;
 
@@ -68,7 +71,7 @@ fn centroid(wkb: &[u8]) -> Option<(f64, f64)> {
     geometry.centroid().map(|p| (p.x(), p.y()))
 }
 
-fn s2_cell_id((lng, lat): (f64, f64)) -> u64 {
+pub(super) fn s2_cell_id((lng, lat): (f64, f64)) -> u64 {
     s2::cellid::CellID::from(s2::latlng::LatLng::from_degrees(lat, lng)).0
 }
 
@@ -79,11 +82,85 @@ fn batches(path: &Path) -> Result<impl Iterator<Item = Result<RecordBatch>>> {
 }
 
 /// One row as the first pass needs it.
-struct FirstPassRow {
+enum FirstPassRow {
+    /// A source for a modify of an OSM feature.
+    Modify(Box<ModifyRow>),
+    /// An ATP feature without an OSM feature of its own.
+    Create(Box<Candidate>),
+    /// A deletion candidate with a `brand:wikidata`, at a position.
+    Deletion(String, (f64, f64)),
+}
+
+/// A row that matched an OSM feature, as the first pass needs it.
+struct ModifyRow {
     key: (String, u64),
     osm_tags: Tags,
     position: Option<(f64, f64)>,
     source: Source,
+}
+
+/// What the first pass finds.
+#[derive(Default)]
+pub(super) struct FirstPass {
+    /// The OSM features that AllThePlaces matched, with the rows that
+    /// matched them.
+    pub elements: HashMap<(String, u64), Element>,
+    /// The ATP features that may become creates.
+    pub candidates: Vec<Candidate>,
+    pub deletion_candidates: DeletionCandidates,
+    pub positions: Positions,
+    pub matched_sites: MatchedSites,
+    /// Candidates left out in the first pass; see [create::early_skip].
+    pub early_skips: BTreeMap<Skip, usize>,
+}
+
+/// From `match.evidence.similar_osm`, the distance to the nearest OSM
+/// feature like the ATP one by category, and the distance to the
+/// nearest one by name.
+fn similar_m(evidence: &StructArray, row: usize) -> Result<(Option<f32>, Option<f32>)> {
+    let list = evidence
+        .column_by_name("similar_osm")
+        .context("missing match.evidence.similar_osm")?
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .context("match.evidence.similar_osm is not a list")?;
+    if list.is_null(row) {
+        return Ok((None, None));
+    }
+    let values = list.value(row);
+    let entries = values
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .context("match.evidence.similar_osm items are not structs")?;
+    let mut found = (None, None);
+    for i in 0..entries.len() {
+        let d = get_f32(entries, "distance_m", i)?;
+        let slot = match get_string(entries, "by", i)?.as_str() {
+            "category" => &mut found.0,
+            "name" => &mut found.1,
+            _ => continue,
+        };
+        if slot.is_none_or(|b: f32| d < b) {
+            *slot = Some(d);
+        }
+    }
+    Ok(found)
+}
+
+/// The deletion candidate in `row`, if it has a `brand:wikidata`.
+fn deletion_row(
+    batch: &RecordBatch,
+    osm: &StructArray,
+    row: usize,
+) -> Result<Option<FirstPassRow>> {
+    let tags = get_tags(osm, "tags", row)?;
+    let Some(brand) = get_tag(&tags, "brand:wikidata") else {
+        return Ok(None);
+    };
+    let Some(position) = centroid(&get_binary(batch, "osm_geometry", row)?) else {
+        return Ok(None);
+    };
+    Ok(Some(FirstPassRow::Deletion(brand.to_string(), position)))
 }
 
 fn first_pass_row(
@@ -93,12 +170,15 @@ fn first_pass_row(
 ) -> Result<Option<FirstPassRow>> {
     let atp = get_struct(batch, "atp")?;
     let osm = get_struct(batch, "osm")?;
-    if atp.is_null(row) || osm.is_null(row) {
-        return Ok(None);
-    }
     let matching = get_struct(batch, "match")?;
     let relation = get_string(matching, "relation", row)?;
-    if relation != "same" && relation != "located_in" {
+    if atp.is_null(row) {
+        if relation == "deletion_candidate" && osm.is_valid(row) {
+            return deletion_row(batch, osm, row);
+        }
+        return Ok(None);
+    }
+    if relation != "same" && relation != "located_in" && relation != "missing_in_osm" {
         return Ok(None);
     }
     let fetched = get_struct(atp, "fetched")?;
@@ -116,9 +196,12 @@ fn first_pass_row(
         return Ok(None);
     }
     let partner = has_partner_edits(&atp_tags, &relation);
-    if relation == "located_in" && !partner {
-        // A tenant inside its host becomes a create, not an edit of
-        // the host; that comes in a later milestone.
+    if relation == "missing_in_osm" || (relation == "located_in" && !partner) {
+        // A tenant inside its host becomes a create, never an edit of
+        // the host.
+        return create_row(batch, row, spider, relation, rule, atp_tags);
+    }
+    if osm.is_null(row) {
         return Ok(None);
     }
     let osm_tags = get_tags(osm, "tags", row)?;
@@ -131,16 +214,9 @@ fn first_pass_row(
         .or_else(|| get_tag(&atp_tags, "contact:website"))
         .map(str::to_string)
         .or(get_optional_string(fetched, "source_uri", row)?);
-    let fetched_millis = fetched
-        .column_by_name("timestamp")
-        .context("missing atp.fetched.timestamp")?
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .context("atp.fetched.timestamp is not a millisecond timestamp")?
-        .value(row);
     let source = Source {
         spider,
-        fetched_millis,
+        fetched_millis: fetched_millis(fetched, row)?,
         atp_ref: get_tag(&atp_tags, "ref").map(str::to_string),
         source_url,
         relation,
@@ -152,22 +228,100 @@ fn first_pass_row(
         tags: rule_tags(&atp_tags),
         partner_tags,
     };
-    Ok(Some(FirstPassRow {
+    Ok(Some(FirstPassRow::Modify(Box::new(ModifyRow {
         key: (get_string(osm, "type", row)?, get_u64(osm, "id", row)?),
         osm_tags: rule_tags(&osm_tags),
         position: centroid(&get_binary(batch, "osm_geometry", row)?),
         source,
-    }))
+    }))))
+}
+
+/// `atp.fetched.timestamp` of `row`, in Unix milliseconds.
+fn fetched_millis(fetched: &StructArray, row: usize) -> Result<i64> {
+    Ok(fetched
+        .column_by_name("timestamp")
+        .context("missing atp.fetched.timestamp")?
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .context("atp.fetched.timestamp is not a millisecond timestamp")?
+        .value(row))
+}
+
+/// The create candidate of a `missing_in_osm` row, or of a tenant's
+/// `located_in` row, with its host.
+fn create_row(
+    batch: &RecordBatch,
+    row: usize,
+    spider: String,
+    relation: String,
+    rule: Option<String>,
+    atp_tags: Tags,
+) -> Result<Option<FirstPassRow>> {
+    let Some(category) = super::create::create_category(&atp_tags) else {
+        return Ok(None);
+    };
+    let Some(point) = centroid(&get_binary(batch, "atp_geometry", row)?) else {
+        return Ok(None);
+    };
+    let atp = get_struct(batch, "atp")?;
+    let fetched = get_struct(atp, "fetched")?;
+    let matching = get_struct(batch, "match")?;
+    let evidence = get_struct(matching, "evidence")?;
+    let osm = get_struct(batch, "osm")?;
+    let host = if relation == "located_in" && osm.is_valid(row) {
+        let osm_tags = get_tags(osm, "tags", row)?;
+        let wkb = get_binary(batch, "osm_geometry", row)?;
+        let Ok(geometry) = wkb::reader::read_wkb(&wkb).map(|g| g.to_geometry()) else {
+            return Ok(None);
+        };
+        Some(HostFeature {
+            osm_type: get_string(osm, "type", row)?,
+            osm_id: get_u64(osm, "id", row)?,
+            name: get_tag(&osm_tags, "name").map(str::to_string),
+            opening_hours: get_tag(&osm_tags, "opening_hours").map(str::to_string),
+            geometry,
+        })
+    } else {
+        None
+    };
+    let source_url = get_tag(&atp_tags, "website")
+        .or_else(|| get_tag(&atp_tags, "contact:website"))
+        .map(str::to_string)
+        .or(get_optional_string(fetched, "source_uri", row)?);
+    let source = Source {
+        spider,
+        fetched_millis: fetched_millis(fetched, row)?,
+        atp_ref: get_tag(&atp_tags, "ref").map(str::to_string),
+        source_url,
+        relation,
+        rule,
+        score: None,
+        distance_m: get_optional_f32(evidence, "distance_m", row)?,
+        importance: get_f32(batch, "importance", row)?,
+        atp_point: Some(point),
+        tags: atp_tags,
+        partner_tags: None,
+    };
+    let (similar_m, similar_name_m) = similar_m(evidence, row)?;
+    Ok(Some(FirstPassRow::Create(Box::new(Candidate {
+        source,
+        category,
+        point,
+        similar_m,
+        similar_name_m,
+        host,
+    }))))
 }
 
 /// First pass: the OSM features that AllThePlaces matched, with the
-/// rows that matched them, leaving out the rows of `unhealthy` spiders.
-pub(super) fn collect_elements(
+/// rows that matched them, and the ATP features that may become
+/// creates, leaving out the rows of `unhealthy` spiders.
+pub(super) fn first_pass(
     conflated: &Path,
     unhealthy: &BTreeSet<String>,
     bar: &ProgressBar,
-) -> Result<HashMap<(String, u64), Element>> {
-    let mut elements: HashMap<(String, u64), Element> = HashMap::new();
+) -> Result<FirstPass> {
+    let mut pass = FirstPass::default();
     for batch in batches(conflated)? {
         let batch = batch?;
         bar.inc_length(batch.num_rows() as u64);
@@ -176,16 +330,48 @@ pub(super) fn collect_elements(
             .map(|row| first_pass_row(&batch, row, unhealthy))
             .collect::<Result<_>>()?;
         for row in rows.into_iter().flatten() {
-            let element = elements.entry(row.key).or_insert_with(|| Element {
-                tags: row.osm_tags,
-                position: row.position,
-                sources: Vec::new(),
-            });
-            element.sources.push(row.source);
+            match row {
+                FirstPassRow::Modify(m) => {
+                    let ModifyRow {
+                        key,
+                        osm_tags,
+                        position,
+                        source,
+                    } = *m;
+                    if source.relation == "same"
+                        && let Some(point) = source.atp_point
+                        && let Some(category) = super::create::create_category(&source.tags)
+                    {
+                        pass.matched_sites.add(&source.spider, category, point);
+                    }
+                    let element = pass.elements.entry(key).or_insert_with(|| Element {
+                        tags: osm_tags,
+                        position,
+                        sources: Vec::new(),
+                    });
+                    element.sources.push(source);
+                }
+                FirstPassRow::Create(candidate) => {
+                    pass.positions.add(
+                        &candidate.source.spider,
+                        candidate.point,
+                        candidate.source.atp_ref.as_deref(),
+                    );
+                    // Kinds we never create, and places that OSM
+                    // likely has, are only counted, to save memory.
+                    match create::early_skip(&candidate) {
+                        Some(skip) => *pass.early_skips.entry(skip).or_default() += 1,
+                        None => pass.candidates.push(*candidate),
+                    }
+                }
+                FirstPassRow::Deletion(brand, position) => {
+                    pass.deletion_candidates.add(&brand, position);
+                }
+            }
         }
         bar.inc(batch.num_rows() as u64);
     }
-    Ok(elements)
+    Ok(pass)
 }
 
 fn way_members(osm: &StructArray, row: usize) -> Result<Option<Vec<u64>>> {
@@ -310,7 +496,7 @@ pub(super) fn complete_edits(
                 id: super::modify_id(&osm_side.osm_type, osm_side.osm_id, &decision.changes),
                 action: "modify",
                 topics: decision.topics,
-                osm: osm_side,
+                osm: Some(osm_side),
                 changes: decision.changes,
                 atp_geometry_wkb: atp_geometry(&element.sources),
                 importance: element
@@ -320,6 +506,7 @@ pub(super) fn complete_edits(
                     .fold(0.0, f32::max),
                 sources: element.sources,
                 geometry_wkb,
+                host: None,
                 warnings: decision.warnings,
                 s2_cell_id: position.map(s2_cell_id).unwrap_or(0),
             });

@@ -19,8 +19,9 @@ human review, or for imports that follow the
 [OSM Import Guidelines](https://wiki.openstreetmap.org/wiki/Import/Guidelines),
 never for unreviewed bulk uploads.
 
-Today the file holds only tag changes on existing elements, of four
-topics:
+Today the file holds tag changes on existing elements, and new
+elements for places that OpenStreetMap lacks. The tag changes are of
+four topics:
 
 - `contact`: `phone`, `fax`, `email` and `website`, and
   `heritage:website` for the page of an official register, such as
@@ -33,7 +34,13 @@ topics:
 - `post_partner`: the service tags of a shop that has a postal
   counter, such as `post_office=post_partner` and `post_office:brand`.
 
-Creates of missing places and deletes of closed ones will follow.
+A new element has the topic `new_poi`; see
+[New places](#new-places). It covers places that people visit, such
+as shops, restaurants, banks, fuel stations or hotels. Infrastructure
+such as post boxes, charging stations or transit stops gets no creates
+today; once it does, it will have a topic of its own, since mappers
+check it differently and its imports follow other rules. Deletes of
+closed places may follow.
 
 Like [`conflated.parquet`](CONFLATED_PARQUET.md), this is a
 [GeoParquet 2.0-rc.1](https://github.com/opengeospatial/geoparquet/blob/v2.0.0-rc.1/format-specs/geoparquet.md)
@@ -47,8 +54,8 @@ above, for tools that never read this page.
 
 ```text
 id            UTF8                 non-null, stable across weeks (see below)
-action        UTF8                 non-null: "modify" (later also "create", "delete")
-topics        LIST<UTF8>           non-null: "contact", "wikidata", "opening_hours", "post_partner"
+action        UTF8                 non-null: "modify" | "create"
+topics        LIST<UTF8>           non-null: "contact", "wikidata", "opening_hours", "post_partner", "new_poi"
 
 osm           STRUCT               nullable; null only for creates, which don't exist yet
   type        UTF8                 non-null: "node" | "way" | "relation"
@@ -80,10 +87,12 @@ sources       LIST<STRUCT>         non-null, at least one
   score       FLOAT                nullable
   distance_m  FLOAT                nullable
 
-geometry      BINARY (WKB)         non-null, the OSM shape
+geometry      BINARY (WKB)         non-null, the OSM shape; for a create, the new node's point
 atp_geometry  BINARY (WKB)         nullable, the AllThePlaces point(s), for display
-host          STRUCT               nullable, always null for now
-  type, id, name                   the OSM element a new place sits in
+host          STRUCT               nullable, only for creates of a place inside another
+  type        UTF8                 non-null: "node" | "way" | "relation"
+  id          UINT64               non-null
+  name        UTF8                 nullable, the host's name in OSM
 warnings      LIST<UTF8>           non-null, may be empty, see below
 importance    FLOAT                non-null, 0.0 to 1.0, the highest of the sources
 ```
@@ -102,7 +111,10 @@ sometimes an API rather than a page for people.
 `id` stays the same from week to week as long as the edit touches the
 same keys of the same element, so a MapRoulette challenge rebuilt every
 week keeps the status of its tasks. For a modify, it is made from the
-element's type and ID and the sorted keys in `changes`.
+element's type and ID and the sorted keys in `changes`. For a create,
+it is made from the sorted spiders and refs of its `sources` (or the
+spider and position, rounded to five decimals, for a feature without
+a ref), so it stays the same while the place stays missing.
 
 ## Reasons
 
@@ -226,14 +238,91 @@ networks gets `post_office:brand=DHL;DPD`.
 | `replaces_email` | The edit replaces an email address that isn't generic. Both may be right, such as a hotel's own address and its chain's; look before applying. |
 | `personal_email` | A new email address looks like a person's, such as `first.last@example.com`. The store published it, but look before it goes into OSM. Some store addresses get this warning too. |
 | `wikidata_unmatched` | Lining up the Wikidata IDs would drop one of OSM's IDs, so they aren't edited. |
+| `hours_outside_host` | A new place inside another is open at times when its host, per OSM's `opening_hours`, is closed. One of them may be wrong. |
 
 Warnings appear on an edit whose other changes still go out.
+
+## New places
+
+A create is a new node for an AllThePlaces feature that
+OpenStreetMap lacks: a `missing_in_osm` row in `conflated.parquet`, or
+a `located_in` row, a shop inside a mall or a café in a hotel. A
+missing place is weaker evidence than a matched one, since the matcher
+may have missed OpenStreetMap's feature or the spider's position may
+be off. So we propose one only when nothing speaks against it:
+
+- OpenStreetMap has no feature of an agreeing kind within 50 m, or
+  100 m for large sites such as fuel stations, supermarkets, hotels,
+  schools or parks, and none of any kind within 100 m whose name
+  shares a distinctive word, such as a hotel that OpenStreetMap maps
+  as its restaurant (`match.evidence.similar_osm`).
+- The spider's positions are good: it has at least 20 features that
+  matched, at least 80% of them lie within 50 m of their match, and
+  its positions aren't Google Maps camera centers.
+- No other feature of the spider sits at exactly the same point, as
+  when a spider puts every store at the center of its town, or within
+  10 m with an agreeing kind, as when it lists one place twice.
+- Within 30 m, the spider has no feature of another kind that
+  matched, such as the fuel station that a shop belongs to, since
+  OpenStreetMap often maps the shop as part of the station.
+- OpenStreetMap has no deletion candidate of the same brand within
+  200 m, since that is likely the same place, moved or renamed.
+- The position isn't rounded to three decimals, about 100 m, unless a
+  host gives a better one.
+- The kind is one that OpenStreetMap maps as a feature of its own.
+  We leave out ATMs, money transfer and post partner counters in
+  shops, street furniture (post boxes, parcel lockers, vending
+  machines, bike rental docks, recycling, benches, toilets, parking),
+  transit stops and stations, charging stations, the virtual scooter
+  zones of the `gbfs` spider, the `standard_chartered_bank` spider,
+  which gives every branch the brand of Standard Chartered Taiwan, the
+  book boxes of `little_free_library`, a registry that keeps boxes
+  long after they are gone, many in private front yards, and banks whose name says they have
+  machines only, such as a Sparkasse “SB-Center”.
+
+A create carries what the place is (`shop`, `amenity`, `tourism`,
+`leisure`, `healthcare`, `craft`, `office`, and `cuisine`,
+`religion`, `denomination`, `vending`), its names (`name`, `brand`,
+`operator`, `network`, `branch`, their `:wikidata` IDs, and names in
+other languages such as `name:th`), and the contact tags and
+`opening_hours` that a modify would write where OpenStreetMap has
+none, by the same rules. It must have a name, brand or operator. It
+leaves out everything else, in particular addresses, `ref` and
+brand-wide attributes such as `fuel:*` or `payment:*`, which spiders
+often give wrongly. In `changes`, `old` is always null and `reason` is
+`missing_in_osm`. A spider whose names rarely agree with
+OpenStreetMap's (less than 10% of at least 20 matched features with a
+name on both sides) gives its own labels, such as `kkiosk Faido EKZ
+MI`, so its creates are named after the brand instead, or not made if
+it has none. `shop=yes` beside another category, as on a fuel station
+with a shop, is left out, and so is a `branch` with ASCII digits or
+the brand in it, which is an address or a label of the spider, such
+as `Target Watertown 1442`.
+
+Features of several spiders for one place make one create, listed in
+`sources`: within 30 m, of agreeing kinds, and sharing a phone number,
+an email address or a brand, such as the Audi, Škoda and Volkswagen
+spiders listing one dealer, which becomes
+`brand=Audi;Volkswagen;Škoda`. Two features of one spider never merge,
+not even through a feature of another spider that is like both.
+Where the sources disagree on a tag, the tag is left out.
+
+For a place inside another, `host` names the OpenStreetMap element it
+sits in, and the new node goes inside the host's shape: at the
+AllThePlaces point if that is inside, else 2 m inside the edge,
+toward the host's middle. A point more than 100 m from its host
+yields no create. If the tenant's opening hours reach beyond the
+host's, the edit has the warning `hours_outside_host`.
 
 ## Turning a row into OSMChange or MapRoulette
 
 | Action | OSMChange | MapRoulette |
 | --- | --- | --- |
 | modify | `<modify>` of the whole element: `osm.modified.version`, `osm.tags` with `changes` applied, plus `lat`/`lon` from `geometry` (node), `<nd ref>` from `way_members` (way) or `<member>` from `relation_members` (relation) | tag-fix task: `setTags` for each `new`, `unsetTags` for each null `new` |
+| create | `<create>` of a `<node>` with a negative `id`, `lat`/`lon` from `geometry`, and a `<tag>` for each `new` | task at `geometry` with the tags to add; a reviewer looks at imagery or the `source_url` before adding the node |
+
+A create should be checked against the live map first, since the
+place may have been added since the planet file was made.
 
 A tool applying a modify should first check that the live element's
 version still equals `osm.modified.version`, or at least that each

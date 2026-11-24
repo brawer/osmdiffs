@@ -57,17 +57,28 @@ pub(crate) struct OsmSide {
     pub relation_members: Option<Vec<RelationMember>>,
 }
 
+/// The OSM feature that a create is in, for the `host` column.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Host {
+    pub osm_type: String,
+    pub osm_id: u64,
+    pub name: Option<String>,
+}
+
 /// One row of `edits.parquet`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Edit {
     pub id: String,
     pub action: &'static str,
     pub topics: Vec<&'static str>,
-    pub osm: OsmSide,
+    /// `None` for a create.
+    pub osm: Option<OsmSide>,
     pub changes: Vec<Change>,
     pub sources: Vec<Source>,
     pub geometry_wkb: Vec<u8>,
     pub atp_geometry_wkb: Option<Vec<u8>>,
+    /// For a create inside another place, that place.
+    pub host: Option<Host>,
     pub warnings: Vec<String>,
     pub importance: f32,
     /// Sort key only, not written.
@@ -251,19 +262,25 @@ fn string_list(field: &Field, rows: &[&[String]]) -> ArrayRef {
 
 fn osm_column(edits: &[Edit]) -> ArrayRef {
     let fields = osm_fields();
+    let empty = OsmSide::default();
+    let valid: Vec<bool> = edits.iter().map(|e| e.osm.is_some()).collect();
+    let sides: Vec<&OsmSide> = edits
+        .iter()
+        .map(|e| e.osm.as_ref().unwrap_or(&empty))
+        .collect();
     let mut tags = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
     let mut timestamps = TimestampMillisecondBuilder::new().with_timezone("UTC");
     let mut versions = UInt32Builder::new();
     let mut ids = UInt64Builder::new();
-    for edit in edits {
-        for (k, v) in &edit.osm.tags {
+    for osm in &sides {
+        for (k, v) in &osm.tags {
             tags.keys().append_value(k);
             tags.values().append_value(v);
         }
         tags.append(true).expect("map append");
-        timestamps.append_value(edit.osm.timestamp_millis);
-        versions.append_value(edit.osm.version);
-        ids.append_value(edit.osm.osm_id);
+        timestamps.append_value(osm.timestamp_millis);
+        versions.append_value(osm.version);
+        ids.append_value(osm.osm_id);
     }
     let tags = tags.finish();
     let map_field = fields[2].clone();
@@ -295,8 +312,8 @@ fn osm_column(edits: &[Edit]) -> ArrayRef {
     let mut member_roles = StringBuilder::new();
     let mut rel_lengths = Vec::new();
     let mut rel_valid = Vec::new();
-    for edit in edits {
-        match &edit.osm.way_members {
+    for osm in &sides {
+        match &osm.way_members {
             Some(m) => {
                 way_ids.append_slice(m);
                 way_lengths.push(m.len());
@@ -307,7 +324,7 @@ fn osm_column(edits: &[Edit]) -> ArrayRef {
                 way_valid.push(false);
             }
         }
-        match &edit.osm.relation_members {
+        match &osm.relation_members {
             Some(m) => {
                 for member in m {
                     member_types.append_value(&member.member_type);
@@ -350,14 +367,43 @@ fn osm_column(edits: &[Edit]) -> ArrayRef {
     Arc::new(StructArray::new(
         fields,
         vec![
-            strings(edits.iter().map(|e| Some(e.osm.osm_type.as_str()))),
+            strings(sides.iter().map(|o| Some(o.osm_type.as_str()))),
             Arc::new(ids.finish()),
             Arc::new(tags),
             Arc::new(modified),
             Arc::new(way_members),
             Arc::new(relation_members),
         ],
-        None,
+        Some(NullBuffer::from(valid)),
+    ))
+}
+
+fn host_column(edits: &[Edit]) -> ArrayRef {
+    let mut ids = UInt64Builder::new();
+    for e in edits {
+        ids.append_value(e.host.as_ref().map(|h| h.osm_id).unwrap_or(0));
+    }
+    Arc::new(StructArray::new(
+        host_fields(),
+        vec![
+            strings(
+                edits
+                    .iter()
+                    .map(|e| Some(e.host.as_ref().map(|h| h.osm_type.as_str()).unwrap_or(""))),
+            ),
+            Arc::new(ids.finish()),
+            strings(
+                edits
+                    .iter()
+                    .map(|e| e.host.as_ref().and_then(|h| h.name.as_deref())),
+            ),
+        ],
+        Some(NullBuffer::from(
+            edits
+                .iter()
+                .map(|e| e.host.is_some())
+                .collect::<Vec<bool>>(),
+        )),
     ))
 }
 
@@ -428,7 +474,6 @@ fn batch(schema: &SchemaRef, edits: &[Edit]) -> Result<RecordBatch> {
         .collect();
     let topic_refs: Vec<&[String]> = topics.iter().map(Vec::as_slice).collect();
     let warnings: Vec<&[String]> = edits.iter().map(|e| e.warnings.as_slice()).collect();
-    let host = StructArray::new_null(host_fields(), edits.len());
     let columns: Vec<ArrayRef> = vec![
         strings(edits.iter().map(|e| Some(e.id.as_str()))),
         strings(edits.iter().map(|e| Some(e.action))),
@@ -438,7 +483,7 @@ fn batch(schema: &SchemaRef, edits: &[Edit]) -> Result<RecordBatch> {
         sources_column(&field("sources"), edits),
         Arc::new(geometry.finish()),
         Arc::new(atp_geometry.finish()),
-        Arc::new(host),
+        host_column(edits),
         string_list(&field("warnings"), &warnings),
         Arc::new(importance.finish()),
     ];
@@ -509,6 +554,7 @@ pub(super) fn write(path: &Path, edits: &[Edit], provenance_bom: &str) -> Result
 mod tests {
     use super::super::Reason;
     use super::*;
+    use arrow::array::Array;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use tempfile::TempDir;
 
@@ -524,7 +570,7 @@ mod tests {
             id: "0123456789abcdef".into(),
             action: "modify",
             topics: vec!["contact"],
-            osm: OsmSide {
+            osm: Some(OsmSide {
                 osm_type: "way".into(),
                 osm_id: 7,
                 tags: vec![("shop".into(), "bakery".into())],
@@ -532,7 +578,7 @@ mod tests {
                 version: 3,
                 way_members: Some(vec![1, 2, 3, 1]),
                 relation_members: None,
-            },
+            }),
             changes: vec![Change::new(
                 "phone",
                 None,
@@ -546,13 +592,14 @@ mod tests {
             }],
             geometry_wkb: point(8.5, 47.4),
             atp_geometry_wkb: Some(point(8.5001, 47.4)),
+            host: None,
             warnings: vec![],
             importance: 0.5,
             s2_cell_id: 0,
         };
         let relation = Edit {
             id: "fedcba9876543210".into(),
-            osm: OsmSide {
+            osm: Some(OsmSide {
                 osm_type: "relation".into(),
                 osm_id: 9,
                 relation_members: Some(vec![RelationMember {
@@ -561,14 +608,27 @@ mod tests {
                     role: Some("outer".into()),
                 }]),
                 ..OsmSide::default()
-            },
+            }),
             atp_geometry_wkb: None,
             warnings: vec!["wikidata_unmatched".into()],
             ..edit.clone()
         };
-        let stats = write(&path, &[edit, relation], "{}")?;
-        assert_eq!(stats.changes, 2);
+        let create = Edit {
+            id: "00112233445566aa".into(),
+            action: "create",
+            topics: vec!["new_poi"],
+            osm: None,
+            host: Some(Host {
+                osm_type: "way".into(),
+                osm_id: 11,
+                name: Some("Target".into()),
+            }),
+            ..edit.clone()
+        };
+        let stats = write(&path, &[edit, relation, create], "{}")?;
+        assert_eq!(stats.changes, 3);
         assert_eq!(stats.topic("contact"), 2);
+        assert_eq!(stats.topic("new_poi"), 1);
 
         let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
         let metadata = builder
@@ -589,8 +649,14 @@ mod tests {
                 .contains("\"primary_column\":\"geometry\"")
         );
         let batches: Vec<RecordBatch> = builder.build()?.collect::<Result<_, _>>()?;
-        assert_eq!(batches[0].num_rows(), 2);
-        assert_eq!(batches[0].schema().fields().len(), 11);
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 3);
+        assert_eq!(batch.schema().fields().len(), 11);
+        let osm = crate::utils::parquet::get_struct(batch, "osm")?;
+        assert_eq!((osm.is_valid(0), osm.is_valid(2)), (true, false));
+        let host = crate::utils::parquet::get_struct(batch, "host")?;
+        assert_eq!((host.is_valid(0), host.is_valid(2)), (false, true));
+        assert_eq!(crate::utils::parquet::get_u64(host, "id", 2)?, 11);
         Ok(())
     }
 }

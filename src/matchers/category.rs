@@ -44,6 +44,22 @@ pub fn main_category<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Opti
     best.map(|(_, k, v)| format!("{k}={v}"))
 }
 
+/// All categories of a feature as `key=value`, in the order of
+/// [CATEGORY_KEYS]: a fuel station with `amenity=fuel` and
+/// `shop=convenience` has both, while [main_category] gives only the
+/// shop.
+pub fn categories<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<String> {
+    let mut found: Vec<(usize, String)> = tags
+        .filter(|(_, v)| *v != "no")
+        .filter_map(|(k, v)| {
+            let i = CATEGORY_KEYS.iter().position(|c| *c == k)?;
+            Some((i, format!("{k}={v}")))
+        })
+        .collect();
+    found.sort();
+    found.into_iter().map(|(_, c)| c).collect()
+}
+
 /// Pairs of main categories that one business often has in AllThePlaces
 /// and OpenStreetMap, such as `tourism=hotel` and `amenity=restaurant`.
 /// Inferred by `scripts/infer_contact_category_pairs.py`, from contact
@@ -110,6 +126,18 @@ pub fn categories_agree(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_categories() {
+        let t = [
+            ("amenity", "fuel"),
+            ("name", "X"),
+            ("shop", "kiosk"),
+            ("office", "no"),
+        ];
+        assert_eq!(categories(t.into_iter()), ["shop=kiosk", "amenity=fuel"]);
+        assert!(categories([("name", "X")].into_iter()).is_empty());
+    }
 
     #[test]
     fn test_main_category() {

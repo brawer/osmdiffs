@@ -58,6 +58,11 @@ match                                        STRUCT, non-null
     local_share FLOAT                        nullable — only for deletion candidates by brand
     position    UTF8                         nullable — "google_camera_coords" if atp_geometry was corrected, see below
     position_shift_deg FLOAT                 nullable — how far atp_geometry was moved east, in degrees
+    similar_osm LIST<STRUCT>                 nullable — for missing_in_osm and located_in, see below
+      type      UTF8                         non-null ("node" | "way" | "relation")
+      id        UINT64                       non-null
+      distance_m FLOAT                       non-null
+      by        UTF8                         non-null ("category" | "name")
 
 importance    FLOAT                          non-null, 0.0 to 1.0
 ```
@@ -226,6 +231,31 @@ corrected position. Then `atp_geometry` is the corrected position, and
 degrees of longitude; subtract it to get the position AllThePlaces
 gave. See
 [`2026-11-16-google-camera-coords.md`](../notes/2026-11-16-google-camera-coords.md).
+
+`match.evidence.similar_osm` lists, for `missing_in_osm` and
+`located_in` rows, the OpenStreetMap features within 100 m that are
+most like the AllThePlaces feature, nearest first:
+
+- `by: "category"`, the nearest one with a category (`shop`,
+  `amenity`, `tourism`, `leisure`, `healthcare`, `craft` or `office`)
+  that is one of the AllThePlaces feature's, or forms one of the pairs
+  that a business often has on the two sides, such as
+  `amenity=pharmacy` and `shop=chemist`. All category keys count on
+  both sides, so a fuel station tagged `shop=kiosk` as well agrees
+  with one that isn't;
+- `by: "name"`, the nearest one of any category whose `name`,
+  `brand`, `official_name`, `alt_name`, `short_name` or `name:*`
+  shares a distinctive word with the AllThePlaces feature's: a word of
+  at least four letters that doesn't merely say what kind of place it
+  is, such as “Hotel” or “Restaurant”. This catches a hotel that
+  OpenStreetMap maps as its restaurant.
+
+One feature that is both is listed once, as `category`. For
+`located_in`, the host itself doesn't count. Such a feature is often
+the place itself, under another name, without a brand, of another
+kind, or mapped some distance away, so `edits.parquet` proposes no new
+feature then. It is null when there is none, and for the other
+relations.
 
 ```sh
 duckdb -c "

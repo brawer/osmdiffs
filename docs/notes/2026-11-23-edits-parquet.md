@@ -130,7 +130,8 @@ isn't one that `Nondescript` flags as shared across many places.
   that OSM doesn't map on its own).
 - **Merge** rows into one new element when they lie within about 30 m, have compatible main categories
   (`matchers/category.rs`), and share a phone or email address, so they are one business; proximity or a shared street
-  address alone is not enough. This is the car dealership case: Audi, VW and Skoda spiders listing one dealer become one
+  address alone is not enough. A shared `brand:wikidata` also counts, as when two spiders list one store (decided
+  2026-11-24, see [2026-11-24-create-suggestions-eval.md](2026-11-24-create-suggestions-eval.md)). This is the car dealership case: Audi, VW and Skoda spiders listing one dealer become one
   `shop=car` with `brand=Audi;Škoda;Volkswagen` and the dealer's own `name`. Conflicting values for the same key drop
   that key rather than picking one.
 - **Tags** are ATP's tags minus ATP-internal ones (`@spider`, `@source_uri`, ...), normalized the way we would write
