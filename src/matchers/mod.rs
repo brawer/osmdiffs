@@ -279,6 +279,14 @@ impl MatchMask {
             ("natural", "tree_group") => Self::SHRUBBERY.0,
             ("natural", "tree_row") => Self::SHRUBBERY.0,
 
+            // Offices that behave like shops: a branded place at an
+            // address, often with a web page per branch; see
+            // [brawer/osmdiffs#1018](https://github.com/brawer/osmdiffs/issues/1018).
+            ("office", "estate_agent") => Self::SHOP.0,
+            ("office", "financial_advisor") => Self::SHOP.0,
+            ("office", "insurance") => Self::SHOP.0,
+            ("office", "tax_advisor") => Self::SHOP.0,
+
             ("power", "cable") => 0,
             ("power", "line") => 0,
             ("power", "minor_cable") => 0,
@@ -752,6 +760,23 @@ mod tests {
         assert!(!aed.intersects(&hospital));
         assert!(aed.intersects(&mask(&[("emergency", "fire_hydrant")])));
         assert!(hospital.intersects(&MatchMask::SHOP));
+    }
+
+    #[test]
+    fn test_offices() {
+        for kind in [
+            "estate_agent",
+            "financial_advisor",
+            "insurance",
+            "tax_advisor",
+        ] {
+            let office = mask(&[("office", kind)]);
+            assert_eq!(office, MatchMask::SHOP, "office={kind}");
+            assert_eq!(office.importance(), 0.7, "office={kind}");
+        }
+        // Other offices are not matched yet.
+        assert!(mask(&[("office", "company")]).is_empty());
+        assert!(mask(&[("office", "employment_agency")]).is_empty());
     }
 
     #[test]
