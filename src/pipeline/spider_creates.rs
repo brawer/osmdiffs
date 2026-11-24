@@ -27,7 +27,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -265,12 +265,20 @@ struct ForeignBrand {
 const MIN_FOREIGN_FEATURES: u64 = 20;
 
 /// One `brands` entry of `spider-stats.parquet`.
+#[derive(Clone)]
 struct BrandRow {
     country: Option<String>,
     wikidata: String,
     name: String,
     atp_features: u64,
     osm_features: u64,
+}
+
+fn brands_of(weeks: &BTreeMap<String, Week>) -> BTreeMap<String, Vec<BrandRow>> {
+    weeks
+        .iter()
+        .map(|(spider, week)| (spider.clone(), week.brands.clone()))
+        .collect()
 }
 
 fn foreign_brands(brands: &BTreeMap<String, Vec<BrandRow>>) -> Vec<ForeignBrand> {
@@ -494,25 +502,40 @@ pub fn review(published: &Path, previous: Option<&str>, workdir: &Path) {
 
 fn try_review(published: &Path, previous: Option<&str>, workdir: &Path) -> Result<()> {
     let current = read(published)?;
-    let brands: BTreeMap<String, Vec<BrandRow>> = current
-        .iter()
-        .map(|(s, w)| {
-            let rows = w
-                .brands
-                .iter()
-                .map(|b| BrandRow {
-                    country: b.country.clone(),
-                    wikidata: b.wikidata.clone(),
-                    name: b.name.clone(),
-                    atp_features: b.atp_features,
-                    osm_features: b.osm_features,
-                })
-                .collect();
-            (s.clone(), rows)
+    let previous_weeks = match previous {
+        Some(p) => match read(&workdir.join(p)) {
+            Ok(weeks) => Some(weeks),
+            Err(err) => {
+                log::warn!(
+                    previous = p,
+                    error = format!("{err:#}").as_str();
+                    "spider_creates: could not read last week's spider-stats.parquet"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    // The same brands come up every week until AllThePlaces fixes
+    // them, and some are fine, such as fashion brands that OSM lacks
+    // in many countries; so warn only about those new this week.
+    let foreign = foreign_brands(&brands_of(&current));
+    let known: HashSet<(String, String)> = previous_weeks
+        .as_ref()
+        .map(|weeks| {
+            foreign_brands(&brands_of(weeks))
+                .into_iter()
+                .map(|f| (f.spider, f.wikidata))
+                .collect()
         })
-        .collect();
-    let foreign = foreign_brands(&brands);
+        .unwrap_or_default();
+    let mut new_foreign = 0;
     for f in &foreign {
+        if known.contains(&(f.spider.clone(), f.wikidata.clone())) {
+            continue;
+        }
+        new_foreign += 1;
         log::warn!(
             spider = f.spider.as_str(),
             wikidata = f.wikidata.as_str(),
@@ -532,24 +555,13 @@ fn try_review(published: &Path, previous: Option<&str>, workdir: &Path) -> Resul
             "spider_creates: spider lists places twice"
         );
     }
-    let previous_weeks = match previous {
-        Some(p) => match read(&workdir.join(p)) {
-            Ok(weeks) if weeks.values().any(|w| w.creates.is_some()) => Some(weeks),
-            Ok(_) => {
-                log::info!(previous = p; "spider_creates: last week has no create counts");
-                None
-            }
-            Err(err) => {
-                log::warn!(
-                    previous = p,
-                    error = format!("{err:#}").as_str();
-                    "spider_creates: could not read last week's spider-stats.parquet"
-                );
-                None
-            }
-        },
-        None => None,
-    };
+    let previous_weeks = previous_weeks.filter(|weeks| {
+        let has_counts = weeks.values().any(|w| w.creates.is_some());
+        if !has_counts {
+            log::info!("spider_creates: last week has no create counts");
+        }
+        has_counts
+    });
     let (mut num_jumps, mut num_flips) = (0, 0);
     if let Some(previous_weeks) = &previous_weeks {
         let found = jumps(previous_weeks, &current);
@@ -581,6 +593,7 @@ fn try_review(published: &Path, previous: Option<&str>, workdir: &Path) -> Resul
         spiders = current.len(),
         creates = creates,
         foreign_brands = foreign.len(),
+        new_foreign_brands = new_foreign,
         twin_spiders = twins.len(),
         jumps = num_jumps,
         name_changes = num_flips,
