@@ -7,8 +7,9 @@ merge ([#1038](https://github.com/brawer/osmdiffs/pull/1038); its eval is in
 [Suggesting deletions of closed places: a first attempt](2026-11-23-deletion-suggestions-eval.md)). The
 quick checks below used the AllThePlaces run of 2026-11-14, the ten
 [eval regions](2026-11-06-eval-regions.md), and the 14 places from the
-hand check whose status could be looked up on the web. Fourteen places
-show which signals look promising; they don't measure precision.
+hand check whose status could be looked up on the web, and a larger
+sample of 140 places drawn afterwards. The samples show which signals
+look promising; they are too small to measure the signals' precision.
 
 ## What we tried, and why it fell short
 
@@ -63,6 +64,50 @@ dropped for good while it may still be open (Residence Inn). The three
 right ones are a
 place that **disappeared from the spider and stayed gone** (Walgreens),
 and two the spider never had (Sonic, C&A).
+
+## A larger sample
+
+To check that the 14 places weren't bad luck, 140 more edits were drawn
+without a warning and with a name: 20 each in Berlin, Massachusetts,
+Switzerland and Japan, and 10 in each other region, half deletes and
+half POI-tag removals. Places with a name and an address, or a branch
+page in the `website` tag, were looked up on the web.
+
+| result | places |
+| --- | ---: |
+| open or likely open | 33 |
+| open under another brand | 1 |
+| likely closed | 1 |
+| unclear | 21 |
+| not checkable (no address, transit stops, chain nodes) | 84 |
+
+By region, the open ones are 12 in Berlin, 8 each in the UAE and
+Massachusetts, 5 in Switzerland and 1 in Kenya. Examples are the
+Walmart in Hadley, the AMC cinema at Dartmouth Mall (which stayed open
+after a flood in November 2026), the Telekom shop at Alexanderplatz,
+Zara in Winterthur and B&B Hotel Berlin, all with current pages of
+their own. The one likely closed place is an ENEOS station in Abira
+whose station page now returns an error.
+
+An open place is easier to confirm than a closed one, because a
+closed shop leaves no page behind, so the unclear ones lean towards
+closed. Even if all 21 were closed, at least 34 of the 56 edits that
+could be judged would be wrong. This confirms the first hand check.
+
+How the signals below fall on this sample:
+
+| signal | open (34) | unknown (105) | closed (1) |
+| --- | ---: | ---: | ---: |
+| Overture record from an independent source | 19 | 35 | 0 |
+| ... marked `open` | 8 | 11 | 0 |
+| ... with a fresh source | 8 | 19 | 0 |
+| ... marked `permanently_closed` | 1 | 0 | 0 |
+| matched OSM element of the same brand within 150 m | 7 | 17 | 0 |
+| spider lost more than 0.5% of its requests | 2 | 10 | 0 |
+| any of the three | 24 | 50 | 0 |
+
+Together, Overture, duplicates and spider errors would have held back
+24 of the 34 wrong edits, and half of the unknown ones.
 
 ## Ideas, by how much they would help
 
@@ -127,19 +172,100 @@ Candidates that cluster in cells where a brand's match rate suddenly
 drops, as `japan_post_jp`'s did, point the same way: closures are
 spread out, while gaps come in patches.
 
-### 5. Other open place data as a second opinion
+### 5. Overture and other open place data as a second opinion
 
-- **Overture Maps places** has a record with a source update from
-  November 2026 for all six open places it lists (it lacks the Holiday
-  Inn Express), and for the likely open Shell and Storchengarage. For
-  the closed C&A it has only updates from 2025, and nothing for Sonic.
-  It lists the closed Walgreens as open, updated 2026-09, and the
-  Residence Inn with an update from 2025-09.
-- **Foursquare's open places** data has `date_closed` and
-  `date_refreshed`. Not checked here.
+[Overture Maps](https://docs.overturemaps.org/guides/places/) publishes
+a places dataset every month, merged from Meta, Microsoft,
+Foursquare, AllThePlaces and smaller providers. Each record lists its
+sources, each source has an `update_time`, and the record has an
+`operating_status` (`open`, `permanently_closed`,
+`temporarily_closed`, or none).
 
-Neither licence lets us copy their data into OSM, but as evidence for a
-person reviewing an edit they would help.
+**Licence.** The places theme is under
+[CDLA-Permissive-2.0](https://cdla.dev/permissive-2-0/), except
+records from Foursquare, which are under Apache-2.0, and records from
+AllThePlaces, which keep its CC0. It contains no OSM data. This differs
+from Overture's buildings, base and transportation themes, which
+include OSM data and are therefore under ODbL
+([attribution and licensing](https://docs.overturemaps.org/attribution/)).
+Both permissive licences allow use and redistribution with
+attribution. Whether data under them may be copied into OSM is a
+question for the OSMF Licensing Working Group, and this note doesn't
+assume an answer. Showing an Overture record to a person who reviews
+an edit copies nothing into OSM, so for that use the licence is no
+obstacle.
+
+**How it was measured.** Release 2026-11-18.0 was cut to the ten
+regions (12 GB of parquet for the world, read over HTTPS with DuckDB).
+An Overture record supports an OSM feature when it lies within 50 m and
+has the same `brand:wikidata`, or its name or brand contains the OSM
+brand or name. Records whose only sources are AllThePlaces or Overture
+itself don't count, because they say nothing new. A source is fresh
+when Meta updated it on or after 2026-08-18, or Foursquare or
+Microsoft on or after 2026-05-18. Other providers, including
+BrightQuery, PinMeTo and Uberall, stamp every record with the release
+month, so their `update_time` says nothing about the place.
+
+**Region-wide.** For each region, the deletes and POI-tag removals (reviews left
+out) were compared with up to 3,000 OSM features that a spider matched
+as `same`, which are almost all open.
+
+| | candidates | matched features |
+| --- | ---: | ---: |
+| outside Japan | 5,779 | 18,408 |
+| ... with an independent Overture record | 36% | 44% |
+| ... marked `open` | 11% | 19% |
+| ... with a fresh source | 19% | 29% |
+| ... marked `permanently_closed` | 0.4% | 0.1% |
+| Japan | 6,549 | 3,000 |
+| ... with an independent Overture record | 1% | 27% |
+
+Outside Japan, Overture has a record for the candidates almost as
+often as for places the spider confirms. If closed places had no
+record at all, that would mean about four in five candidates are
+open (36% ÷ 44%), which agrees with the hand checks. Overture does
+keep some closed places, such as the Walgreens in the table above, so this is a
+rough estimate, but it points the same way. The gap is similar in
+every region (Berlin 40% against 43%, Massachusetts 68% against 72%,
+Switzerland 19% against 19%) and for every kind of place: hotels 72%
+against 80%, supermarkets and convenience stores 40% against 46%, fuel
+stations 38% against 44%. The largest gap is for other shops, 52%
+against 68%.
+
+Only 26 candidates are marked `permanently_closed`, 19 of them in
+Massachusetts. That is four times the rate of matched features, but
+too few to matter.
+
+In Japan, Overture has a record for almost no candidate, but also for
+only a quarter of the matched features, with names in Japanese on
+both sides. Whether the Japanese candidates are mostly closed, or
+Overture simply lacks the chains behind them (convenience stores and
+restaurants make up most of the few hits), can't be told from this.
+
+Overture has little infrastructure: 3% of the post box, bike dock
+and transit candidates have a record, and 9% of the matched ones. It
+can't help there.
+
+**On the larger sample** (see [A larger sample](#a-larger-sample)):
+of the 34 places found open, 19 have a supporting Overture record, 8
+are marked `open`, 8 have a fresh source, and one, a Vodafone shop on
+Steglitzer Damm in Berlin, is marked `permanently_closed` while a
+directory still lists it. The one place found closed, an ENEOS
+station in Abira whose own page now returns an error, has no
+Overture record. Of the 14 places, Overture had current records for
+the open ones, but it lists the closed Walgreens in Worcester as open
+with a source updated in 2026-09.
+
+So Overture mostly confirms what the hand checks found: many
+candidates are still open. As a veto ("no delete if Overture has a
+record") it would hold back about a third of the edits outside Japan,
+and about half of the wrong ones in the sample, but it can't tell
+which of the remaining deletes are right. As evidence shown to a reviewer, with the sources and their
+dates, it is useful. `permanently_closed` is rare and was wrong in
+the one case seen.
+
+**Foursquare's open places** data has `date_closed` and
+`date_refreshed`. Not checked here.
 
 ### 6. The web: Common Crawl and live pages
 
@@ -267,10 +393,12 @@ needed.
    had gets no delete.
 3. No deletes for spiders that lost requests, or that never emit the
    candidate's brand.
-4. Each edit lists its evidence (last seen in AllThePlaces, the web
-   page's status, Overture's last update), so the reviewer can judge
-   quickly.
-5. Measure precision through MapRoulette before anything goes out in
+4. No delete when Overture has a record from an independent source
+   with a fresh update; that becomes a review.
+5. Each edit lists its evidence (last seen in AllThePlaces, the web
+   page's status, Overture's sources and dates), so the reviewer can
+   judge quickly.
+6. Measure precision through MapRoulette before anything goes out in
    bulk.
 
 Until then, no `obsolete_poi` edits.
