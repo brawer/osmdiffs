@@ -3,8 +3,10 @@
 
 use super::create::{self, Candidate, DeletionCandidates, HostFeature, MatchedSites, Positions};
 use super::post_partner::{PostPartnerEditSuggester, has_partner_edits};
+use super::spill::Spill;
 use super::writer::{Edit, OsmSide, RelationMember};
 use super::{Decision, Element, Source, Tags};
+use crate::tables::{RecordReader, RecordWriter};
 use crate::utils::parquet::{
     get_binary, get_f32, get_optional_f32, get_optional_string, get_string, get_struct, get_tags,
     get_u32, get_u64,
@@ -18,7 +20,8 @@ use geo_traits::to_geo::ToGeoGeometry;
 use indicatif::ProgressBar;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rayon::prelude::*;
-use std::collections::{BTreeSet, HashMap};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::Path;
 
@@ -97,14 +100,31 @@ struct ModifyRow {
     source: Source,
 }
 
-/// What the first pass finds.
-#[derive(Default)]
+/// Rows that matched an OSM feature, by OSM type, OSM ID and row in
+/// `conflated.parquet`; the item is `(osm_tags, position, source)`.
+pub(super) type ModifySpill = Spill<(String, u64, u64), (Tags, Option<(f64, f64)>, Source)>;
+
+/// Create candidates, by latitude ([ordered]) and row.
+pub(super) type CandidateSpill = Spill<(u64, u64), Candidate>;
+
+/// The bits of `x`, in the order of the numbers; for sorting by a
+/// coordinate.
+fn ordered(x: f64) -> u64 {
+    let bits = x.to_bits();
+    if bits >> 63 == 1 {
+        !bits
+    } else {
+        bits | (1 << 63)
+    }
+}
+
+/// What the first pass finds: the rows that may become edits, on disk,
+/// and the statistics over all rows that the rules need, in memory.
 pub(super) struct FirstPass {
-    /// The OSM features that AllThePlaces matched, with the rows that
-    /// matched them.
-    pub elements: HashMap<(String, u64), Element>,
+    /// The rows that matched OSM features.
+    pub modifies: ModifySpill,
     /// The ATP features that may become creates.
-    pub candidates: Vec<Candidate>,
+    pub candidates: CandidateSpill,
     pub deletion_candidates: DeletionCandidates,
     pub positions: Positions,
     pub matched_sites: MatchedSites,
@@ -312,15 +332,27 @@ fn create_row(
     }))))
 }
 
-/// First pass: the OSM features that AllThePlaces matched, with the
-/// rows that matched them, and the ATP features that may become
-/// creates, leaving out the rows of `unhealthy` spiders.
+/// First pass: the rows that matched OSM features, and the ATP
+/// features that may become creates, leaving out the rows of
+/// `unhealthy` spiders, spilled to disk below `workdir`; and the
+/// statistics that the create rules need.
 pub(super) fn first_pass(
     conflated: &Path,
     unhealthy: &BTreeSet<String>,
+    workdir: &Path,
     bar: &ProgressBar,
 ) -> Result<FirstPass> {
-    let mut pass = FirstPass::default();
+    // Both spills fill at the same time.
+    let budget = super::SPILL_BYTES / 2;
+    let mut pass = FirstPass {
+        modifies: Spill::new(workdir, "modifies", budget)?,
+        candidates: Spill::new(workdir, "candidates", budget)?,
+        deletion_candidates: Default::default(),
+        positions: Default::default(),
+        matched_sites: Default::default(),
+        early_skips: Default::default(),
+    };
+    let mut base = 0u64;
     for batch in batches(conflated)? {
         let batch = batch?;
         bar.inc_length(batch.num_rows() as u64);
@@ -328,7 +360,11 @@ pub(super) fn first_pass(
             .into_par_iter()
             .map(|row| first_pass_row(&batch, row, unhealthy))
             .collect::<Result<_>>()?;
-        for row in rows.into_iter().flatten() {
+        for (i, row) in rows.into_iter().enumerate() {
+            let Some(row) = row else {
+                continue;
+            };
+            let row_index = base + i as u64;
             match row {
                 FirstPassRow::Modify(m) => {
                     let ModifyRow {
@@ -343,12 +379,9 @@ pub(super) fn first_pass(
                     {
                         pass.matched_sites.add(&source.spider, category, point);
                     }
-                    let element = pass.elements.entry(key).or_insert_with(|| Element {
-                        tags: osm_tags,
-                        position,
-                        sources: Vec::new(),
-                    });
-                    element.sources.push(source);
+                    let (osm_type, osm_id) = key;
+                    pass.modifies
+                        .push((osm_type, osm_id, row_index), &(osm_tags, position, source))?;
                 }
                 FirstPassRow::Create(candidate) => {
                     pass.positions.add(
@@ -357,13 +390,15 @@ pub(super) fn first_pass(
                         candidate.source.atp_ref.as_deref(),
                     );
                     // Kinds we never create, and places that OSM
-                    // likely has, are only counted, to save memory.
+                    // likely has, are only counted, to save disk.
                     match create::early_skip(&candidate) {
                         Some(skip) => {
                             pass.early_skips.count_candidate(&candidate);
                             pass.early_skips.count_skip(&candidate.source.spider, skip);
                         }
-                        None => pass.candidates.push(*candidate),
+                        None => pass
+                            .candidates
+                            .push((ordered(candidate.point.1), row_index), &candidate)?,
                     }
                 }
                 FirstPassRow::Deletion(brand, position) => {
@@ -371,9 +406,81 @@ pub(super) fn first_pass(
                 }
             }
         }
+        base += batch.num_rows() as u64;
         bar.inc(batch.num_rows() as u64);
     }
     Ok(pass)
+}
+
+/// An OSM feature that AllThePlaces matched, with all the rows that
+/// matched it, in the order of the rows, and the first of these rows.
+#[derive(Serialize, Deserialize)]
+pub(super) struct GroupedElement {
+    pub key: (String, u64),
+    pub first_row: u64,
+    pub element: Element,
+}
+
+/// The rows of `modifies`, grouped by OSM feature, in a spool file at
+/// `path`, which [grouped_elements] reads.
+pub(super) fn group_elements(modifies: ModifySpill, path: &Path) -> Result<RecordReader> {
+    let mut writer = RecordWriter::create(path)?;
+    let mut current: Option<GroupedElement> = None;
+    for item in modifies.sorted()? {
+        let ((osm_type, osm_id, row), (tags, position, source)) = item?;
+        if let Some(c) = &mut current
+            && c.key.0 == osm_type
+            && c.key.1 == osm_id
+        {
+            c.element.sources.push(source);
+            continue;
+        }
+        if let Some(done) = current.take() {
+            writer.write(&rmp_serde::to_vec(&done)?)?;
+        }
+        current = Some(GroupedElement {
+            key: (osm_type, osm_id),
+            first_row: row,
+            element: Element {
+                tags,
+                position,
+                sources: vec![source],
+            },
+        });
+    }
+    if let Some(done) = current.take() {
+        writer.write(&rmp_serde::to_vec(&done)?)?;
+    }
+    writer.close()?;
+    RecordReader::open(path)
+}
+
+/// The features of a spool file written by [group_elements].
+pub(super) fn grouped_elements(
+    spool: &RecordReader,
+) -> Result<impl Iterator<Item = Result<GroupedElement>> + use<>> {
+    Ok(spool
+        .iter()?
+        .map(|record| Ok(rmp_serde::from_slice(&record?)?)))
+}
+
+/// What a decided feature needs for its edit, besides its OSM side.
+#[derive(Serialize, Deserialize)]
+pub(super) struct DecidedElement {
+    pub position: Option<(f64, f64)>,
+    pub sources: Vec<Source>,
+    pub decision: Decision,
+}
+
+/// The key that `edits.parquet` is sorted by: along the Hilbert curve
+/// of S2 cells, as `conflated.parquet`, then by OSM feature (none for a
+/// create) and ID, and last by a sequence number that keeps equal keys
+/// in the order they came.
+pub(super) type EditKey = (u64, Option<(String, u64)>, String, u64);
+
+pub(super) fn edit_key(edit: &Edit, seq: u64) -> EditKey {
+    let osm = edit.osm.as_ref().map(|o| (o.osm_type.clone(), o.osm_id));
+    (edit.s2_cell_id, osm, edit.id.clone(), seq)
 }
 
 fn way_members(osm: &StructArray, row: usize) -> Result<Option<Vec<u64>>> {
@@ -466,61 +573,73 @@ fn atp_geometry(sources: &[Source]) -> Option<Vec<u8>> {
     Some(crate::geometry::encode_wkb(&geometry))
 }
 
-/// Second pass: the full OSM side of every feature with a decision,
-/// taken from the first row that has the feature.
+/// Last pass: the full OSM side of every feature with a decision,
+/// taken from the first row that matched the feature. `decided` comes
+/// sorted by that row; each edit goes to `emit`, with its row.
 pub(super) fn complete_edits(
     conflated: &Path,
-    mut elements: HashMap<(String, u64), Element>,
-    mut decisions: HashMap<(String, u64), Decision>,
+    decided: impl Iterator<Item = Result<(u64, DecidedElement)>>,
     bar: &ProgressBar,
-) -> Result<Vec<Edit>> {
-    let mut edits = Vec::with_capacity(decisions.len());
+    mut emit: impl FnMut(u64, Edit) -> Result<()>,
+) -> Result<()> {
+    let mut decided = decided.peekable();
+    let mut base = 0u64;
     for batch in batches(conflated)? {
+        if decided.peek().is_none() {
+            break;
+        }
         let batch = batch?;
         bar.inc_length(batch.num_rows() as u64);
         let osm = get_struct(&batch, "osm")?;
-        for row in 0..batch.num_rows() {
-            if decisions.is_empty() {
+        let end = base + batch.num_rows() as u64;
+        while let Some(next) = decided.peek() {
+            let row_index = match next {
+                Ok((row, _)) => *row,
+                Err(_) => {
+                    return Err(match decided.next() {
+                        Some(Err(e)) => e,
+                        _ => unreachable!("peeked an error"),
+                    });
+                }
+            };
+            if row_index >= end {
                 break;
             }
-            if osm.is_null(row) {
-                continue;
-            }
-            let key = (get_string(osm, "type", row)?, get_u64(osm, "id", row)?);
-            let Some(decision) = decisions.remove(&key) else {
-                continue;
-            };
-            let element = elements.remove(&key).context("decision without element")?;
+            let (_, element) = decided.next().expect("peeked")?;
+            let row = (row_index - base) as usize;
+            anyhow::ensure!(osm.is_valid(row), "row {row_index} has no OSM feature");
+            let DecidedElement {
+                position,
+                sources,
+                decision,
+            } = element;
             let osm_side = osm_side(osm, row)?;
             let geometry_wkb = get_binary(&batch, "osm_geometry", row)?;
-            let position = element.position.or_else(|| centroid(&geometry_wkb));
-            edits.push(Edit {
+            let position = position.or_else(|| centroid(&geometry_wkb));
+            let edit = Edit {
                 id: super::modify_id(&osm_side.osm_type, osm_side.osm_id, &decision.changes),
                 action: "modify",
                 topics: decision.topics,
                 osm: Some(osm_side),
                 changes: decision.changes,
-                atp_geometry_wkb: atp_geometry(&element.sources),
-                importance: element
-                    .sources
-                    .iter()
-                    .map(|s| s.importance)
-                    .fold(0.0, f32::max),
-                sources: element.sources,
+                atp_geometry_wkb: atp_geometry(&sources),
+                importance: sources.iter().map(|s| s.importance).fold(0.0, f32::max),
+                sources,
                 geometry_wkb,
                 host: None,
                 warnings: decision.warnings,
                 s2_cell_id: position.map(s2_cell_id).unwrap_or(0),
-            });
+            };
+            emit(row_index, edit)?;
         }
+        base = end;
         bar.inc(batch.num_rows() as u64);
     }
     anyhow::ensure!(
-        decisions.is_empty(),
-        "{} edited OSM features not found in the second pass",
-        decisions.len()
+        decided.peek().is_none(),
+        "edited OSM features not found in the last pass"
     );
-    Ok(edits)
+    Ok(())
 }
 
 #[cfg(test)]

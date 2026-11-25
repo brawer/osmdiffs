@@ -36,10 +36,29 @@ use anyhow::{Context, Result};
 use arrow::array::{Array, ListArray, StringArray, StructArray, UInt64Array};
 use geo::{Closest, ClosestPoint, Contains, Distance, Geometry, Haversine, InteriorPoint, Point};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+
+/// Serializes a geometry as WKB, which keeps its coordinates exactly.
+mod wkb_geometry {
+    use geo::Geometry;
+    use geo_traits::to_geo::ToGeoGeometry;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(g: &Geometry<f64>, s: S) -> Result<S::Ok, S::Error> {
+        crate::geometry::encode_wkb(g).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Geometry<f64>, D::Error> {
+        let bytes: Vec<u8> = Vec::deserialize(d)?;
+        wkb::reader::read_wkb(&bytes)
+            .map(|g| g.to_geometry())
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// Features closer than this, in meters, can merge into one create.
 pub(super) const MERGE_RADIUS_M: f64 = 30.0;
@@ -81,7 +100,7 @@ pub(super) const MIN_NAME_AGREEMENT: f64 = 0.1;
 const CLOSE_BINS: usize = 4;
 
 /// An AllThePlaces feature that OSM lacks, as the first pass sees it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Candidate {
     /// `source.tags` holds the ATP tags that a create may carry; see
     /// [is_create_key].
@@ -101,12 +120,13 @@ pub(crate) struct Candidate {
 }
 
 /// The host of a tenant, from the OSM side of its `located_in` row.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct HostFeature {
     pub osm_type: String,
     pub osm_id: u64,
     pub name: Option<String>,
     pub opening_hours: Option<String>,
+    #[serde(with = "wkb_geometry")]
     pub geometry: Geometry<f64>,
 }
 
@@ -530,13 +550,102 @@ fn distance_m(a: (f64, f64), b: (f64, f64)) -> f64 {
     Haversine.distance(Point::new(a.0, a.1), Point::new(b.0, b.1))
 }
 
+/// Points to find the ones near a point, like [Grid], but compact:
+/// per point, its coordinates and four bytes, which matters for the
+/// statistics that `make_edits` keeps over the whole planet. All
+/// points are added before the first lookup, which sorts them by cell.
+#[derive(Debug, Default)]
+struct PointIndex {
+    cell_deg: f64,
+    points: Vec<(f64, f64)>,
+    /// Indices into `points`, sorted by cell; made on the first lookup.
+    by_cell: std::sync::OnceLock<Vec<u32>>,
+}
+
+impl PointIndex {
+    fn new(radius_m: f64) -> PointIndex {
+        PointIndex {
+            cell_deg: radius_m / 111_320.0,
+            ..PointIndex::default()
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    fn cell(&self, (x, y): (f64, f64)) -> (i64, i64) {
+        (
+            (x / self.cell_deg).floor() as i64,
+            (y / self.cell_deg).floor() as i64,
+        )
+    }
+
+    /// Adds `point`, and returns its index.
+    fn push(&mut self, point: (f64, f64)) -> usize {
+        self.by_cell.take();
+        self.points.push(point);
+        self.points.len() - 1
+    }
+
+    /// The indices of the points in the cells that may hold points
+    /// within the radius of `point`, as [Grid::near]; callers check
+    /// the actual distance.
+    fn near(&self, point: (f64, f64)) -> impl Iterator<Item = usize> + '_ {
+        let by_cell = self.by_cell.get_or_init(|| {
+            let mut order: Vec<u32> = (0..self.points.len() as u32).collect();
+            order.sort_by_key(|&i| self.cell(self.points[i as usize]));
+            order
+        });
+        let (cx, cy) = self.cell(point);
+        let cos = point.1.to_radians().cos().max(0.01);
+        let dx = (1.0 / cos).ceil() as i64;
+        (cx - dx..=cx + dx).flat_map(move |x| {
+            let cell = |i: &u32| self.cell(self.points[*i as usize]);
+            let start = by_cell.partition_point(|i| cell(i) < (x, cy - 1));
+            let end = by_cell.partition_point(|i| cell(i) <= (x, cy + 1));
+            by_cell[start..end].iter().map(|&i| i as usize)
+        })
+    }
+}
+
+/// Distinct strings, each by a small number, such as the categories or
+/// brands of many places.
+#[derive(Debug, Default)]
+struct Interned {
+    ids: HashMap<String, u32>,
+    names: Vec<String>,
+}
+
+impl Interned {
+    fn id(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.ids.get(name) {
+            return id;
+        }
+        let id = self.names.len() as u32;
+        self.names.push(name.to_string());
+        self.ids.insert(name.to_string(), id);
+        id
+    }
+
+    fn get(&self, name: &str) -> Option<u32> {
+        self.ids.get(name).copied()
+    }
+
+    fn name(&self, id: u32) -> &str {
+        &self.names[id as usize]
+    }
+}
+
 /// Where each spider has features that matched OSM, with their kind,
 /// to spot features that are part of a matched site, such as the shop
 /// of a fuel station that the same spider lists.
 #[derive(Default)]
 pub(crate) struct MatchedSites {
-    grid: Option<Grid>,
-    sites: Vec<(u64, String, (f64, f64))>,
+    points: Option<PointIndex>,
+    /// By point, a hash of the spider and the category.
+    sites: Vec<(u64, u32)>,
+    categories: Interned,
 }
 
 fn spider_hash(spider: &str) -> u64 {
@@ -547,23 +656,26 @@ fn spider_hash(spider: &str) -> u64 {
 
 impl MatchedSites {
     pub(crate) fn add(&mut self, spider: &str, category: String, point: (f64, f64)) {
-        let grid = self.grid.get_or_insert_with(|| Grid::new(MERGE_RADIUS_M));
-        grid.insert(point, self.sites.len());
-        self.sites.push((spider_hash(spider), category, point));
+        let points = self
+            .points
+            .get_or_insert_with(|| PointIndex::new(MERGE_RADIUS_M));
+        points.push(point);
+        let category = self.categories.id(&category);
+        self.sites.push((spider_hash(spider), category));
     }
 
     /// Whether `spider` has a matched feature of another kind than
     /// `category` within [MERGE_RADIUS_M] of `point`.
     fn has_other_kind_near(&self, spider: &str, category: &str, point: (f64, f64)) -> bool {
-        let Some(grid) = &self.grid else {
+        let Some(points) = &self.points else {
             return false;
         };
         let spider = spider_hash(spider);
-        grid.near(point).any(|i| {
-            let (s, c, p) = &self.sites[i];
-            *s == spider
-                && !categories_agree(c, category)
-                && distance_m(*p, point) <= MERGE_RADIUS_M
+        points.near(point).any(|i| {
+            let (s, c) = self.sites[i];
+            s == spider
+                && !categories_agree(self.categories.name(c), category)
+                && distance_m(points.points[i], point) <= MERGE_RADIUS_M
         })
     }
 }
@@ -597,30 +709,38 @@ pub(super) fn is_self_service(tags: &[(String, String)]) -> bool {
 /// Deletion candidates by brand, to find places that moved.
 #[derive(Default)]
 pub(crate) struct DeletionCandidates {
-    grid: Option<Grid>,
-    brands: Vec<(String, (f64, f64))>,
+    points: Option<PointIndex>,
+    /// By point, its `brand:wikidata`.
+    brands: Vec<u32>,
+    names: Interned,
 }
 
 impl DeletionCandidates {
     pub(crate) fn add(&mut self, brand_wikidata: &str, point: (f64, f64)) {
-        let grid = self.grid.get_or_insert_with(|| Grid::new(MOVED_RADIUS_M));
-        grid.insert(point, self.brands.len());
-        self.brands.push((brand_wikidata.to_string(), point));
+        let points = self
+            .points
+            .get_or_insert_with(|| PointIndex::new(MOVED_RADIUS_M));
+        points.push(point);
+        let brand = self.names.id(brand_wikidata);
+        self.brands.push(brand);
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.brands.len()
+        self.points.as_ref().map_or(0, PointIndex::len)
     }
 
     /// Whether a deletion candidate with a `brand:wikidata` among
     /// `brands` lies within [MOVED_RADIUS_M] of `point`.
     fn has_near(&self, brands: &[&str], point: (f64, f64)) -> bool {
-        let Some(grid) = &self.grid else {
+        let Some(points) = &self.points else {
             return false;
         };
-        grid.near(point).any(|i| {
-            let (brand, p) = &self.brands[i];
-            brands.contains(&brand.as_str()) && distance_m(*p, point) <= MOVED_RADIUS_M
+        let ids: Vec<u32> = brands.iter().filter_map(|b| self.names.get(b)).collect();
+        if ids.is_empty() {
+            return false;
+        }
+        points.near(point).any(|i| {
+            ids.contains(&self.brands[i]) && distance_m(points.points[i], point) <= MOVED_RADIUS_M
         })
     }
 }
@@ -1212,6 +1332,10 @@ fn twins(candidates: &[Candidate]) -> HashSet<usize> {
     found
 }
 
+/// The creates of `candidates`, all in memory; `make_edits` streams
+/// them instead, see [make_creates_sorted]. Kept for the tests, which
+/// check the rules on a handful of candidates.
+#[cfg(test)]
 pub(crate) fn make_creates(
     candidates: Vec<Candidate>,
     ctx: &CreateContext,
@@ -1225,6 +1349,61 @@ pub(crate) fn make_creates(
             None => kept.push(candidate),
         }
     }
+    let edits = cluster_creates(kept, ctx, &mut stats);
+    stats.mark_own_names(ctx.spiders);
+    (edits, stats)
+}
+
+/// The creates of `candidates`, which come sorted by latitude, each
+/// with its row in `conflated.parquet`; each create goes to `emit`.
+/// Twins and merges only join candidates within [MERGE_RADIUS_M], so
+/// a sweep along the latitude ([Sweep]) cuts the candidates into
+/// clusters that can't join any other, and only the clusters that the
+/// sweep line still touches are in memory. Each cluster is decided as
+/// if it were all candidates, in the order of their rows, which gives
+/// the same creates as deciding all candidates at once.
+pub(crate) fn make_creates_sorted(
+    candidates: impl Iterator<Item = Result<(u64, Candidate)>>,
+    ctx: &CreateContext,
+    mut emit: impl FnMut(Edit) -> Result<()>,
+) -> Result<CreateStats> {
+    let mut stats = CreateStats::default();
+    let mut sweep = Sweep::new(MERGE_RADIUS_M.max(TWIN_RADIUS_M));
+    let mut decide = |cluster: Vec<(u64, Candidate)>, stats: &mut CreateStats| -> Result<()> {
+        let mut cluster = cluster;
+        cluster.sort_by_key(|(row, _)| *row);
+        let kept = cluster.into_iter().map(|(_, c)| c).collect();
+        for edit in cluster_creates(kept, ctx, stats) {
+            emit(edit)?;
+        }
+        Ok(())
+    };
+    for candidate in candidates {
+        let (row, candidate) = candidate?;
+        stats.count_candidate(&candidate);
+        if let Some(skip) = skip_reason(&candidate, ctx) {
+            stats.count_skip(&candidate.source.spider, skip);
+            continue;
+        }
+        for cluster in sweep.insert(row, candidate) {
+            decide(cluster, &mut stats)?;
+        }
+    }
+    for cluster in sweep.finish() {
+        decide(cluster, &mut stats)?;
+    }
+    stats.mark_own_names(ctx.spiders);
+    Ok(stats)
+}
+
+/// The creates of `kept`, the candidates that passed [skip_reason], in
+/// the order of their rows: twins are left out, the others merge into
+/// places.
+fn cluster_creates(
+    kept: Vec<Candidate>,
+    ctx: &CreateContext,
+    stats: &mut CreateStats,
+) -> Vec<Edit> {
     let twins = twins(&kept);
     let mut kept: Vec<Candidate> = kept
         .into_iter()
@@ -1261,8 +1440,162 @@ pub(crate) fn make_creates(
             }
         }
     }
-    stats.mark_own_names(ctx.spiders);
-    (edits, stats)
+    edits
+}
+
+/// Cuts points, which come sorted by latitude, into clusters: the
+/// connected parts of the graph that links two points within
+/// `radius_m`, and maybe a few more. A cluster is done once the sweep
+/// line has moved more than `radius_m` north of its northernmost point,
+/// since no later point can then link to it.
+struct Sweep {
+    radius_m: f64,
+    /// How far, in degrees of latitude, a point within `radius_m` can
+    /// be at most; a little more than the distance on the sphere.
+    window_deg: f64,
+    cell_deg: f64,
+    cells: HashMap<(i64, i64), Vec<u64>>,
+    /// The points in `cells`, in the order they came.
+    window: std::collections::VecDeque<u64>,
+    points: HashMap<u64, Candidate>,
+    parent: HashMap<u64, u64>,
+    /// By the root of each cluster, its points and its northernmost
+    /// latitude.
+    clusters: HashMap<u64, (Vec<u64>, f64)>,
+    last_lat: f64,
+}
+
+impl Sweep {
+    fn new(radius_m: f64) -> Sweep {
+        // A degree of latitude is 111,195 m on Haversine's sphere;
+        // rounding down widens the window and the cells.
+        Sweep {
+            radius_m,
+            window_deg: radius_m / 111_000.0,
+            cell_deg: radius_m / 111_000.0,
+            cells: HashMap::new(),
+            window: Default::default(),
+            points: HashMap::new(),
+            parent: HashMap::new(),
+            clusters: HashMap::new(),
+            last_lat: f64::NEG_INFINITY,
+        }
+    }
+
+    fn cell(&self, (x, y): (f64, f64)) -> (i64, i64) {
+        (
+            (x / self.cell_deg).floor() as i64,
+            (y / self.cell_deg).floor() as i64,
+        )
+    }
+
+    fn find(&mut self, mut id: u64) -> u64 {
+        let mut path = Vec::new();
+        while let Some(&p) = self.parent.get(&id)
+            && p != id
+        {
+            path.push(id);
+            id = p;
+        }
+        for p in path {
+            self.parent.insert(p, id);
+        }
+        id
+    }
+
+    fn union(&mut self, a: u64, b: u64) {
+        let (a, b) = (self.find(a), self.find(b));
+        if a == b {
+            return;
+        }
+        let (keep, gone) = if self.clusters[&a].0.len() >= self.clusters[&b].0.len() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let (members, lat) = self.clusters.remove(&gone).expect("a cluster");
+        let cluster = self.clusters.get_mut(&keep).expect("a cluster");
+        cluster.0.extend(members);
+        cluster.1 = cluster.1.max(lat);
+        self.parent.insert(gone, keep);
+    }
+
+    /// Adds a point, and returns the clusters that are done.
+    fn insert(&mut self, id: u64, candidate: Candidate) -> Vec<Vec<(u64, Candidate)>> {
+        let (x, y) = candidate.point;
+        debug_assert!(y >= self.last_lat, "points must come sorted by latitude");
+        self.last_lat = y;
+        let mut left = Vec::new();
+        while let Some(&first) = self.window.front() {
+            let point = self.points[&first].point;
+            if point.1 >= y - self.window_deg {
+                break;
+            }
+            self.window.pop_front();
+            let cell = self.cell(point);
+            if let Some(ids) = self.cells.get_mut(&cell) {
+                ids.retain(|&i| i != first);
+                if ids.is_empty() {
+                    self.cells.remove(&cell);
+                }
+            }
+            left.push(first);
+        }
+        let mut done = Vec::new();
+        for first in left {
+            let root = self.find(first);
+            if self
+                .clusters
+                .get(&root)
+                .is_some_and(|(_, lat)| *lat < y - self.window_deg)
+            {
+                done.push(self.take(root));
+            }
+        }
+
+        let (cx, cy) = self.cell((x, y));
+        let cos = y.to_radians().cos().max(0.01);
+        let dx = (1.0 / cos).ceil() as i64 + 1;
+        let mut near = Vec::new();
+        for i in cx - dx..=cx + dx {
+            for j in cy - 1..=cy + 1 {
+                if let Some(ids) = self.cells.get(&(i, j)) {
+                    for &other in ids {
+                        if distance_m(self.points[&other].point, (x, y)) <= self.radius_m + 1.0 {
+                            near.push(other);
+                        }
+                    }
+                }
+            }
+        }
+        self.points.insert(id, candidate);
+        self.parent.insert(id, id);
+        self.clusters.insert(id, (vec![id], y));
+        for other in near {
+            self.union(id, other);
+        }
+        let cell = self.cell((x, y));
+        self.cells.entry(cell).or_default().push(id);
+        self.window.push_back(id);
+        done
+    }
+
+    fn take(&mut self, root: u64) -> Vec<(u64, Candidate)> {
+        let (members, _) = self.clusters.remove(&root).expect("a cluster");
+        members
+            .into_iter()
+            .map(|id| {
+                self.parent.remove(&id);
+                (id, self.points.remove(&id).expect("a point"))
+            })
+            .collect()
+    }
+
+    /// The clusters that are left at the end.
+    fn finish(mut self) -> Vec<Vec<(u64, Candidate)>> {
+        let roots: Vec<u64> = self.clusters.keys().copied().collect();
+        roots.into_iter().map(|r| self.take(r)).collect()
+    }
 }
 
 /// Whether `branch` names the branch, as `Bahnhof Bern` or `博多月隈`,
@@ -1470,6 +1803,129 @@ mod tests {
                 matched_sites: &MatchedSites::default(),
             },
         )
+    }
+
+    /// Runs both [make_creates] and [make_creates_sorted] on
+    /// `candidates`, and checks that they agree.
+    fn run_both(candidates: Vec<Candidate>) -> Vec<Edit> {
+        let nondescript = Nondescript::none();
+        let mut positions = Positions::default();
+        for c in &candidates {
+            positions.add(&c.source.spider, c.point, c.source.atp_ref.as_deref());
+        }
+        let spiders: Vec<&str> = candidates
+            .iter()
+            .map(|c| c.source.spider.as_str())
+            .collect();
+        let deletions = DeletionCandidates::default();
+        let ctx = CreateContext {
+            nondescript: &nondescript,
+            shared_osm_values: &HashSet::new(),
+            opening_hours: &opening_hours::Gate::trusting(&["bakery"]),
+            spiders: &SpiderGate::trusting(&spiders),
+            deletion_candidates: &deletions,
+            positions: &positions,
+            matched_sites: &MatchedSites::default(),
+        };
+        let (mut all, all_stats) = make_creates(candidates.clone(), &ctx);
+        let mut by_latitude: Vec<(u64, Candidate)> = candidates
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (i as u64, c))
+            .collect();
+        by_latitude.sort_by(|a, b| a.1.point.1.total_cmp(&b.1.point.1).then(a.0.cmp(&b.0)));
+        let mut streamed = Vec::new();
+        let stats = make_creates_sorted(by_latitude.into_iter().map(Ok), &ctx, |e| {
+            streamed.push(e);
+            Ok(())
+        })
+        .expect("creates");
+        let key = |e: &Edit| (e.id.clone(), e.geometry_wkb.clone());
+        all.sort_by_key(key);
+        streamed.sort_by_key(key);
+        let show = |edits: &[Edit]| -> Vec<(String, Vec<String>, Vec<String>)> {
+            edits
+                .iter()
+                .map(|e| {
+                    (
+                        e.id.clone(),
+                        e.sources
+                            .iter()
+                            .map(|s| format!("{}/{:?}", s.spider, s.atp_ref))
+                            .collect(),
+                        new_tags(e),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(show(&all), show(&streamed));
+        for skip in [
+            Skip::Kind,
+            Skip::Similar,
+            Skip::SpiderPosition,
+            Skip::SharedPosition,
+            Skip::Twin,
+            Skip::Moved,
+            Skip::MatchedSite,
+            Skip::HostFar,
+            Skip::CoarsePosition,
+            Skip::Incomplete,
+            Skip::Unnamed,
+        ] {
+            assert_eq!(all_stats.skipped(skip), stats.skipped(skip), "{skip:?}");
+        }
+        assert_eq!(all_stats.candidates(), stats.candidates());
+        assert_eq!(all_stats.merged, stats.merged);
+        streamed
+    }
+
+    #[test]
+    fn streamed_creates_are_the_same() {
+        // Clusters of bakeries of a few spiders and brands, some close
+        // enough to merge or to be twins, at many latitudes, chained
+        // north to south, across the equator and near the pole.
+        let mut candidates = Vec::new();
+        let mut seed = 12345u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as f64 / (1u64 << 31) as f64
+        };
+        let origins = [
+            ZURICH,
+            (8.5417, 47.37719),
+            (-0.0001, 0.0),
+            (0.0001, -0.0001),
+            (10.0, 89.9995),
+            (179.9999, -33.0),
+            (-179.9999, -33.0),
+        ];
+        for (n, &origin) in origins.iter().enumerate() {
+            for i in 0..40 {
+                let p = (
+                    origin.0 + (next() - 0.5) * 0.0008,
+                    origin.1 + (next() - 0.5) * 0.0008,
+                );
+                let spider = ["bakery", "beck", "bread", "loaf"][(next() * 4.0) as usize];
+                let brand = ["Q1", "Q2"][(next() * 2.0) as usize];
+                let name = format!("Beck {n} {i}");
+                candidates.push(candidate(
+                    spider,
+                    &format!("{n}-{i}"),
+                    p,
+                    &[
+                        ("shop", "bakery"),
+                        ("name", &name),
+                        ("brand", "Beck"),
+                        ("brand:wikidata", brand),
+                    ],
+                ));
+            }
+        }
+        let edits = run_both(candidates);
+        assert!(!edits.is_empty());
+        assert!(edits.iter().any(|e| e.sources.len() > 1), "some merge");
     }
 
     fn new_tags(edit: &Edit) -> Vec<String> {

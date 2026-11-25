@@ -10,12 +10,29 @@
 //! ([opening_hours]), and the service tags of postal partners
 //! ([post_partner]).
 //!
-//! It reads `conflated.parquet` twice. The first pass collects, per OSM
-//! feature, the AllThePlaces rows that matched it and the few OSM tags
-//! the rules look at, and decides the edits. The second pass picks up
-//! the full OSM side of the features that get an edit. That way, memory
-//! grows with the number of matched features and edits, but not with
-//! the size of the features' tags and members.
+//! It reads `conflated.parquet` twice, and keeps in memory only the
+//! statistics over all rows that the rules need, not the rows
+//! themselves, so that the planet fits (#1059):
+//!
+//! 1. The first pass spills the rows that matched OSM features, and
+//!    the ATP features that may become creates, to disk ([spill]), and
+//!    collects the positions and sites that the create rules check.
+//! 2. The matched rows come back sorted by OSM feature, so the rows of
+//!    one feature are next to each other; they are grouped into a
+//!    spool file. From it, the contact values that several features
+//!    share are counted on disk, and then each feature is decided.
+//! 3. The create candidates come back sorted by latitude, and are
+//!    decided in clusters of nearby candidates; see
+//!    [create::make_creates_sorted].
+//! 4. The second pass picks up the full OSM side of the features that
+//!    get an edit, from the first row that matched each, in the order
+//!    of the rows.
+//! 5. All edits come back sorted as in `edits.parquet`, and are written
+//!    a row group at a time.
+//!
+//! Memory grows with the statistics (positions, matched sites,
+//! deletion candidates, per-spider counts), not with the number of
+//! matched rows or edits.
 
 mod agreement;
 mod contact;
@@ -23,6 +40,7 @@ pub(crate) mod create;
 mod opening_hours;
 mod post_partner;
 mod read;
+mod spill;
 mod wikidata;
 mod writer;
 
@@ -33,7 +51,9 @@ use crate::matchers::brand_names::NsiNames;
 use crate::matchers::contact::Nondescript;
 use anyhow::{Context, Result};
 use indicatif::MultiProgress;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -41,7 +61,7 @@ use std::time::Instant;
 type Tags = Vec<(String, String)>;
 
 /// Why a tag changes; written as `changes.reason`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Reason {
     /// OSM has no such tag.
     MissingInOsm,
@@ -94,7 +114,7 @@ impl Reason {
 /// tag; `new` is the value to set, `None` to remove the tag. `atp` is
 /// AllThePlaces' value as written, for changes that a person must
 /// decide ([Reason::NeedsReview]).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Change {
     pub key: String,
     pub old: Option<String>,
@@ -116,7 +136,7 @@ impl Change {
 }
 
 /// One `conflated.parquet` row that feeds an edit.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Source {
     pub spider: String,
     /// `atp.fetched.timestamp`, in Unix milliseconds.
@@ -147,7 +167,7 @@ impl Source {
 }
 
 /// An OSM feature that AllThePlaces matched, as the first pass sees it.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Element {
     /// The OSM tags that the rules read; see [read::is_rule_key].
     pub tags: Tags,
@@ -157,9 +177,10 @@ pub(crate) struct Element {
 }
 
 /// What the rules decided for one OSM feature.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Decision {
     pub changes: Vec<Change>,
+    #[serde(deserialize_with = "spill::static_strs")]
     pub topics: Vec<&'static str>,
     pub warnings: Vec<String>,
 }
@@ -311,6 +332,109 @@ pub(crate) fn modify_id(osm_type: &str, osm_id: u64, changes: &[Change]) -> Stri
     crate::utils::sha256_hex(text.as_bytes())[..16].to_string()
 }
 
+/// Bytes that the spills of `make_edits` buffer in all, at any time;
+/// see [spill::Spill]. A quarter of what other steps give a single
+/// external sort ([super::EXTERNAL_SORT_CHUNK_BYTES]), since a spill
+/// buffers encoded items, which take less than decoded ones.
+const SPILL_BYTES: usize = super::EXTERNAL_SORT_CHUNK_BYTES / 4;
+
+/// How many OSM features are decided at once, in parallel.
+const DECIDE_CHUNK: usize = 16_384;
+
+/// Logs the memory in use, after a part of `make_edits`.
+fn log_memory(message: &'static str) {
+    let stats = super::memstats::snapshot();
+    log::info!(
+        rss_bytes = stats.rss_bytes,
+        rss_peak_bytes = stats.rss_peak_bytes,
+        rss_anon_bytes = stats.rss_anon_bytes,
+        rss_file_bytes = stats.rss_file_bytes,
+        cgroup_current_bytes = stats.cgroup_current_bytes,
+        cgroup_peak_bytes = stats.cgroup_peak_bytes;
+        "{message}"
+    );
+}
+
+/// The values that the rules take for generic because several places
+/// share them: the contact values that more than two of the matched OSM
+/// features carry, and the words of email addresses that recur in the
+/// ATP rows that matched them; see [contact::shared_osm_keys] and
+/// [contact::email_addresses]. Counted on disk, in `scratch`, so
+/// that memory doesn't grow with the number of distinct values.
+fn shared_values(
+    grouped: &crate::tables::RecordReader,
+    workdir: &Path,
+    scratch: &Path,
+) -> Result<HashSet<String>> {
+    use crate::tables::StringCounts;
+    let budget = SPILL_BYTES;
+    // StringCounts takes plain items, so a read error stops the items
+    // here and comes out after the count.
+    let error: std::cell::RefCell<Option<anyhow::Error>> = Default::default();
+    let elements = || -> Result<_> {
+        Ok(read::grouped_elements(grouped)?.map_while(|e| match e {
+            Ok(e) => Some(e),
+            Err(e) => {
+                error.borrow_mut().get_or_insert(e);
+                None
+            }
+        }))
+    };
+    let check = || match error.borrow_mut().take() {
+        Some(e) => Err(e.context("could not read the matched features")),
+        None => Ok(()),
+    };
+    let mut shared = HashSet::new();
+    let counts = StringCounts::create(
+        elements()?.flat_map(|g| {
+            contact::shared_osm_keys(&g.element.tags)
+                .into_iter()
+                .map(|k| (k, 1))
+        }),
+        workdir,
+        &scratch.join("osm-values"),
+        budget,
+    )?;
+    check()?;
+    shared.extend(
+        counts
+            .iter()
+            .filter(|(_, n)| contact::is_shared_count(*n))
+            .map(|(k, _)| k.to_string()),
+    );
+    drop(counts);
+    let emails = StringCounts::create(
+        elements()?.flat_map(|g| {
+            g.element
+                .sources
+                .into_iter()
+                .filter(|s| s.partner_tags.is_none())
+                .flat_map(|s| contact::email_addresses(&s.tags))
+                .map(|e| (e, 1))
+                .collect::<Vec<_>>()
+        }),
+        workdir,
+        &scratch.join("emails"),
+        budget,
+    )?;
+    check()?;
+    let words = StringCounts::create(
+        emails
+            .iter()
+            .flat_map(|(email, _)| contact::email_word_keys(email).into_iter().map(|k| (k, 1))),
+        workdir,
+        &scratch.join("email-words"),
+        budget,
+    )?;
+    shared.extend(
+        words
+            .iter()
+            .filter(|(_, n)| contact::is_shared_count(*n))
+            .map(|(k, _)| k.to_string()),
+    );
+    Ok(shared)
+}
+
 /// The files `make_edits` reads besides `conflated.parquet`.
 fn inputs(workdir: &Path) -> Vec<PathBuf> {
     let mut paths = super::atp::nondescript::paths(workdir);
@@ -353,23 +477,24 @@ pub fn make_edits(
     };
     let bar = make_progress_bar(progress, "edits.collect", 0, "rows");
     let read::FirstPass {
-        mut elements,
+        modifies,
         candidates,
         deletion_candidates,
         positions,
         matched_sites,
         early_skips,
-    } = read::first_pass(conflated, unhealthy, &bar)?;
+    } = read::first_pass(conflated, unhealthy, workdir, &bar)?;
     bar.finish();
-    let num_elements = elements.len();
-    let mut shared_osm_values = contact::shared_osm_values(elements.values().map(|e| &e.tags));
-    shared_osm_values.extend(contact::shared_email_words(
-        elements
-            .values()
-            .flat_map(|e| e.sources.iter())
-            .filter(|s| s.partner_tags.is_none())
-            .map(|s| &s.tags),
-    ));
+    log_memory("make_edits: first pass");
+    let scratch = tempfile::Builder::new()
+        .prefix("edits-")
+        .tempdir_in(workdir)
+        .context("could not create a scratch directory")?;
+    let num_rows = modifies.len();
+    let grouped = read::group_elements(modifies, &scratch.path().join("elements"))?;
+    let num_elements = grouped.len();
+    let shared_osm_values = shared_values(&grouped, workdir, scratch.path())?;
+    log_memory("make_edits: shared values");
     let hours_gate = opening_hours::Gate::open(spider_stats)?;
     let ctx = RuleContext {
         nondescript: &nondescript,
@@ -378,16 +503,45 @@ pub fn make_edits(
         opening_hours: &hours_gate,
     };
 
-    let mut decisions: HashMap<(String, u64), Decision> = HashMap::new();
-    for (key, element) in elements.iter_mut() {
-        if let Some(decision) = decide(element, &ctx) {
-            decisions.insert(key.clone(), decision);
+    // The edits, sorted as in the file; see [read::EditKey].
+    let mut edits: spill::Spill<read::EditKey, writer::Edit> =
+        spill::Spill::new(workdir, "edits", SPILL_BYTES / 2)?;
+    let mut decided: spill::Spill<u64, read::DecidedElement> =
+        spill::Spill::new(workdir, "decided", SPILL_BYTES / 2)?;
+    let mut elements = read::grouped_elements(&grouped)?.peekable();
+    while elements.peek().is_some() {
+        let chunk: Vec<read::GroupedElement> = elements
+            .by_ref()
+            .take(DECIDE_CHUNK)
+            .collect::<Result<_>>()?;
+        let results: Vec<(u64, read::DecidedElement)> = chunk
+            .into_par_iter()
+            .filter_map(|mut g| {
+                let decision = decide(&mut g.element, &ctx)?;
+                Some((
+                    g.first_row,
+                    read::DecidedElement {
+                        position: g.element.position,
+                        sources: g.element.sources,
+                        decision,
+                    },
+                ))
+            })
+            .collect();
+        for (row, element) in results {
+            decided.push(row, &element)?;
         }
     }
+    drop(grouped);
+    let num_decided = decided.len();
+    log_memory("make_edits: decisions");
 
     let spider_gate = create::SpiderGate::open(spider_stats)?;
-    let (creates, mut create_stats) = create::make_creates(
-        candidates,
+    let mut num_creates = 0u64;
+    let mut create_stats = create::make_creates_sorted(
+        candidates
+            .sorted()?
+            .map(|c| c.map(|((_, row), candidate)| (row, candidate))),
         &create::CreateContext {
             nondescript: &nondescript,
             shared_osm_values: &shared_osm_values,
@@ -397,12 +551,19 @@ pub fn make_edits(
             positions: &positions,
             matched_sites: &matched_sites,
         },
-    );
+        |edit| {
+            // After every modify, whose sequence numbers are rows.
+            let seq = u64::MAX / 2 + num_creates;
+            num_creates += 1;
+            edits.push(read::edit_key(&edit, seq), &edit)
+        },
+    )?;
     create_stats.add(&early_skips);
+    log_memory("make_edits: creates");
     let skipped = |skip: create::Skip| create_stats.skipped(skip);
     log::info!(
         candidates = create_stats.candidates(),
-        creates = creates.len(),
+        creates = num_creates,
         merged = create_stats.merged,
         deletion_candidates = deletion_candidates.len(),
         skipped_kind = skipped(create::Skip::Kind),
@@ -420,24 +581,27 @@ pub fn make_edits(
     );
     super::spider_creates::write_sidecar(&create_stats, &sidecar)
         .context("could not write per-spider create counts")?;
+    drop((deletion_candidates, positions, matched_sites));
 
     let bar = make_progress_bar(progress, "edits.write", 0, "rows");
-    let mut edits = read::complete_edits(conflated, elements, decisions, &bar)?;
+    read::complete_edits(conflated, decided.sorted()?, &bar, |row, edit| {
+        edits.push(read::edit_key(&edit, row), &edit)
+    })?;
     bar.finish();
-    edits.extend(creates);
-    // Along the Hilbert curve of S2 cells, as `conflated.parquet`.
-    edits.sort_by(|a, b| {
-        let key = |e: &writer::Edit| {
-            let osm = e.osm.as_ref().map(|o| (o.osm_type.clone(), o.osm_id));
-            (e.s2_cell_id, osm, e.id.clone())
-        };
-        key(a).cmp(&key(b))
-    });
-    let stats = writer::write(&out, &edits, provenance_bom).context("could not write edits")?;
+    log_memory("make_edits: modifies");
+    let stats = writer::write(
+        &out,
+        edits.sorted()?.map(|e| e.map(|(_, edit)| edit)),
+        provenance_bom,
+    )
+    .context("could not write edits")?;
+    drop(scratch);
     log::info!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
+        matched_rows = num_rows,
         matched_osm_features = num_elements,
-        edits = edits.len(),
+        modifies = num_decided,
+        edits = stats.edits,
         changes = stats.changes,
         contact = stats.topic("contact"),
         wikidata = stats.topic("wikidata"),

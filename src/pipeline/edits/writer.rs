@@ -17,6 +17,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet_geospatial::{WkbEdges, WkbMetadata, WkbType};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -38,7 +39,7 @@ const PROVENANCE_KEY: &str = "org.cyclonedx.bom";
 const ROWS_PER_GROUP: usize = 50_000;
 
 /// One member of an OSM relation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RelationMember {
     pub member_type: String,
     pub id: u64,
@@ -46,7 +47,7 @@ pub(crate) struct RelationMember {
 }
 
 /// The OSM side of an edit, as in `conflated.parquet`'s `osm` column.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct OsmSide {
     pub osm_type: String,
     pub osm_id: u64,
@@ -58,7 +59,7 @@ pub(crate) struct OsmSide {
 }
 
 /// The OSM feature that a create is in, for the `host` column.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Host {
     pub osm_type: String,
     pub osm_id: u64,
@@ -66,10 +67,12 @@ pub(crate) struct Host {
 }
 
 /// One row of `edits.parquet`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Edit {
     pub id: String,
-    pub action: &'static str,
+    #[serde(deserialize_with = "super::spill::static_str")]
+    pub action: super::spill::StaticStr,
+    #[serde(deserialize_with = "super::spill::static_strs")]
     pub topics: Vec<&'static str>,
     /// `None` for a create.
     pub osm: Option<OsmSide>,
@@ -88,6 +91,7 @@ pub(crate) struct Edit {
 /// Counts for the log.
 #[derive(Debug, Default)]
 pub(super) struct Stats {
+    pub edits: usize,
     pub changes: usize,
     pub topics: BTreeMap<&'static str, usize>,
 }
@@ -491,7 +495,13 @@ fn batch(schema: &SchemaRef, edits: &[Edit]) -> Result<RecordBatch> {
 }
 
 /// Writes `edits`, already in their final order, to `path`.
-pub(super) fn write(path: &Path, edits: &[Edit], provenance_bom: &str) -> Result<Stats> {
+/// Writes `edits`, which come in the order of the file, a row group
+/// at a time.
+pub(super) fn write(
+    path: &Path,
+    edits: impl IntoIterator<Item = Result<Edit>>,
+    provenance_bom: &str,
+) -> Result<Stats> {
     let mut tmp = PathBuf::from(path);
     tmp.add_extension("tmp");
     let schema = SchemaRef::new(schema());
@@ -504,7 +514,10 @@ pub(super) fn write(path: &Path, edits: &[Edit], provenance_bom: &str) -> Result
         ArrowWriter::try_new_with_options(File::create(&tmp)?, schema.clone(), options)?;
     let mut stats = Stats::default();
     let (mut geometry_tally, mut atp_tally) = (GeometryTally::default(), GeometryTally::default());
+    let mut chunk: Vec<Edit> = Vec::with_capacity(ROWS_PER_GROUP);
     for edit in edits {
+        let edit = edit?;
+        stats.edits += 1;
         stats.changes += edit.changes.len();
         for topic in &edit.topics {
             *stats.topics.entry(topic).or_default() += 1;
@@ -513,9 +526,14 @@ pub(super) fn write(path: &Path, edits: &[Edit], provenance_bom: &str) -> Result
         if let Some(wkb) = &edit.atp_geometry_wkb {
             atp_tally.record(wkb, || edit.id.clone());
         }
+        chunk.push(edit);
+        if chunk.len() == ROWS_PER_GROUP {
+            writer.write(&batch(&schema, &chunk)?)?;
+            chunk.clear();
+        }
     }
-    for chunk in edits.chunks(ROWS_PER_GROUP) {
-        writer.write(&batch(&schema, chunk)?)?;
+    if !chunk.is_empty() {
+        writer.write(&batch(&schema, &chunk)?)?;
     }
     let column = |tally: &GeometryTally| {
         json!({
@@ -625,7 +643,7 @@ mod tests {
             }),
             ..edit.clone()
         };
-        let stats = write(&path, &[edit, relation, create], "{}")?;
+        let stats = write(&path, [edit, relation, create].map(Ok), "{}")?;
         assert_eq!(stats.changes, 3);
         assert_eq!(stats.topic("contact"), 2);
         assert_eq!(stats.topic("new_poi"), 1);

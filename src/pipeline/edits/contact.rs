@@ -83,47 +83,71 @@ fn is_home_page(value: &str) -> bool {
         .all(|url| !url.contains(['/', '?', '#']))
 }
 
+/// The keys that one OSM feature with `tags` counts for
+/// [shared_osm_values]: `family` and the trimmed, lowercased value
+/// joined by a tab.
+pub(super) fn shared_osm_keys(tags: &Tags) -> Vec<String> {
+    let mut keys = Vec::new();
+    for family in FAMILIES {
+        if let Some((_, value)) = osm_value(tags, family) {
+            keys.push(shared_key(family, value));
+        }
+    }
+    if let Some((_, value)) = tags.iter().find(|(k, _)| k == HERITAGE_WEBSITE) {
+        keys.push(shared_key(HERITAGE_WEBSITE, value));
+    }
+    keys
+}
+
+/// Whether a key counted `count` times, by [shared_osm_keys] over
+/// OSM features or by [email_word_keys] over distinct email addresses,
+/// is shared.
+pub(super) fn is_shared_count(count: u64) -> bool {
+    count > MAX_OSM_SHARE as u64
+}
+
 /// The OSM values of each family, as `family` and the trimmed,
 /// lowercased value joined by a tab, that more than [MAX_OSM_SHARE]
-/// of the features `osm` carry.
+/// of the features `osm` carry. `make_edits` counts the same keys
+/// on disk, see [shared_osm_keys].
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn shared_osm_values<'a>(osm: impl Iterator<Item = &'a Tags>) -> HashSet<String> {
-    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut counts: HashMap<String, u64> = HashMap::new();
     for tags in osm {
-        for family in FAMILIES {
-            if let Some((_, value)) = osm_value(tags, family) {
-                *counts.entry(shared_key(family, value)).or_default() += 1;
-            }
-        }
-        if let Some((_, value)) = tags.iter().find(|(k, _)| k == HERITAGE_WEBSITE) {
-            *counts
-                .entry(shared_key(HERITAGE_WEBSITE, value))
-                .or_default() += 1;
+        for key in shared_osm_keys(tags) {
+            *counts.entry(key).or_default() += 1;
         }
     }
     counts
         .into_iter()
-        .filter(|(_, n)| *n > MAX_OSM_SHARE)
+        .filter(|(_, n)| is_shared_count(*n))
         .map(|(k, _)| k)
         .collect()
+}
+
+/// The normalized email addresses of one AllThePlaces source, for
+/// [shared_email_words].
+pub(super) fn email_addresses(tags: &Tags) -> Vec<String> {
+    let source = ContactSource { tags };
+    let Some(value) = source.value("email") else {
+        return Vec::new();
+    };
+    value.split(';').filter_map(normalize_email).collect()
 }
 
 /// The words of email addresses that AllThePlaces gives in more than
 /// two places at one domain, in the same position of a two-word local
 /// part, such as `migrol` in `migrol.sion@migrolino.com` and
 /// `migrol.martigny@migrolino.com`. Such a word names the chain or the
-/// store, not a person; see [is_personal_email].
+/// store, not a person; see [is_personal_email]. `make_edits` counts
+/// the distinct addresses ([email_addresses]) and their words
+/// ([email_word_keys]) on disk.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn shared_email_words<'a>(atp: impl Iterator<Item = &'a Tags>) -> HashSet<String> {
     let mut seen: HashSet<String> = HashSet::new();
-    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut counts: HashMap<String, u64> = HashMap::new();
     for tags in atp {
-        let source = ContactSource { tags };
-        let Some(value) = source.value("email") else {
-            continue;
-        };
-        for part in value.split(';') {
-            let Some(email) = normalize_email(part) else {
-                continue;
-            };
+        for email in email_addresses(tags) {
             if !seen.insert(email.clone()) {
                 continue;
             }
@@ -134,14 +158,14 @@ pub(super) fn shared_email_words<'a>(atp: impl Iterator<Item = &'a Tags>) -> Has
     }
     counts
         .into_iter()
-        .filter(|(_, n)| *n > MAX_OSM_SHARE)
+        .filter(|(_, n)| is_shared_count(*n))
         .map(|(k, _)| k)
         .collect()
 }
 
 /// For a normalized address with a two-word local part, a key per
 /// word: `email`, the domain, the word's position and the word.
-fn email_word_keys(email: &str) -> Vec<String> {
+pub(super) fn email_word_keys(email: &str) -> Vec<String> {
     let Some((local, domain)) = email.split_once('@') else {
         return Vec::new();
     };
