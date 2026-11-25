@@ -94,6 +94,24 @@ const FORMER_BRAND_FACTOR: f64 = 0.96;
 /// evidence: an address is shared by every business in a building.
 const ADDRESS_FACTOR: f64 = 0.9;
 
+/// The factor for a candidate whose phone numbers, email addresses
+/// and websites don't agree with ours, or when we have no descriptive
+/// ones. Just below 1.0, so that among candidates with the same evidence,
+/// such as two OSM offices of our brand, the one with our phone number
+/// wins over one up to about 20 m closer. OSM often maps two offices
+/// of one agency, such as its sales and its property management, where
+/// ATP lists one ([brawer/osmdiffs#1049]). It applies to every rule
+/// but `official_id` and `contact`, so the order of the other rules
+/// stays the same, but a `contact` match ([CONTACT_FACTOR]) now wins
+/// over a `brand:wikidata` match at about the same distance. ATP
+/// features without contacts get it too, so that their scores stay
+/// comparable with those of features with contacts when several
+/// features of a spider compete for one OSM feature
+/// ([Matcher::is_exclusive]).
+///
+/// [brawer/osmdiffs#1049]: https://github.com/brawer/osmdiffs/issues/1049
+const CONTACT_DISAGREES_FACTOR: f64 = 0.95;
+
 /// Address evidence counts only up to this distance.
 const ADDRESS_MAX_METERS: f64 = 150.0;
 
@@ -232,9 +250,13 @@ const COLOCATED_METERS: f64 = 25.0;
 /// each other may share one ([Matcher::colocated_radius]), and so may
 /// features with a shared contact or official ID ([Matcher::may_share]).
 ///
-/// Contacts that differ never lower a score: about one in six
-/// right `brand:wikidata` matches has different numbers on the two
-/// sides.
+/// Every candidate that doesn't share a descriptive phone number,
+/// email address or website with the ATP feature gets
+/// [CONTACT_DISAGREES_FACTOR] on top, so that one whose phone agrees
+/// wins over a slightly closer one whose doesn't. This is only a
+/// preference: about one in six right `brand:wikidata` matches has
+/// different numbers on the two sides, so differing contacts never
+/// rule a candidate out.
 pub struct PoiMatcher<'a> {
     center: Point,
     /// Usually a single ID; see [find_brand_wikidata].
@@ -364,9 +386,6 @@ impl<'a> PoiMatcher<'a> {
         if !self.brand_wikidata.is_empty() && osm_has_brand {
             let osm_brand: Vec<u64> = osm_brand.collect();
             if osm_brand.iter().any(|id| self.brand_wikidata.contains(id)) {
-                // TODO(#1049): Prefer a candidate whose phone, email or
-                // website agrees over a closer one that only shares the
-                // brand, as when OSM maps two offices of one agency.
                 return (1.0, "brand_wikidata");
             }
             if osm_brand
@@ -667,7 +686,14 @@ impl Matcher for PoiMatcher<'_> {
         {
             return 0.0;
         }
-        factor * geo_point_distance_score(&self.center, &centroid, 400.0)
+        let contact = if rule == "contact"
+            || (!self.contacts.is_empty() && self.contacts.agrees(candidate.tags()))
+        {
+            1.0
+        } else {
+            CONTACT_DISAGREES_FACTOR
+        };
+        factor * contact * geo_point_distance_score(&self.center, &centroid, 400.0)
     }
 }
 
@@ -1067,8 +1093,19 @@ mod tests {
             ],
         );
         assert_eq!(vetoed, 0.0);
-        let brand = score(&m, &[("brand:wikidata", "Q2"), ("shop", "florist")]);
+        let brand = score(
+            &m,
+            &[
+                ("brand:wikidata", "Q2"),
+                ("shop", "florist"),
+                ("contact:phone", "+41 55 210 63 10"),
+            ],
+        );
         assert!(brand > same, "{brand}");
+        // Without our phone, a brand match ranks below a contact match
+        // at the same distance (#1049).
+        let brand_only = score(&m, &[("brand:wikidata", "Q2"), ("shop", "florist")]);
+        assert!(brand_only < same, "{brand_only}");
 
         // No brand:wikidata and no contacts: no matcher at all.
         let bare = atp(&[("shop", "florist")]);
@@ -1080,6 +1117,119 @@ mod tests {
             PoiMatcher::for_place(&street_only, &Nondescript::none(), &NO_DOMAINS, &NO_NSI)
                 .is_none()
         );
+    }
+
+    /// Among OSM features of our brand, one whose phone or website
+    /// agrees with ours wins over a slightly closer one whose doesn't,
+    /// as for two offices of one estate agency (#1049). Without our
+    /// contacts, or far away, distance decides.
+    #[test]
+    fn test_poi_matcher_prefers_agreeing_contact() {
+        use crate::tables::{Feature, StringPool};
+        use s2::{cellid::CellID, latlng::LatLng};
+        use tempfile::TempDir;
+        use wkb::writer::{WriteOptions, write_point};
+
+        let dir = TempDir::new().expect("tempdir");
+        let strings = [
+            "brand:wikidata",
+            "office",
+            "estate_agent",
+            "phone",
+            "website",
+            "Q1",
+            "+33 1 69 34 93 94",
+            "+33 1 69 34 93 95",
+            "https://www.orpi.com/longjumeau/",
+        ];
+        let pool = StringPool::create(
+            strings.iter().map(|s| s.to_string()),
+            dir.path(),
+            &dir.path().join("strings"),
+        )
+        .expect("StringPool::create");
+        let s2_cell_id = CH_CLOTHES_ATP.s2_cell_id;
+        // Scores an OSM feature `meters` north of the ATP feature.
+        let score = |matcher: &PoiMatcher, meters: f64, tags: &[(&str, &str)]| {
+            let mut flat_tags = Vec::with_capacity(tags.len() * 2);
+            for (k, v) in tags {
+                flat_tags.push(pool.lookup(k).expect("key in pool") as u32);
+                flat_tags.push(pool.lookup(v).expect("value in pool") as u32);
+            }
+            let ll = LatLng::from(CellID(s2_cell_id));
+            let lat = ll.lat.deg() + meters / 111_195.0;
+            let mut geometry_wkb = Vec::new();
+            write_point(
+                &mut geometry_wkb,
+                &geo::Point::new(ll.lng.deg(), lat),
+                &WriteOptions {
+                    endianness: wkb::Endianness::LittleEndian,
+                },
+            )
+            .expect("wkb encode");
+            let feature = Feature {
+                id: 1,
+                tags: flat_tags,
+                geometry_wkb,
+                ..Default::default()
+            };
+            matcher.score_osm_candidate(&OsmCandidate {
+                feature: &feature,
+                strings: &pool,
+            })
+        };
+        let atp = |tags: &[(&str, &str)]| Place {
+            s2_cell_id,
+            spider: String::from("orpi"),
+            mask: MatchMask::SHOP,
+            fetched: test_timestamp(),
+            source_uri: None,
+            shape_wkb: test_shape(s2_cell_id),
+            tags: self::tags(tags),
+        };
+        let gestion = [
+            ("brand:wikidata", "Q1"),
+            ("office", "estate_agent"),
+            ("phone", "+33 1 69 34 93 95"),
+        ];
+        let immobilier = [
+            ("brand:wikidata", "Q1"),
+            ("office", "estate_agent"),
+            ("phone", "+33 1 69 34 93 94"),
+        ];
+        let by_website = [
+            ("brand:wikidata", "Q1"),
+            ("office", "estate_agent"),
+            ("website", "https://www.orpi.com/longjumeau/"),
+        ];
+
+        let orpi = atp(&[
+            ("addr:country", "FR"),
+            ("brand:wikidata", "Q1"),
+            ("office", "estate_agent"),
+            ("phone", "+33 1 69 34 93 94"),
+            ("website", "https://www.orpi.com/longjumeau/"),
+        ]);
+        let m = PoiMatcher::for_place(&orpi, &Nondescript::none(), &NO_DOMAINS, &NO_NSI)
+            .expect("matcher");
+        let closer = score(&m, 2.0, &gestion);
+        let agreeing = score(&m, 9.0, &immobilier);
+        assert!(agreeing > closer, "{agreeing} <= {closer}");
+        assert!(score(&m, 9.0, &by_website) > closer);
+        // A shared phone outweighs a few meters, not a block.
+        assert!(score(&m, 2.0, &gestion) > score(&m, 40.0, &immobilier));
+        // Differing contacts lower a brand match only slightly.
+        assert!(closer > 0.9, "{closer}");
+
+        // Without contacts of our own, the closer one wins.
+        let bare = atp(&[
+            ("addr:country", "FR"),
+            ("brand:wikidata", "Q1"),
+            ("office", "estate_agent"),
+        ]);
+        let m = PoiMatcher::for_place(&bare, &Nondescript::none(), &NO_DOMAINS, &NO_NSI)
+            .expect("matcher");
+        assert!(score(&m, 2.0, &gestion) > score(&m, 9.0, &immobilier));
     }
 
     /// Brand name evidence: an equal `brand` name matches when the
@@ -1662,10 +1812,9 @@ mod tests {
         };
         let (same, rule) = score(&m, &at(&[("shop", "car"), ("name", "Imperial Toyota")]));
         assert_eq!(rule, "address");
-        assert!(
-            same > ADDRESS_FACTOR - 0.01 && same <= ADDRESS_FACTOR,
-            "{same}"
-        );
+        // Times CONTACT_DISAGREES_FACTOR, as the dealer has no contacts.
+        let address = ADDRESS_FACTOR * CONTACT_DISAGREES_FACTOR;
+        assert!(same > address - 0.01 && same <= address, "{same}");
         // No name: fine, this close.
         assert_eq!(score(&m, &at(&[("shop", "car")])).0, same);
         // Another dealer of the same brand at the same address.

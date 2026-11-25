@@ -819,6 +819,9 @@ until the full pipeline was proven out:
   [`notes/2026-11-06-brand-domains.md`](notes/2026-11-06-brand-domains.md)
   [`notes/2026-11-06-website-matching.md`](notes/2026-11-06-website-matching.md)
   and [`notes/2026-11-08-exclusive-poi-matching.md`](notes/2026-11-08-exclusive-poi-matching.md));
+  a candidate whose phone, email or website agrees wins over a slightly
+  closer one, see
+  [`notes/2026-11-25-agreeing-contacts.md`](notes/2026-11-25-agreeing-contacts.md));
   for how street addresses are compared, see
   [`notes/2026-11-17-street-addresses.md`](notes/2026-11-17-street-addresses.md)
   and [`notes/2026-11-17-address-evidence.md`](notes/2026-11-17-address-evidence.md));
