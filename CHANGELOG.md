@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.9.0](https://github.com/brawer/osmdiffs/compare/v0.8.19...v0.9.0) (2026-11-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **edits:** remove suggest_edits and its tiles ([#1033](https://github.com/brawer/osmdiffs/issues/1033))
+* drop most OSM tags from conflated detail features ([#1028](https://github.com/brawer/osmdiffs/issues/1028))
+* **conflate:** `match.evidence.agreeing` in conflated.parquet is now `match.evidence.agreeing_tags`.
+* **spider-stats:** split `invalid` into `no_geometry`, `bad_geometry` and `no_kind` ([#1013](https://github.com/brawer/osmdiffs/issues/1013))
+
+### 🆕 Enhancements
+
+* add osm:version to conflated detail features ([#1027](https://github.com/brawer/osmdiffs/issues/1027)) ([7afe925](https://github.com/brawer/osmdiffs/commit/7afe9259482d62dd80bd3b1229ff7d868495697b))
+* **atp:** use older data for spiders that crashed or didn't finish ([#1023](https://github.com/brawer/osmdiffs/issues/1023)) ([448779a](https://github.com/brawer/osmdiffs/commit/448779a06520e7bb0bd743290023308bbf38b551))
+* **conflate:** add atp.fetched.source_uri ([#1034](https://github.com/brawer/osmdiffs/issues/1034)) ([619ef00](https://github.com/brawer/osmdiffs/commit/619ef0035e58c1fd3a4637f9c5ca97daa5fe01ea))
+* **conflate:** record all agreeing rules, and the tags that disagree ([#1022](https://github.com/brawer/osmdiffs/issues/1022)) ([a21af64](https://github.com/brawer/osmdiffs/commit/a21af64ea1599ced309bca4159ea33933f7dafb3))
+* drop most OSM tags from conflated detail features ([#1028](https://github.com/brawer/osmdiffs/issues/1028)) ([1e09380](https://github.com/brawer/osmdiffs/commit/1e0938065c7443b12699d46364cdd96327446a84))
+* **edits:** count new places per spider, and review spiders after each weekly run ([#1041](https://github.com/brawer/osmdiffs/issues/1041)) ([8159215](https://github.com/brawer/osmdiffs/commit/81592150a1dd9ed3140abad8ecfc2b0c1e584ef6))
+* **edits:** new edits step writing edits.parquet ([#1036](https://github.com/brawer/osmdiffs/issues/1036)) ([2bbc499](https://github.com/brawer/osmdiffs/commit/2bbc4992b891170ec9647aac177728d240a413f6))
+* **edits:** opening-hours modifies with a per-spider gate ([#1037](https://github.com/brawer/osmdiffs/issues/1037)) ([2297289](https://github.com/brawer/osmdiffs/commit/2297289b5220630effa5f10a6bffeb701a514caf))
+* **edits:** propose new places that OSM lacks ([#1040](https://github.com/brawer/osmdiffs/issues/1040)) ([5393e52](https://github.com/brawer/osmdiffs/commit/5393e528037cde75ad4f544e1e2d2e464b0e0f3d))
+* log how spiders changed since last week ([#1024](https://github.com/brawer/osmdiffs/issues/1024)) ([23cc39a](https://github.com/brawer/osmdiffs/commit/23cc39a336e9974b7161105d731f61feb84776f3))
+* **matchers:** match insurance, estate agent, tax and financial advisor offices ([#1048](https://github.com/brawer/osmdiffs/issues/1048)) ([e253b4e](https://github.com/brawer/osmdiffs/commit/e253b4e3ae60ca0c47c53a252b22367f06c93e44))
+* **matching:** match charge points, and hold back chargepoint ([#1014](https://github.com/brawer/osmdiffs/issues/1014)) ([f113935](https://github.com/brawer/osmdiffs/commit/f1139353147034b077db947d9b680b577bf61a20))
+* **matching:** match parcel lockers ([#1030](https://github.com/brawer/osmdiffs/issues/1030)) ([64f6037](https://github.com/brawer/osmdiffs/commit/64f6037b92475c5b67dd9d47af5b167c0f2d1c33))
+* **matching:** match postal partners to their host shop ([#1031](https://github.com/brawer/osmdiffs/issues/1031)) ([72b24ca](https://github.com/brawer/osmdiffs/commit/72b24ca78f08758bdcff6acbd749b48af08d52bf)), closes [#1016](https://github.com/brawer/osmdiffs/issues/1016)
+* **matching:** prefer the POI candidate whose contact agrees ([#1053](https://github.com/brawer/osmdiffs/issues/1053)) ([d664d73](https://github.com/brawer/osmdiffs/commit/d664d737e3584409d4efec8407d4dfae73b3d91e))
+* **spider-stats:** split `invalid` into `no_geometry`, `bad_geometry` and `no_kind` ([#1013](https://github.com/brawer/osmdiffs/issues/1013)) ([985392f](https://github.com/brawer/osmdiffs/commit/985392f9575819d299d817f39b4519c0556227c0))
+
+
+### 🐞 Bug Fixes
+
+* **deletion:** compare the main category, not only the match mask ([#1011](https://github.com/brawer/osmdiffs/issues/1011)) ([cad49f4](https://github.com/brawer/osmdiffs/commit/cad49f4d13fa5d4945cc571b7d41d4b13cbcc6f7))
+* **deps:** update parquet and arrow to 60.2.0 for RUSTSEC-2026-0595 ([#1052](https://github.com/brawer/osmdiffs/issues/1052)) ([87c1014](https://github.com/brawer/osmdiffs/commit/87c1014cd10ed01bb02acfea852711088589862c))
+* **deps:** update url to 2.5.9 for RUSTSEC-2026-0592 ([#1035](https://github.com/brawer/osmdiffs/issues/1035)) ([4752c56](https://github.com/brawer/osmdiffs/commit/4752c56d7ece463ac8f000c66840f59c2b93b44e))
+* round coordinates when packing them into the coord table ([#1029](https://github.com/brawer/osmdiffs/issues/1029)) ([330af3c](https://github.com/brawer/osmdiffs/commit/330af3c41dae31a56915341bfd9bda93e22a36ff))
+
+
+### 📚 Documentation
+
+* **notes:** ideas for finding closed places with better precision ([#1039](https://github.com/brawer/osmdiffs/issues/1039)) ([7fa931f](https://github.com/brawer/osmdiffs/commit/7fa931f14921b9a90de75e1b0b6f34ec0d9477f1))
+* **notes:** plan for edits.parquet ([#1032](https://github.com/brawer/osmdiffs/issues/1032)) ([d9af3cd](https://github.com/brawer/osmdiffs/commit/d9af3cd021cf0ec2fe26b991b6ed1a6a752bf0aa))
+* **notes:** status of the edits.parquet plan, with PRs and evals ([#1043](https://github.com/brawer/osmdiffs/issues/1043)) ([ab64b0b](https://github.com/brawer/osmdiffs/commit/ab64b0b187dd5a2fb680aa7f2fcfad6564e7fbc4))
+
+
+### 🚧 Maintenance
+
+* **edits:** remove suggest_edits and its tiles ([#1033](https://github.com/brawer/osmdiffs/issues/1033)) ([b09bb70](https://github.com/brawer/osmdiffs/commit/b09bb707028cf7c108c7fc648b9ee2d2ca316679))
+
 ## [0.8.19](https://github.com/brawer/osmdiffs/compare/v0.8.18...v0.8.19) (2026-11-19)
 
 
