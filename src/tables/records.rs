@@ -73,7 +73,7 @@ impl RecordReader {
     }
 
     /// Iterate over the records in this spool file.
-    pub fn iter(&self) -> Result<impl Iterator<Item = Result<Vec<u8>>>> {
+    pub fn iter(&self) -> Result<impl Iterator<Item = Result<Vec<u8>>> + use<>> {
         let mut file = File::open(&self.path)
             .with_context(|| format!("failed to open spool file {}", self.path.display()))?;
         file.seek(SeekFrom::Start(HEADER_SIZE as u64))
