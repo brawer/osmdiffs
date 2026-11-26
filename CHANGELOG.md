@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.9.1](https://github.com/brawer/osmdiffs/compare/v0.9.0...v0.9.1) (2026-11-26)
+
+
+### 🐞 Bug Fixes
+
+* **edits:** keep make_edits heap independent of matched rows ([#1060](https://github.com/brawer/osmdiffs/issues/1060)) ([2e188aa](https://github.com/brawer/osmdiffs/commit/2e188aaa0dc755695a91b94ae6b559999e491b0f))
+* **edits:** keep make_edits' heap independent of the matched rows ([2e188aa](https://github.com/brawer/osmdiffs/commit/2e188aaa0dc755695a91b94ae6b559999e491b0f)), closes [#1059](https://github.com/brawer/osmdiffs/issues/1059)
+
+
+### 🚧 Maintenance
+
+* **ci:** Bump astral-sh/setup-uv from 10.3.3 to 10.4.0 ([#1058](https://github.com/brawer/osmdiffs/issues/1058)) ([2713fdb](https://github.com/brawer/osmdiffs/commit/2713fdb5c98345f2ce200af6d2ede7261af934a4))
+* **ci:** Bump EmbarkStudios/cargo-deny-action from 2.1.1 to 2.1.3 ([#1055](https://github.com/brawer/osmdiffs/issues/1055)) ([298ea73](https://github.com/brawer/osmdiffs/commit/298ea7313e3cebee319ccb82e29a27e0fb587948))
+* **ci:** Bump ossf/scorecard-action from 2.5.0 to 2.6.0 ([#1057](https://github.com/brawer/osmdiffs/issues/1057)) ([95bf11a](https://github.com/brawer/osmdiffs/commit/95bf11a464faab0eef8dfce06d8260beeeb46d53))
+* **ci:** Bump taiki-e/install-action from 2.90.4 to 2.90.8 ([#1056](https://github.com/brawer/osmdiffs/issues/1056)) ([ddb5fa5](https://github.com/brawer/osmdiffs/commit/ddb5fa50d851d470b1265a89b9ab53297f0e4076))
+* **ci:** Bump the codeql group across 1 directory with 3 updates ([#1054](https://github.com/brawer/osmdiffs/issues/1054)) ([875f233](https://github.com/brawer/osmdiffs/commit/875f23351ffcfa7f6b0aff5cda0a3148594439bf))
+
 ## [0.9.0](https://github.com/brawer/osmdiffs/compare/v0.8.19...v0.9.0) (2026-11-25)
 
 
