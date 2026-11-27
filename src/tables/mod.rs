@@ -37,7 +37,7 @@ pub use features::{Feature, FeatureToIndex, RelationMember};
 pub use geometry_store::GeometryStore;
 pub use geometry_table::GeometryTable;
 pub use graph::{Edge, GraphTable};
-pub use records::{RecordReader, RecordWriter};
+pub use records::{RecordReader, RecordWriter, read_records, write_records};
 pub use string_counts::StringCounts;
 pub use string_pool::StringPool;
 pub use u64_set::U64Set;

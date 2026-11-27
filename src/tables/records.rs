@@ -78,20 +78,58 @@ impl RecordReader {
             .with_context(|| format!("failed to open spool file {}", self.path.display()))?;
         file.seek(SeekFrom::Start(HEADER_SIZE as u64))
             .with_context(|| format!("failed to seek spool file {}", self.path.display()))?;
-        let decoder = FrameDecoder::new(file);
-        Ok(RecordIter {
-            reader: BufReader::new(decoder),
-        })
+        Ok(read_records(file))
     }
 }
 
-// Private: not part of the public API, just the concrete iterator type
-// hidden behind `impl Iterator` in `RecordReader::iter()`.
-struct RecordIter {
-    reader: BufReader<FrameDecoder<File>>,
+/// Iterate over the records of an lz4 frame of length-prefixed records,
+/// as [RecordReader::iter] and [write_records] lay them out, read from
+/// `reader`, which starts at the frame.
+pub fn read_records<R: Read>(reader: R) -> impl Iterator<Item = Result<Vec<u8>>> + use<R> {
+    RecordIter {
+        reader: BufReader::new(FrameDecoder::new(reader)),
+    }
 }
 
-impl RecordIter {
+/// Write `records` to `writer` as one lz4 frame of length-prefixed
+/// records, readable with [read_records], and return how many there
+/// were. Unlike a [RecordWriter], this writes no file header, so that
+/// several frames can follow one another in the same file.
+pub fn write_records<W: Write, B: AsRef<[u8]>>(
+    writer: W,
+    records: impl IntoIterator<Item = B>,
+) -> Result<u64> {
+    let mut encoder = FrameEncoder::new(writer);
+    let mut count = 0;
+    for record in records {
+        write_record(&mut encoder, record.as_ref())?;
+        count += 1;
+    }
+    let mut writer = encoder.finish().context("failed to finish lz4 frame")?;
+    writer.flush().context("failed to flush records")?;
+    Ok(count)
+}
+
+/// Write a single record: its varint-encoded length, followed by its bytes.
+fn write_record(writer: &mut impl Write, record: &[u8]) -> Result<()> {
+    let mut len_buf = Vec::with_capacity(10);
+    prost::encoding::encode_varint(record.len() as u64, &mut len_buf);
+    writer
+        .write_all(&len_buf)
+        .context("failed to write record length")?;
+    writer
+        .write_all(record)
+        .context("failed to write record body")?;
+    Ok(())
+}
+
+// Private: not part of the public API, just the concrete iterator type
+// hidden behind `impl Iterator` in `read_records()`.
+struct RecordIter<R: Read> {
+    reader: BufReader<FrameDecoder<R>>,
+}
+
+impl<R: Read> RecordIter<R> {
     /// Reads the raw bytes of a single varint off the stream (at most 10,
     /// since a u64 varint never needs more), then decodes them with prost's
     /// `decode_varint`. Returns `Ok(None)` on clean EOF at a record boundary.
@@ -130,7 +168,7 @@ impl RecordIter {
     }
 }
 
-impl Iterator for RecordIter {
+impl<R: Read> Iterator for RecordIter<R> {
     type Item = Result<Vec<u8>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -189,16 +227,7 @@ impl RecordWriter {
 
     /// Write a single record: its varint-encoded length, followed by its bytes.
     pub fn write(&mut self, record: &[u8]) -> Result<()> {
-        let mut len_buf = Vec::with_capacity(10);
-        prost::encoding::encode_varint(record.len() as u64, &mut len_buf);
-
-        self.encoder
-            .write_all(&len_buf)
-            .context("failed to write record length")?;
-        self.encoder
-            .write_all(record)
-            .context("failed to write record body")?;
-
+        write_record(&mut self.encoder, record)?;
         self.count += 1;
         Ok(())
     }

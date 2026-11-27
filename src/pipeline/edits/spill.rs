@@ -1,17 +1,23 @@
 //! A simple external sort for the passes of `make_edits`: items go in
 //! in any order and come out sorted by key, while the heap holds at
 //! most one buffer of encoded items, plus one decoded item per sorted
-//! run during the merge. Runs are spool files in a temporary directory
-//! under the workdir, removed when the spill is dropped.
+//! run during the merge. All runs go into a single temporary spool file
+//! under the workdir, one lz4 frame after the other, which is removed
+//! when the spill is dropped. During the merge, every run reads its own
+//! frame with positional reads, so a spill holds one file descriptor no
+//! matter how many runs it writes.
 
-use crate::tables::{RecordReader, RecordWriter};
+use crate::tables::{read_records, write_records};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::fs::File;
+use std::io::{Read, Seek};
 use std::path::Path;
-use tempfile::TempDir;
+use std::sync::Arc;
+use tempfile::{NamedTempFile, TempPath};
 
 /// What the allocator adds to each buffered record, roughly, so that
 /// the budget of a spill bounds its real heap.
@@ -21,11 +27,12 @@ const ALLOCATION_OVERHEAD: usize = 32;
 /// in no particular order, so a caller that needs a stable order puts
 /// a sequence number into the key.
 pub(super) struct Spill<K, T> {
-    dir: TempDir,
+    file: NamedTempFile,
     budget: usize,
     buffered: Vec<(K, Vec<u8>)>,
     buffered_bytes: usize,
-    runs: Vec<RecordReader>,
+    /// Where each run is in `file`, as a range of bytes.
+    runs: Vec<std::ops::Range<u64>>,
     len: u64,
     _item: std::marker::PhantomData<T>,
 }
@@ -38,12 +45,12 @@ where
     /// A spill that writes its runs below `workdir`, buffering about
     /// `budget` bytes of encoded items at a time.
     pub fn new(workdir: &Path, name: &str, budget: usize) -> Result<Spill<K, T>> {
-        let dir = tempfile::Builder::new()
+        let file = tempfile::Builder::new()
             .prefix(&format!("edits-{name}-"))
-            .tempdir_in(workdir)
-            .with_context(|| format!("could not create a spill directory in {workdir:?}"))?;
+            .tempfile_in(workdir)
+            .with_context(|| format!("could not create a spill file in {workdir:?}"))?;
         Ok(Spill {
-            dir,
+            file,
             budget,
             buffered: Vec::new(),
             buffered_bytes: 0,
@@ -73,15 +80,17 @@ where
             return Ok(());
         }
         self.buffered.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        let path = self.dir.path().join(format!("run-{}", self.runs.len()));
-        let mut writer = RecordWriter::create(&path)?;
-        for (_, record) in self.buffered.drain(..) {
-            writer.write(&record)?;
-        }
-        writer.close()?;
+        let start = self.runs.last().map_or(0, |run| run.end);
+        let file = self.file.as_file_mut();
+        write_records(
+            &mut *file,
+            self.buffered.drain(..).map(|(_, record)| record),
+        )
+        .with_context(|| format!("failed to write a run to {:?}", self.file.path()))?;
+        let end = self.file.as_file_mut().stream_position()?;
         self.buffered = Vec::new();
         self.buffered_bytes = 0;
-        self.runs.push(RecordReader::open(&path)?);
+        self.runs.push(start..end);
         Ok(())
     }
 
@@ -92,15 +101,23 @@ where
             self.buffered.sort_unstable_by(|a, b| a.0.cmp(&b.0));
             let buffered = std::mem::take(&mut self.buffered);
             return Ok(Sorted {
-                _dir: self.dir,
+                _path: self.file.into_temp_path(),
                 source: Source::Memory(buffered.into_iter()),
             });
         }
         self.write_run()?;
+        let (file, path) = self.file.into_parts();
+        let file = Arc::new(file);
         let mut runs = Vec::with_capacity(self.runs.len());
         let mut heap = BinaryHeap::with_capacity(self.runs.len());
-        for (i, reader) in self.runs.iter().enumerate() {
-            let mut records: Box<dyn Iterator<Item = Result<Vec<u8>>>> = Box::new(reader.iter()?);
+        for (i, range) in self.runs.iter().enumerate() {
+            let chunk = Chunk {
+                file: Arc::clone(&file),
+                pos: range.start,
+                end: range.end,
+            };
+            let mut records: Box<dyn Iterator<Item = Result<Vec<u8>>>> =
+                Box::new(read_records(chunk));
             if let Some(record) = records.next() {
                 let (key, item): (K, T) = rmp_serde::from_slice(&record?)?;
                 heap.push(Reverse(Head { key, item, run: i }));
@@ -108,9 +125,32 @@ where
             runs.push(records);
         }
         Ok(Sorted {
-            _dir: self.dir,
+            _path: path,
             source: Source::Merge { runs, heap },
         })
+    }
+}
+
+/// One run of a spill file: a range of bytes, read with positional
+/// reads so that all runs can share the file, and its descriptor.
+struct Chunk {
+    file: Arc<File>,
+    pos: u64,
+    end: u64,
+}
+
+impl Read for Chunk {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let len = buf.len().min((self.end - self.pos) as usize);
+        if len == 0 {
+            return Ok(0);
+        }
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(&*self.file, &mut buf[..len], self.pos)?;
+        #[cfg(windows)]
+        let n = std::os::windows::fs::FileExt::seek_read(&*self.file, &mut buf[..len], self.pos)?;
+        self.pos += n as u64;
+        Ok(n)
     }
 }
 
@@ -153,7 +193,7 @@ enum Source<K, T> {
 
 /// The sorted items of a [Spill], as `(key, item)`.
 pub(super) struct Sorted<K, T> {
-    _dir: TempDir,
+    _path: TempPath,
     source: Source<K, T>,
 }
 
@@ -253,6 +293,26 @@ mod tests {
         assert_eq!(sorted(200, &items)?, expected);
         assert_eq!(sorted(1, &items)?, expected);
         assert!(sorted(1, &[])?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn many_runs_share_one_file_descriptor() -> Result<()> {
+        let fds = || std::fs::read_dir("/proc/self/fd").map(|d| d.count());
+        let dir = tempfile::tempdir()?;
+        let mut spill: Spill<u32, u32> = Spill::new(dir.path(), "test", 1)?;
+        for i in (0..5000u32).rev() {
+            spill.push(i, &i)?;
+        }
+        assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);
+        let before = fds()?;
+        let sorted = spill.sorted()?;
+        // Other tests open and close files concurrently, so allow some
+        // slack; one descriptor per run would add thousands.
+        assert!(fds()? < before + 100);
+        let out: Vec<u32> = sorted.map(|r| r.map(|(k, _)| k)).collect::<Result<_>>()?;
+        assert_eq!(out, (0..5000).collect::<Vec<_>>());
         Ok(())
     }
 
