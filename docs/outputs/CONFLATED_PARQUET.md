@@ -247,8 +247,11 @@ most like the AllThePlaces feature, nearest first:
   `brand`, `official_name`, `alt_name`, `short_name` or `name:*`
   shares a distinctive word with the AllThePlaces feature's: a word of
   at least four letters that doesn't merely say what kind of place it
-  is, such as “Hotel” or “Restaurant”. This catches a hotel that
-  OpenStreetMap maps as its restaurant.
+  is, such as “Hotel” or “Restaurant”, and that isn't in either
+  feature's `addr:city`, `addr:street`, `addr:suburb`, `addr:place`,
+  `addr:street_address` or `addr:full`, so that an estate agent with
+  the town in its `official_name` isn't like the bank next door. This
+  catches a hotel that OpenStreetMap maps as its restaurant.
 
 One feature that is both is listed once, as `category`. For
 `located_in`, the host itself doesn't count. Such a feature is often
