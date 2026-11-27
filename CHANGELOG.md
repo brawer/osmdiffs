@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/brawer/osmdiffs/compare/v0.9.1...v0.9.2) (2026-11-27)
+
+
+### 🐞 Bug Fixes
+
+* spill external-sort runs into one file ([#1062](https://github.com/brawer/osmdiffs/issues/1062)) ([35adc7a](https://github.com/brawer/osmdiffs/commit/35adc7a49bae0d997e2ce5c3b3cdd6b18cf0ec8a))
+
 ## [0.9.1](https://github.com/brawer/osmdiffs/compare/v0.9.0...v0.9.1) (2026-11-26)
 
 
