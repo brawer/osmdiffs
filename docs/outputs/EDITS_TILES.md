@@ -34,8 +34,8 @@ One point per edit, with only four properties:
 
 - `icon` — the [Maki](https://github.com/mapbox/maki) or
   [Temaki](https://github.com/rapideditor/temaki) icon for the kind of
-  place, such as `maki-cafe`. Always empty for now; see the
-  [plan](../notes/2026-11-28-edits-map.md#milestones).
+  place after the edit, such as `maki-cafe`, or empty; see
+  [Icons](#icons).
 - `action` — `modify` or `create`.
 - `topic` — the first of the edit's `topics`, such as `contact`.
 - `importance` — the edit's `importance`, rounded to two decimals.
@@ -91,22 +91,59 @@ m or more from the edit's point, the detail also has a line from it to
 the point, with only `id`, `action` and `part: "link"`. The points
 have no `part`.
 
+## Icons
+
+An edit's `icon` is the icon of the
+[id-tagging-schema](https://github.com/openstreetmap/id-tagging-schema)
+preset that best matches the element's tags after the edit (the
+OpenStreetMap tags with `changes` applied), the same presets that the
+iD editor uses. The pipeline downloads the latest release from npm
+with every run, and the provenance BOM of
+[`edits.parquet`](EDITS_PARQUET.md#data-provenance) names it.
+
+Matching follows iD's rules in a simplified form. A preset applies
+when the element has all of the preset's `tags`, and the preset is for
+points (a node or a create), areas or lines (a way), or areas or
+relations (a relation). Among those, the preset with the highest
+score wins: its `matchScore` (1 by default) for each tag with the
+preset's value, half that for each tag that the preset allows with any
+value (`shop=*`), and `matchScore` again for each matching tag of its
+`addTags`. So a preset with more matching tags wins, and of two with as
+many, the one with the higher `matchScore`. Presets for some countries
+only, such as `amenity/townhall/barangay-PH`, are left out.
+
+The icon is always a Maki or Temaki icon, since both sets are CC0. When
+the winning preset has an icon from another set, such as Font Awesome
+for `shop/convenience`, the edit gets the icon of the nearest parent
+preset that has a Maki or Temaki one (`maki-shop` from `shop`). Where
+there is none, as for `amenity/kindergarten`, `icon` is empty, and a
+map draws the dot only.
+
 ## Size
 
 Measured on `edits.parquet` of the 2026-11-23 planet run, with its 1.73
-million edits (1.13 million modifies, 594,000 creates), on a machine
-with 4 cores:
+million edits (1.13 million modifies, 594,000 creates), and
+id-tagging-schema 7.3.0, on a machine with 4 cores:
 
-- The archive is 940 MB: 146 MB for z0–12 and 794 MB for z13–14. The
+- 98.9% of the edits have an icon, from 264 different icons. The
+  18,884 without one are mostly kindergartens and childcare (6,800),
+  ice cream shops (7,500) and public bookcases (3,500), whose presets
+  have Font Awesome icons only, and about 700 edits of roads, which
+  have no preset for points or areas.
+- The archive is 986 MB: 172 MB for z0–12 and 814 MB for z13–14. The
   detail has 839,000 `link` lines beside the 1.73 million points.
-- **z0** holds 23,669 edits in 25 KB, every edit with
-  `importance >= 0.99`; none are dropped for size.
-- From z3 to z7, `--drop-densest-as-needed` thins out the densest
-  tiles: at z3, the tile over western Europe (3/4/2) keeps 86,600 of
-  its 356,000 edits. From z8 on, every tile has every edit.
-- The largest tile is 467 KB, at z2 (2/2/1, Europe and Africa, 183,000
-  points), under tippecanoe's 500 KB limit. The largest detail tile is
-  119 KB at z13 and 47 KB at z14, so the detail drops nothing.
-- Building takes about 7½ minutes: 16 s to write the GeoJSON layers,
-  1 min 39 s for the overview, 2 min 56 s for the detail, and 2 min
-  35 s for `tile-join`.
+- **z0** holds 23,669 edits in 43 KB, every edit with
+  `importance >= 0.99`; none are dropped for size, and neither are any
+  at z1.
+- From z2 to z7, `--drop-densest-as-needed` thins out the densest
+  tiles: the tile over Europe and Africa at z2 (2/2/1) keeps 113,800 of
+  its 164,500 edits with `importance >= 0.84`, and the one over
+  western Europe at z3 (3/4/2) 74,800 of 356,000. From z8 on, every
+  tile has every edit. Without icons, z2 dropped nothing, and z3 kept
+  86,600.
+- The largest tile is 430 KB, at z3 and z5, under tippecanoe's 500 KB
+  limit. The largest detail tile is 120 KB at z13 and 48 KB at z14,
+  so the detail drops nothing.
+- Building takes about 8 minutes: 28 s to write the GeoJSON layers,
+  1 min 51 s for the overview, 2 min 59 s for the detail, and 2 min
+  46 s for `tile-join`.

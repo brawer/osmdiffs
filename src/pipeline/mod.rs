@@ -39,10 +39,12 @@ mod download;
 mod edits;
 mod edits_tiles;
 mod held_back;
+mod id_presets;
 mod importance;
 mod inputs;
 mod logging;
 mod memstats;
+mod npm;
 mod nsi;
 mod osm;
 mod osm_views;
@@ -421,7 +423,7 @@ fn run_pipeline_steps(
     // into one layer. See `edits_tiles` and
     // docs/notes/2026-11-28-edits-map.md.
     let edits_layers = run_step("extract_edits_layers", || {
-        edits_tiles::extract_edits_layers(&edits, progress, workdir)
+        edits_tiles::extract_edits_layers(&edits, &id_presets::path(workdir), progress, workdir)
     })?;
     let edits_overview = run_step("render_edits_overview", || {
         tiles::render_tiles(
