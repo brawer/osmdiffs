@@ -3,7 +3,8 @@
 //! the same or a known pair (see [crate::matchers::category]), on any
 //! category key of either side, so that a fuel station with a shop
 //! agrees with one without; and the nearest one of any category
-//! whose name shares a distinctive word with the ATP feature's name.
+//! whose name shares a distinctive word with the ATP feature's name,
+//! other than the words of either address, such as the town.
 //! Written as `match.evidence.similar_osm` for `missing_in_osm` and
 //! `located_in` rows, so that the edits step doesn't propose a new
 //! feature where OSM likely has it already: under another name,
@@ -159,8 +160,6 @@ pub(super) fn name_words(name: &str) -> HashSet<String> {
 }
 
 /// The distinctive words of the names that `tags` give a place.
-// TODO(#1050): Leave out place names, such as the town in an `official_name`
-// like `Orpi Anma Gestion Immo Crosne`, which hold back unrelated creates.
 fn tag_words<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> HashSet<String> {
     let mut words = HashSet::new();
     for (k, v) in tags {
@@ -175,12 +174,57 @@ fn tag_words<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> HashSet<Stri
     words
 }
 
+/// Address keys whose words name a place, such as a town or a street,
+/// rather than the business. ATP gives `addr:street_address` or
+/// `addr:full` where it has no parsed address.
+const ADDRESS_KEYS: &[&str] = &[
+    "addr:city",
+    "addr:street",
+    "addr:suburb",
+    "addr:place",
+    "addr:street_address",
+    "addr:full",
+];
+
+/// The distinctive words of the address that `tags` give a place, in
+/// the sense of [name_words], so that they can be left out of the
+/// names: the town in an `official_name` like `Orpi Anma Gestion Immo
+/// Crosne` doesn't make it like `BNP Paribas Crosne`.
+fn address_words<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> HashSet<String> {
+    let mut words = HashSet::new();
+    for (k, v) in tags {
+        if ADDRESS_KEYS.contains(&k) {
+            words.extend(name_words(v));
+        }
+    }
+    words
+}
+
+/// Whether two places' name words share one that is in neither
+/// address.
+fn names_alike(
+    atp_words: &HashSet<String>,
+    atp_address: &HashSet<String>,
+    osm_words: &HashSet<String>,
+    osm_address: impl FnOnce() -> HashSet<String>,
+) -> bool {
+    let mut shared = atp_words
+        .intersection(osm_words)
+        .filter(|w| !atp_address.contains(*w))
+        .peekable();
+    if shared.peek().is_none() {
+        return false;
+    }
+    let osm_address = osm_address();
+    shared.any(|w| !osm_address.contains(w))
+}
+
 /// The OSM features within [SIMILAR_RADIUS_M] of `atp` that are most
 /// like it: the nearest one with a category that agrees with one of
 /// `atp`'s,
-/// and the nearest one whose name shares a word with `atp`'s, leaving
-/// out `host`, the feature that `atp` is located in. Each at most once,
-/// nearest first.
+/// and the nearest one whose name shares a word with `atp`'s that is
+/// in neither address (see [address_words]), leaving out `host`, the
+/// feature that `atp` is located in. Each at most once, nearest first.
 pub(super) fn nearest_similar(
     atp: &Place,
     host: Option<LocalFeatureRef>,
@@ -189,6 +233,7 @@ pub(super) fn nearest_similar(
     let atp_tags = || atp.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
     let atp_categories = categories(atp_tags());
     let words = tag_words(atp_tags());
+    let atp_address = address_words(atp_tags());
     if atp_categories.is_empty() && words.is_empty() {
         return Ok(Vec::new());
     }
@@ -221,7 +266,10 @@ pub(super) fn nearest_similar(
             let by_category = atp_categories
                 .iter()
                 .any(|a| osm_categories.iter().any(|o| categories_agree(a, o)));
-            let by_name = !words.is_empty() && !tag_words(candidate.tags()).is_disjoint(&words);
+            let by_name = !words.is_empty()
+                && names_alike(&words, &atp_address, &tag_words(candidate.tags()), || {
+                    address_words(candidate.tags())
+                });
             if !by_category && !by_name {
                 continue;
             }
@@ -289,5 +337,52 @@ mod tests {
             words("セブン-イレブン 八重瀬東風平西店"),
             ["イレブン", "八重瀬東風平西店"]
         );
+    }
+
+    fn set(words: &[&str]) -> HashSet<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn test_address_words() {
+        let tags = [
+            ("addr:city", "Magny-en-Vexin"),
+            ("addr:street", "Rue de Paris"),
+            ("addr:housenumber", "1234"),
+            ("name", "Laforêt"),
+        ];
+        assert_eq!(
+            address_words(tags.iter().copied()),
+            set(&["magny", "vexin", "paris"])
+        );
+        let tags = [("addr:full", "12 Grande Rue, 91560 Crosne")];
+        assert_eq!(
+            address_words(tags.iter().copied()),
+            set(&["grande", "crosne"])
+        );
+    }
+
+    #[test]
+    fn test_names_alike() {
+        // BNP Paribas in Crosne, and an estate agent nearby whose
+        // `official_name` has the town.
+        let bnp = tag_words([("name", "BNP Paribas Crosne"), ("brand", "BNP Paribas")].into_iter());
+        let orpi = tag_words(
+            [
+                ("name", "Orpi Eval Conseil"),
+                ("official_name", "Orpi Anma Gestion Immo Crosne"),
+            ]
+            .into_iter(),
+        );
+        assert!(names_alike(&bnp, &set(&[]), &orpi, || set(&[])));
+        assert!(!names_alike(&bnp, &set(&["crosne"]), &orpi, || set(&[])));
+        assert!(!names_alike(&bnp, &set(&[]), &orpi, || set(&["crosne"])));
+        // A word that is not in an address still counts.
+        assert!(names_alike(&bnp, &set(&["crosne"]), &bnp, || set(&[
+            "crosne"
+        ])));
+        // The OSM address isn't needed without a shared word.
+        let other = set(&["laforêt"]);
+        assert!(!names_alike(&bnp, &set(&[]), &other, || unreachable!()));
     }
 }
