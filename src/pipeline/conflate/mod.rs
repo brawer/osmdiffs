@@ -363,6 +363,12 @@ fn produce_rows(
     // missing.
     let missing_silenced: Mutex<HashSet<u64>> = Mutex::new(HashSet::new());
     let matched = MatchedSet::new(osm.index.len());
+    // Shopping malls that some ATP feature is `located_in`. The mall
+    // exists, so it is no deletion candidate, but no ATP feature
+    // matched it, so it doesn't count as matched for local coverage:
+    // an AEON mall hosting a shop says nothing about whether ATP covers
+    // AEON's other features nearby.
+    let mall_hosts = MatchedSet::new(osm.index.len());
     let mut coverage = AtpCoverage::default();
     // ATP features per spider that no matcher handles, and that get no
     // row in conflated.parquet.
@@ -412,7 +418,11 @@ fn produce_rows(
         }
         if let Some((r, rule)) = found {
             // The host exists, whether or not ATP has it.
-            matched.insert(r);
+            if rule == "mall" {
+                mall_hosts.insert(r);
+            } else {
+                matched.insert(r);
+            }
             located_in_rows.fetch_add(1, Ordering::Relaxed);
             let similar = similar::nearest_similar(atp, Some(r), osm)?;
             send_row(
@@ -767,7 +777,7 @@ fn produce_rows(
         }
     }
 
-    send_deletion_candidates(osm, &coverage, &matched, signals, &out)?;
+    send_deletion_candidates(osm, &coverage, &matched, &mall_hosts, signals, &out)?;
 
     let chance_start = Instant::now();
     diagnostics::chance_pairs(
@@ -830,11 +840,14 @@ impl MatchedSet {
 /// [local_coverage]: enough OSM features of their brand nearby must
 /// have been matched. That takes three steps: find the candidates,
 /// count the matched OSM features of their brands, and then send the
-/// candidates that pass.
+/// candidates that pass. The `hosts`, malls that an ATP feature is
+/// `located_in`, are never sent, but count as unmatched candidates for
+/// local coverage, as without their tenants.
 fn send_deletion_candidates(
     osm: &OsmFeatures,
     coverage: &AtpCoverage,
     matched: &MatchedSet,
+    hosts: &MatchedSet,
     signals: &Signals,
     out: &SyncSender<ParquetRow>,
 ) -> Result<()> {
@@ -889,6 +902,9 @@ fn send_deletion_candidates(
                 return Ok(None);
             };
             if found.keys.is_empty() {
+                if hosts.contains(r) {
+                    return Ok(None);
+                }
                 count_reason(found.reason);
                 let matching = MatchInfo::deletion_candidate(found.reason.as_str(), None);
                 send(feature, lng, lat, matching)?;
@@ -954,6 +970,9 @@ fn send_deletion_candidates(
                 })
                 .max_by(|a, b| a.share().total_cmp(&b.share()))
                 .unwrap_or_default();
+            if hosts.contains(*r) {
+                return Ok(());
+            }
             if best.share() < MIN_LOCAL_SHARE {
                 *dropped
                     .lock()

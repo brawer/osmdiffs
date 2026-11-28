@@ -34,7 +34,7 @@
 //! See `docs/notes/2026-11-09-departments.md` and
 //! `docs/notes/2026-11-28-mall-tenants.md`.
 
-use crate::matchers::category::main_category;
+use crate::matchers::category::{categories, categories_agree, main_category};
 use crate::matchers::post_partner::{self, PartnerHost, PostalBrand};
 use crate::matchers::{MatchMask, normalize_name, parse_wikidata_ids};
 use crate::places::{Place, PlaceReader};
@@ -217,11 +217,15 @@ pub(super) enum Host {
     /// `brand:wikidata` IDs, or a `name` or `brand` like one of these
     /// normalized `names` (see [same_business_name]), those of the ATP
     /// feature: OSM sometimes tags a store as `shop=mall`, such as the
-    /// Migros VOI in Kappel SO, and a store isn't `located_in` itself;
-    /// see [mall_host].
+    /// Migros VOI in Kappel SO, and a store isn't `located_in` itself.
+    /// Likewise a mall with another category that agrees with one of
+    /// `categories`, those of the ATP feature, such as a post office
+    /// that OSM tags `amenity=post_office` and `shop=mall`; see
+    /// [mall_host].
     Mall {
         brands: Vec<u64>,
         names: Vec<String>,
+        categories: Vec<String>,
     },
 }
 
@@ -343,10 +347,18 @@ impl Host {
                 let category = main_category(tags.clone());
                 category.is_some_and(|c| !is_not_host_category(&c)) && host.agrees(tags)
             }
-            Host::Mall { brands, names } => {
+            Host::Mall {
+                brands,
+                names,
+                categories: own,
+            } => {
                 main_category(tags.clone())
                     .is_some_and(|c| category_values(&c).any(|c| c == "shop=mall"))
                     && !brand_ids(tags.clone()).any(|id| brands.contains(&id))
+                    && !categories(tags.clone())
+                        .iter()
+                        .filter(|c| *c != "shop=mall")
+                        .any(|c| own.iter().any(|o| categories_agree(o, c)))
                     && !tags
                         .filter(|(k, _)| is_name_key(k))
                         .map(|(_, v)| normalize_name(v))
@@ -434,6 +446,7 @@ pub(super) fn mall_host(place: &Place) -> Option<Host> {
     Some(Host::Mall {
         brands: brand_ids(tags()).collect(),
         names,
+        categories: categories(tags()),
     })
 }
 
@@ -993,7 +1006,8 @@ mod tests {
             host,
             Host::Mall {
                 brands: vec![485814],
-                names: vec!["ａｕショップ イオンモール羽生".into()]
+                names: vec!["ａｕショップ イオンモール羽生".into()],
+                categories: vec!["shop=mobile_phone".into()],
             }
         );
         assert_eq!(host.rule(), "mall");
@@ -1038,6 +1052,20 @@ mod tests {
         let pathum_thani = [("shop", "mall"), ("name", "Big C Pathum Thani -บิ๊กซี ปทุมธานี")];
         assert!(!big_c.is_host(pathum_thani.iter().copied()));
         assert!(!big_c.is_host([("shop", "mall"), ("name", "บิ๊กซี อ่างทอง")].into_iter()));
+        // A post office that OSM also tags as a mall: Westford, MA,
+        // way/214006282.
+        let usps = mall_host(&place(
+            &[("amenity", "post_office"), ("branch", "WESTFORD")],
+            MatchMask::SHOP,
+        ))
+        .expect("a mall host");
+        let westford = [
+            ("amenity", "post_office"),
+            ("shop", "mall"),
+            ("name", "Westford Post Office"),
+        ];
+        assert!(!usps.is_host(westford.iter().copied()));
+        assert!(usps.is_host([("shop", "mall"), ("name", "Holyoke Mall")].into_iter()));
         // But the Pure pharmacy inside is a tenant.
         let pure = mall_host(&place(
             &[
