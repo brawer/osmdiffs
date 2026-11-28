@@ -1270,6 +1270,22 @@ pub(super) fn tenant_position(
                 Some((inside.x(), inside.y()))
             }
         }
+        // A relation with areas and other members, such as some malls
+        // in Japan: its areas.
+        Geometry::GeometryCollection(collection) => {
+            let areas: Vec<geo::Polygon<f64>> = collection
+                .iter()
+                .flat_map(|g| match g {
+                    Geometry::Polygon(p) => vec![p.clone()],
+                    Geometry::MultiPolygon(mp) => mp.0.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            if areas.is_empty() {
+                return None;
+            }
+            tenant_position(point, &geo::MultiPolygon(areas).into(), coarse)
+        }
         _ => None,
     }
 }
@@ -2369,6 +2385,19 @@ mod tests {
         let next = tenant_position(east(ZURICH, 60.0), &node, false).expect("a position");
         assert!((distance_m(next, ZURICH) - 2.0).abs() < 0.1);
         assert_eq!(tenant_position(east(ZURICH, 150.0), &node, false), None);
+        // A relation with an area and a node, such as エールエールA館,
+        // relation/18458744.
+        let collection = Geometry::GeometryCollection(geo::GeometryCollection(vec![
+            host.clone(),
+            Geometry::Point(Point::new(east(ZURICH, 500.0).0, east(ZURICH, 500.0).1)),
+        ]));
+        assert_eq!(tenant_position(inside, &collection, false), Some(inside));
+        assert!(tenant_position(outside, &collection, false).is_some());
+        let only_points =
+            Geometry::GeometryCollection(geo::GeometryCollection(vec![Geometry::Point(
+                Point::new(ZURICH.0, ZURICH.1),
+            )]));
+        assert_eq!(tenant_position(inside, &only_points, false), None);
         let coarse = tenant_position(near, &node, true).expect("a position");
         assert!((distance_m(coarse, ZURICH) - 2.0).abs() < 0.1);
     }
