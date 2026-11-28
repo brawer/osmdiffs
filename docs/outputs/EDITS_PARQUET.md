@@ -351,4 +351,7 @@ The file carries OpenStreetMap tags and IDs, so it is under the
 The file's key-value metadata `org.cyclonedx.bom` holds a
 [CycloneDX](https://cyclonedx.org/) bill of materials, as in
 [`conflated.parquet`](CONFLATED_PARQUET.md#data-provenance), naming
-the inputs and the code that made the file.
+the inputs and the code that made the file. It also names the
+release of [id-tagging-schema](https://github.com/openstreetmap/id-tagging-schema)
+that [`edits.pmtiles`](EDITS_TILES.md), drawn from this file, takes
+its icons from.

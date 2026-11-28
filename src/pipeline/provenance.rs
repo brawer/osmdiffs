@@ -162,7 +162,8 @@ pub fn build_bom_for_conflated_parquet(
         .context("could not read QRank provenance")?;
     let osmviews_metadata = read_cached_metadata(&pipeline::osm_views::OSMVIEWS, workdir)
         .context("could not read OSMViews provenance")?;
-    let nsi_metadata = pipeline::nsi::read_cached_metadata(workdir)
+    let nsi_metadata = pipeline::nsi::NSI
+        .read_cached_metadata(workdir)
         .context("could not read name-suggestion-index provenance")?;
 
     let anchor = format_rfc3339(anchor_timestamp(&atp_metadata, &osm_metadata));
@@ -213,10 +214,21 @@ pub fn build_bom_for_conflated_parquet(
 
 /// Builds the CycloneDX provenance document embedded in
 /// `edits.parquet`: the one of `conflated.parquet`, with `edits.parquet`
-/// as the output component. Its inputs are the same, since the edits
-/// come from `conflated.parquet` and nothing else.
+/// as the output component, since the edits come from
+/// `conflated.parquet`. It also lists the presets of id-tagging-schema,
+/// which `edits.pmtiles`, released with `edits.parquet` and drawn from
+/// it, takes the icon of each edit from; see `pipeline::id_presets`.
 pub fn build_bom_for_edits_parquet(workdir: &Path, pipeline_run_id: &str) -> Result<Value> {
     let mut bom = build_bom_for_conflated_parquet(workdir, pipeline_run_id, None)?;
+    let presets_metadata = pipeline::id_presets::ID_PRESETS
+        .read_cached_metadata(workdir)
+        .context("could not read id-tagging-schema provenance")?;
+    if let Some(components) = bom["components"].as_array_mut() {
+        components.push(id_presets_component(&presets_metadata));
+    }
+    if let Some(depends_on) = bom["dependencies"][0]["dependsOn"].as_array_mut() {
+        depends_on.push(json!(pipeline::id_presets::BOM_REF));
+    }
     let component = &mut bom["metadata"]["component"];
     component["bom-ref"] = json!("edits.parquet");
     component["name"] = json!("edits.parquet");
@@ -453,7 +465,7 @@ fn packaged_component(resource: &PackagedResource, metadata: &PackagedMetadata) 
 
 /// The name-suggestion-index, which matching uses for the names of
 /// brands, operators and networks; see `pipeline::nsi`.
-fn nsi_component(metadata: &pipeline::nsi::NsiMetadata) -> Value {
+fn nsi_component(metadata: &pipeline::npm::NpmMetadata) -> Value {
     use pipeline::nsi::{BOM_REF, LICENSE, LICENSE_URL};
     json!({
         "bom-ref": BOM_REF,
@@ -467,6 +479,33 @@ fn nsi_component(metadata: &pipeline::nsi::NsiMetadata) -> Value {
         "licenses": license(LICENSE, LICENSE_URL),
         "hashes": [{"alg": "SHA-256", "content": metadata.sha256}],
         "purl": format!("pkg:npm/name-suggestion-index@{}", metadata.version),
+        "data": [{"type": "dataset", "contents": {"url": metadata.url}}],
+        "externalReferences": [
+            {"type": "distribution", "url": metadata.url},
+            license_external_reference(LICENSE_URL),
+        ],
+    })
+}
+
+/// The presets of id-tagging-schema, which `edits.pmtiles` takes its
+/// icons from; see `pipeline::id_presets`.
+fn id_presets_component(metadata: &pipeline::npm::NpmMetadata) -> Value {
+    use pipeline::id_presets::{BOM_REF, ID_PRESETS, LICENSE, LICENSE_URL};
+    json!({
+        "bom-ref": BOM_REF,
+        "type": "data",
+        "name": ID_PRESETS.package,
+        "version": metadata.version,
+        "supplier": {
+            "name": "id-tagging-schema contributors",
+            "url": ["https://github.com/openstreetmap/id-tagging-schema"]
+        },
+        "licenses": license(LICENSE, LICENSE_URL),
+        "hashes": [{"alg": "SHA-256", "content": metadata.sha256}],
+        "purl": format!(
+            "pkg:npm/%40openstreetmap/id-tagging-schema@{}",
+            metadata.version
+        ),
         "data": [{"type": "dataset", "contents": {"url": metadata.url}}],
         "externalReferences": [
             {"type": "distribution", "url": metadata.url},
@@ -585,12 +624,46 @@ mod tests {
                 "sha256": "c6d2ef441a79c401dab2399c5737e14f4c5b0d5f766e4b00d201870b0ff997bd"
             }"#,
         )?;
-        for name in ["qrank.meta.json", "osmviews.meta.json", "nsi.meta.json"] {
+        for name in [
+            "qrank.meta.json",
+            "osmviews.meta.json",
+            "nsi.meta.json",
+            "id-presets.meta.json",
+        ] {
             let mut src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             src.push("tests/test_data");
             src.push(name);
             std::os::unix::fs::symlink(&src, workdir.join(name))?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_for_edits_parquet() -> Result<()> {
+        let workdir = TempDir::new()?;
+        write_fixtures(workdir.path())?;
+        let bom = build_bom_for_edits_parquet(workdir.path(), "test-run")?;
+        assert_eq!(bom["metadata"]["component"]["name"], "edits.parquet");
+        let presets = bom["components"]
+            .as_array()
+            .context("components")?
+            .iter()
+            .find(|c| c["bom-ref"] == "id-presets.json")
+            .context("no id-tagging-schema component")?;
+        assert_eq!(presets["name"], "@openstreetmap/id-tagging-schema");
+        assert_eq!(presets["version"], "7.3.0");
+        assert_eq!(
+            presets["purl"],
+            "pkg:npm/%40openstreetmap/id-tagging-schema@7.3.0"
+        );
+        assert_eq!(presets["licenses"][0]["license"]["id"], "ISC");
+        let depends_on = bom["dependencies"][0]["dependsOn"]
+            .as_array()
+            .context("dependsOn")?;
+        assert!(
+            depends_on.contains(&json!("id-presets.json")),
+            "{depends_on:?}"
+        );
         Ok(())
     }
 

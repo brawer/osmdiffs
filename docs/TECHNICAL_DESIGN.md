@@ -188,6 +188,7 @@ graph TD
     QRANK_SRC@{ shape: cloud, label: "QRank" }
     OSMVIEWS_SRC@{ shape: cloud, label: "OSMViews" }
     NSI_SRC@{ shape: cloud, label: "name-suggestion-index" }
+    PRESETS_SRC@{ shape: cloud, label: "id-tagging-schema" }
 
     subgraph INPUTS [Inputs]
         ATP_SRC
@@ -195,6 +196,7 @@ graph TD
         QRANK_SRC
         OSMVIEWS_SRC
         NSI_SRC
+        PRESETS_SRC
     end
     INPUTS --> FETCH_INPUTS("fetch_inputs<br/>(all in parallel)")
     FETCH_INPUTS --> ATP_ZIP[alltheplaces.zip]
@@ -204,6 +206,7 @@ graph TD
     FETCH_INPUTS --> QRANK_CSV[qrank.csv.gz]
     FETCH_INPUTS --> OSMVIEWS_TIFF[osmviews.tiff]
     FETCH_INPUTS --> NSI_JSON[nsi.json]
+    FETCH_INPUTS --> PRESETS_JSON[id-presets.json]
 
     ATP_ZIP --> IMPORT_ATP(import_atp) --> ATP_PARQUET[alltheplaces.parquet]
     ATP_FALLBACKS --> IMPORT_ATP
@@ -267,6 +270,7 @@ graph TD
     MAKE_EDITS --> EDITS_PARQUET[edits.parquet]
     EDITS_PARQUET --> UPLOAD_EDITS(upload_edits) --> S3A
     EDITS_PARQUET --> EXTRACT_EDITS_LAYERS(extract_edits_layers)
+    PRESETS_JSON --> EXTRACT_EDITS_LAYERS
     EXTRACT_EDITS_LAYERS --> RENDER_EDITS_OVERVIEW(render_edits_overview)
     EXTRACT_EDITS_LAYERS --> RENDER_EDITS_DETAIL(render_edits_detail)
     RENDER_EDITS_OVERVIEW --> JOIN_EDITS_TILES(join_edits_tiles)
@@ -340,9 +344,13 @@ fetch away.
   latest [name-suggestion-index](https://nsi.guide) release
   (`fetch_inputs.nsi`, about 12 MB) comes from jsDelivr's npm CDN,
   checked against the SHA-256 in jsDelivr's package listing
-  ([`nsi.rs`](../src/pipeline/nsi.rs)); matching takes the names of
+  ([`npm.rs`](../src/pipeline/npm.rs), [`nsi.rs`](../src/pipeline/nsi.rs)); matching takes the names of
   brands, operators and networks from it
-  ([`brand_names.rs`](../src/matchers/brand_names.rs)). Alongside, it
+  ([`brand_names.rs`](../src/matchers/brand_names.rs)). The presets of
+  [id-tagging-schema](https://github.com/openstreetmap/id-tagging-schema)
+  (`fetch_inputs.id_presets`, about 350 KB) come the same way; `edits.pmtiles`
+  takes the icon of each edit from them
+  ([`id_presets.rs`](../src/pipeline/id_presets.rs)). Alongside, it
   reads our own published `datapackage.json` to learn which
   `spider-stats.parquet` came out last time (`fetch_inputs.previous`,
   [`previous_release.rs`](../src/pipeline/previous_release.rs)), kept
@@ -657,7 +665,8 @@ fetch away.
   edits, the same way as `conflated.pmtiles`: one scan writes an
   overview layer (one point per edit, with four properties) and a
   detail layer (one point per edit with everything a mapper needs,
-  plus a line from the AllThePlaces position), which tippecanoe
+  plus a line from the AllThePlaces position), each with the icon of
+  the best-matching id-tagging-schema preset, which tippecanoe
   renders at z0–12 and z13–14, and `tile-join` merges
   ([plan](notes/2026-11-28-edits-map.md)). See
   [`docs/outputs/EDITS_TILES.md`](outputs/EDITS_TILES.md) for the

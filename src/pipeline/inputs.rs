@@ -28,7 +28,9 @@ use anyhow::Result;
 use indicatif::MultiProgress;
 use std::path::{Path, PathBuf};
 
-use super::nsi::{self, NsiMetadata};
+use super::id_presets::ID_PRESETS;
+use super::npm::{self, NpmMetadata, fetch_npm_file};
+use super::nsi::NSI;
 use super::osm_views;
 use super::packaged::{PackagedMetadata, fetch_packaged};
 use super::previous_release::{self, PreviousRelease};
@@ -54,7 +56,8 @@ pub(crate) struct Inputs {
     pub osm: Input<OsmMetadata>,
     pub qrank: Input<PackagedMetadata>,
     pub osmviews: Input<PackagedMetadata>,
-    pub nsi: Input<NsiMetadata>,
+    pub nsi: Input<NpmMetadata>,
+    pub id_presets: Input<NpmMetadata>,
 
     /// What we published last time, if we could find out; not an input
     /// to the data, so never a reason to fail. See [`previous_release`].
@@ -76,11 +79,12 @@ pub(crate) struct Sources {
     /// OSMViews' `datapackage.json`, which points to the actual file.
     pub osmviews_datapackage_url: String,
 
-    /// Resolves the latest version of the name-suggestion-index.
-    pub nsi_resolve_url: String,
+    /// jsDelivr's API, which resolves the latest version of the
+    /// name-suggestion-index and id-tagging-schema.
+    pub npm_api_url: String,
 
-    /// The CDN to download the name-suggestion-index from.
-    pub nsi_cdn_url: String,
+    /// The CDN to download them from.
+    pub npm_cdn_url: String,
 
     /// Our own `datapackage.json`, which lists what we published last.
     pub previous_datapackage_url: String,
@@ -93,8 +97,8 @@ impl Default for Sources {
             osm_planet_url: osm::OSM_PLANET_URL.to_string(),
             qrank_datapackage_url: qrank::QRANK_DATAPACKAGE_URL.to_string(),
             osmviews_datapackage_url: osm_views::OSMVIEWS_DATAPACKAGE_URL.to_string(),
-            nsi_resolve_url: nsi::NSI_RESOLVE_URL.to_string(),
-            nsi_cdn_url: nsi::NSI_CDN_URL.to_string(),
+            npm_api_url: npm::API_URL.to_string(),
+            npm_cdn_url: npm::CDN_URL.to_string(),
             previous_datapackage_url: previous_release::DATAPACKAGE_URL.to_string(),
         }
     }
@@ -102,7 +106,8 @@ impl Default for Sources {
 
 /// Fetches every input in parallel, each logged as its own sub-step
 /// (`fetch_inputs.atp`, `fetch_inputs.osm`, `fetch_inputs.qrank`,
-/// `fetch_inputs.osmviews`, `fetch_inputs.nsi`), along with what we
+/// `fetch_inputs.osmviews`, `fetch_inputs.nsi`,
+/// `fetch_inputs.id_presets`), along with what we
 /// published last (`fetch_inputs.previous`, which never fails the
 /// pipeline; see [`previous_release`]). If any fetch fails, the
 /// others are cancelled right away (a cancelled planet download leaves a
@@ -146,13 +151,25 @@ pub(crate) async fn fetch_inputs(
         ),
         super::run_step_async(
             "fetch_inputs.nsi",
-            nsi::fetch_nsi(
-                &sources.nsi_resolve_url,
-                &sources.nsi_cdn_url,
+            fetch_npm_file(
+                &NSI,
+                &sources.npm_api_url,
+                &sources.npm_cdn_url,
                 http_client,
                 progress,
                 workdir,
             ),
+        ),
+    );
+    let id_presets = super::run_step_async(
+        "fetch_inputs.id_presets",
+        fetch_npm_file(
+            &ID_PRESETS,
+            &sources.npm_api_url,
+            &sources.npm_cdn_url,
+            http_client,
+            progress,
+            workdir,
         ),
     );
     let previous = super::run_step_async(
@@ -163,14 +180,15 @@ pub(crate) async fn fetch_inputs(
             workdir,
         ),
     );
-    let ((atp, osm, qrank, osmviews, nsi), previous) =
-        futures_util::future::try_join(inputs, previous).await?;
+    let ((atp, osm, qrank, osmviews, nsi), id_presets, previous) =
+        futures_util::future::try_join3(inputs, id_presets, previous).await?;
     Ok(Inputs {
         atp,
         osm,
         qrank,
         osmviews,
         nsi,
+        id_presets,
         previous,
     })
 }
@@ -210,8 +228,8 @@ mod tests {
             osm_planet_url: "http://127.0.0.1:9/planet.osm.pbf".to_string(),
             qrank_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
             osmviews_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
-            nsi_resolve_url: "http://127.0.0.1:9/resolved".to_string(),
-            nsi_cdn_url: "http://127.0.0.1:9/npm".to_string(),
+            npm_api_url: "http://127.0.0.1:9/packages".to_string(),
+            npm_cdn_url: "http://127.0.0.1:9/npm".to_string(),
             previous_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
         }
     }
@@ -234,6 +252,8 @@ mod tests {
             ("osmviews.meta.json", "osmviews.meta.json"),
             ("nsi.json", "nsi.json"),
             ("nsi.meta.json", "nsi.meta.json"),
+            ("id-presets.json", "id-presets.json"),
+            ("id-presets.meta.json", "id-presets.meta.json"),
             ("previous-release.json", "previous-release.json"),
         ] {
             symlink(fixture(src), workdir.path().join(dst))?;
@@ -267,6 +287,11 @@ mod tests {
         assert_eq!(inputs.nsi.path, workdir.path().join("nsi.json"));
         assert_eq!(inputs.nsi.metadata.version, "8.0.20261101");
         assert_eq!(
+            inputs.id_presets.path,
+            workdir.path().join("id-presets.json")
+        );
+        assert_eq!(inputs.id_presets.metadata.version, "7.3.0");
+        assert_eq!(
             inputs.previous.and_then(|p| p.spider_stats),
             Some("spider-stats-20251229-a1b2c3d4.parquet".to_string())
         );
@@ -290,6 +315,8 @@ mod tests {
             "osmviews.meta.json",
             "nsi.json",
             "nsi.meta.json",
+            "id-presets.json",
+            "id-presets.meta.json",
         ] {
             symlink(fixture(name), workdir.path().join(name))?;
         }
@@ -335,7 +362,7 @@ mod tests {
             }
         });
 
-        // QRank, OSMViews and NSI are already there, so only the other two get fetched.
+        // QRank, OSMViews, NSI and the presets are already there, so only the other two get fetched.
         let workdir = tempfile::tempdir()?;
         for name in [
             "qrank.csv.gz",
@@ -344,6 +371,8 @@ mod tests {
             "osmviews.meta.json",
             "nsi.json",
             "nsi.meta.json",
+            "id-presets.json",
+            "id-presets.meta.json",
         ] {
             symlink(fixture(name), workdir.path().join(name))?;
         }
@@ -352,8 +381,8 @@ mod tests {
             osm_planet_url: format!("http://{planet_addr}/planet.osm.pbf"),
             qrank_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
             osmviews_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
-            nsi_resolve_url: "http://127.0.0.1:9/resolved".to_string(),
-            nsi_cdn_url: "http://127.0.0.1:9/npm".to_string(),
+            npm_api_url: "http://127.0.0.1:9/packages".to_string(),
+            npm_cdn_url: "http://127.0.0.1:9/npm".to_string(),
             previous_datapackage_url: "http://127.0.0.1:9/datapackage.json".to_string(),
         };
         let result = tokio::time::timeout(

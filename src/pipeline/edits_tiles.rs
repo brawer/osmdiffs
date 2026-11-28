@@ -8,6 +8,8 @@
 //!
 //! - the coarse **overview** (z0 to `DETAIL_MIN_ZOOM - 1`): one point
 //!   per edit, with only `icon`, `action`, `topic` and `importance`.
+//!   `icon` comes from the id-tagging-schema preset that best matches
+//!   the element's tags after the edit; see `pipeline::id_presets`.
 //!   No `id`, since a unique value per feature defeats the vector
 //!   tile's value dedup and thins the coarse zooms to a fraction.
 //! - the **detail** (`DETAIL_MIN_ZOOM` to `DETAIL_MAX_ZOOM`): one point
@@ -21,7 +23,9 @@
 //! parallel per batch, is enough.
 
 use super::conflated_tiles::{MIN_CONNECTOR_LENGTH_METERS, geometry_to_geojson_line};
+use super::id_presets::{Geometry, Presets};
 use super::tiles::round_importance;
+use crate::utils::parquet::get_tags;
 use crate::{TileLayer, make_progress_bar};
 use anyhow::{Context, Result};
 use arrow::array::{
@@ -58,7 +62,8 @@ struct EditTileRow {
     id: String,
     action: String,
     topics: Vec<String>,
-    /// The Maki or Temaki icon of the place after the edit. Empty
+    /// The Maki or Temaki icon of the place after the edit; see
+    /// `pipeline::id_presets`. Empty if no preset with one matches.
     /// until the pipeline matches id-tagging-schema presets.
     icon: String,
     importance: f32,
@@ -159,9 +164,11 @@ impl EditTileRow {
 }
 
 /// Scans `edits.parquet` once and writes the overview and detail
-/// layers of `edits.pmtiles`; see [`EditsLayers`].
+/// layers of `edits.pmtiles`, with icons from the id-tagging-schema
+/// presets in `presets`; see [`EditsLayers`].
 pub fn extract_edits_layers(
     edits: &Path,
+    presets: &Path,
     progress: &MultiProgress,
     workdir: &Path,
 ) -> Result<EditsLayers> {
@@ -175,9 +182,13 @@ pub fn extract_edits_layers(
             path: workdir.join("edits-detail.jsonl"),
         },
     };
-    if super::is_current(&[&layers.overview.path, &layers.detail.path], &[edits])? {
+    if super::is_current(
+        &[&layers.overview.path, &layers.detail.path],
+        &[edits, presets],
+    )? {
         return Ok(layers);
     }
+    let presets = Presets::open(presets)?;
 
     let start = Instant::now();
     let file = File::open(edits).with_context(|| format!("could not open {edits:?}"))?;
@@ -197,21 +208,23 @@ pub fn extract_edits_layers(
     let mut overview_w = BufWriter::with_capacity(32768, File::create(&overview_tmp)?);
     let mut detail_w = BufWriter::with_capacity(32768, File::create(&detail_tmp)?);
 
-    let (mut num_edits, mut num_links) = (0u64, 0u64);
+    let (mut num_edits, mut num_links, mut num_without_icon) = (0u64, 0u64, 0u64);
     for batch in builder.build()? {
         let batch = batch?;
-        let lines: Vec<(String, Vec<String>)> = (0..batch.num_rows())
+        let lines: Vec<(bool, String, Vec<String>)> = (0..batch.num_rows())
             .into_par_iter()
             .map(|row| {
-                let edit = read_edit(&batch, row)
+                let edit = read_edit(&batch, row, &presets)
                     .with_context(|| format!("could not read edit in row {row} of batch"))?;
                 Ok((
+                    edit.icon.is_empty(),
                     edit.to_overview_geojson_line()?,
                     edit.to_detail_geojson_lines()?,
                 ))
             })
             .collect::<Result<_>>()?;
-        for (overview, detail) in lines {
+        for (without_icon, overview, detail) in lines {
+            num_without_icon += u64::from(without_icon);
             overview_w.write_all(overview.as_bytes())?;
             num_links += detail.len() as u64 - 1;
             for line in detail {
@@ -227,29 +240,45 @@ pub fn extract_edits_layers(
     rename(&overview_tmp, &layers.overview.path)?;
     rename(&detail_tmp, &layers.detail.path)?;
 
-    progress_bar.finish_with_message(format!("{num_edits} edits, {num_links} links"));
+    progress_bar.finish_with_message(format!(
+        "{num_edits} edits, {num_links} links, {num_without_icon} without icon"
+    ));
     log::info!(
         elapsed_seconds = start.elapsed().as_secs_f64(),
         edits = num_edits,
-        links = num_links;
+        links = num_links,
+        without_icon = num_without_icon;
         "extract_edits_layers: done"
     );
     Ok(layers)
 }
 
 /// Decodes `row` of a batch of `edits.parquet`.
-fn read_edit(batch: &RecordBatch, row: usize) -> Result<EditTileRow> {
-    let osm = column::<StructArray>(batch, "osm")?;
-    let osm = if osm.is_null(row) {
-        None
+fn read_edit(batch: &RecordBatch, row: usize, presets: &Presets) -> Result<EditTileRow> {
+    let osm_struct = column::<StructArray>(batch, "osm")?;
+    let (osm, osm_tags) = if osm_struct.is_null(row) {
+        (None, Vec::new())
     } else {
-        let modified = field::<StructArray>(osm, "modified")?;
-        Some((
-            field::<StringArray>(osm, "type")?.value(row).to_string(),
-            field::<UInt64Array>(osm, "id")?.value(row),
-            field::<UInt32Array>(modified, "version")?.value(row),
-        ))
+        let modified = field::<StructArray>(osm_struct, "modified")?;
+        (
+            Some((
+                field::<StringArray>(osm_struct, "type")?
+                    .value(row)
+                    .to_string(),
+                field::<UInt64Array>(osm_struct, "id")?.value(row),
+                field::<UInt32Array>(modified, "version")?.value(row),
+            )),
+            get_tags(osm_struct, "tags", row)?,
+        )
     };
+    let changes = read_changes(column::<ListArray>(batch, "changes")?, row)?;
+    let geometry_kind = match &osm {
+        Some((osm_type, _, _)) => Geometry::of_osm_type(osm_type),
+        None => Geometry::Point,
+    };
+    let icon = presets
+        .icon(&tags_after(osm_tags, &changes), geometry_kind)
+        .to_string();
     let host = column::<StructArray>(batch, "host")?;
     let host = if host.is_null(row) {
         None
@@ -286,16 +315,31 @@ fn read_edit(batch: &RecordBatch, row: usize) -> Result<EditTileRow> {
             .value(row)
             .to_string(),
         topics: string_list(column::<ListArray>(batch, "topics")?, row)?,
-        icon: String::new(),
+        icon,
         importance: column::<Float32Array>(batch, "importance")?.value(row),
         osm,
-        changes: read_changes(column::<ListArray>(batch, "changes")?, row)?,
+        changes,
         sources: read_sources(column::<ListArray>(batch, "sources")?, row)?,
         warnings: string_list(column::<ListArray>(batch, "warnings")?, row)?,
         host,
         point: round_point(point),
         atp_point: atp_point.map(round_point),
     })
+}
+
+/// The tags of an element after the edit: `tags` with each of
+/// `changes` (as [`read_changes`] gives them) applied.
+fn tags_after(mut tags: Vec<(String, String)>, changes: &[Value]) -> Vec<(String, String)> {
+    for change in changes {
+        let Some(key) = change["key"].as_str() else {
+            continue;
+        };
+        tags.retain(|(k, _)| k != key);
+        if let Some(new) = change["new"].as_str() {
+            tags.push((key.to_string(), new.to_string()));
+        }
+    }
+    tags
 }
 
 /// The `changes` of `row`, each as `{"key", "old", "new", "reason"}`,
@@ -495,6 +539,26 @@ mod tests {
         assert_eq!(props["host:id"], 9);
         assert_eq!(props["host:name"], "Glatt");
         Ok(())
+    }
+
+    #[test]
+    fn test_tags_after() {
+        let tags = vec![
+            ("shop".to_string(), "kiosk".to_string()),
+            ("fax".to_string(), "+41 1".to_string()),
+        ];
+        let changes = [
+            serde_json::json!({"key": "fax", "old": "+41 1", "new": null, "reason": "differs"}),
+            serde_json::json!({"key": "shop", "old": "kiosk", "new": "convenience", "reason": "differs"}),
+            serde_json::json!({"key": "name", "old": null, "new": "Avec", "reason": "missing_in_osm"}),
+        ];
+        assert_eq!(
+            tags_after(tags, &changes),
+            [
+                ("shop".to_string(), "convenience".to_string()),
+                ("name".to_string(), "Avec".to_string()),
+            ]
+        );
     }
 
     #[test]

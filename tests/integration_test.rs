@@ -55,6 +55,8 @@ fn run_pipeline_on_fixtures(extra_args: &[&str]) -> Result<TempDir> {
         "osmviews.meta.json",
         "nsi.json",
         "nsi.meta.json",
+        "id-presets.json",
+        "id-presets.meta.json",
         // What the published manifest listed, so the run names a
         // previous spider-stats.parquet without asking the server.
         "previous-release.json",
@@ -1094,6 +1096,23 @@ fn assert_edits_tile_layers(workdir: &Path) -> Result<()> {
             .collect();
         keys.sort();
         assert_eq!(keys, ["action", "icon", "importance", "topic"], "{feature}");
+    }
+    // Icons from the id-tagging-schema presets in tests/test_data, such
+    // as `maki-grocery` for a supermarket; only Maki and Temaki ones.
+    let icons: BTreeMap<&str, usize> = overview.iter().fold(BTreeMap::new(), |mut m, f| {
+        *m.entry(f["properties"]["icon"].as_str().unwrap_or_default())
+            .or_default() += 1;
+        m
+    });
+    assert!(
+        icons.keys().any(|icon| icon.starts_with("maki-")),
+        "{icons:?}"
+    );
+    for icon in icons.keys() {
+        assert!(
+            icon.is_empty() || icon.starts_with("maki-") || icon.starts_with("temaki-"),
+            "{icons:?}"
+        );
     }
 
     let detail = read_features("edits-detail.jsonl")?;
