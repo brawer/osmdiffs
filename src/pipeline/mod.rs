@@ -37,6 +37,7 @@ mod conflated_tiles;
 mod datapackage;
 mod download;
 mod edits;
+mod edits_tiles;
 mod held_back;
 mod importance;
 mod inputs;
@@ -412,6 +413,51 @@ fn run_pipeline_steps(
     })?;
     published.push(run_step("upload_edits", || {
         upload::upload_edits(&edits, &date, progress)
+    })?);
+
+    // `edits.pmtiles` shows the suggested edits on a map, built like
+    // `conflated.pmtiles`: an overview pass with few properties per
+    // edit, and a detail pass with everything a mapper needs, joined
+    // into one layer. See `edits_tiles` and
+    // docs/notes/2026-11-28-edits-map.md.
+    let edits_layers = run_step("extract_edits_layers", || {
+        edits_tiles::extract_edits_layers(&edits, progress, workdir)
+    })?;
+    let edits_overview = run_step("render_edits_overview", || {
+        tiles::render_tiles(
+            std::slice::from_ref(&edits_layers.overview),
+            progress,
+            workdir,
+            "edits-overview.pmtiles",
+            tiles::ZoomRange {
+                min: 0,
+                max: conflated_tiles::DETAIL_MIN_ZOOM - 1,
+            },
+            tiles::Thinning::DropDensest {
+                importance_attr: Some("importance"),
+            },
+        )
+    })?;
+    let edits_detail = run_step("render_edits_detail", || {
+        tiles::render_tiles(
+            std::slice::from_ref(&edits_layers.detail),
+            progress,
+            workdir,
+            "edits-detail.pmtiles",
+            tiles::ZoomRange {
+                min: conflated_tiles::DETAIL_MIN_ZOOM,
+                max: conflated_tiles::DETAIL_MAX_ZOOM,
+            },
+            tiles::Thinning::DropDensest {
+                importance_attr: None,
+            },
+        )
+    })?;
+    let edits_tiles_out = run_step("join_edits_tiles", || {
+        tiles::join_tiles(&[edits_overview, edits_detail], workdir, "edits.pmtiles")
+    })?;
+    published.push(run_step("upload_edits_tiles", || {
+        upload::upload_edits_tiles(&edits_tiles_out, &date, progress)
     })?);
 
     // Published after the edits step, which adds its per-spider counts
