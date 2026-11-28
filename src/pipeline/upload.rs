@@ -403,6 +403,19 @@ const EDITS: Publish = Publish {
     sha512: false,
 };
 
+const EDITS_TILES: Publish = Publish {
+    name: "edits-tiles",
+    stem: "edits",
+    ext: "pmtiles",
+    title: "edits.pmtiles \u{2014} map of edits.parquet",
+    description: "Visualization aid for reviewing the proposed edits. Not a data product; \
+        structure may change, or production may stop, without notice.",
+    format: "pmtiles",
+    mediatype: "application/vnd.pmtiles",
+    describes: None,
+    sha512: false,
+};
+
 const SPIDER_STATS: Publish = Publish {
     name: "spider-stats",
     stem: "spider-stats",
@@ -459,6 +472,14 @@ pub fn upload_conflated(
 
 pub fn upload_edits(edits: &Path, date: &str, progress: &MultiProgress) -> Result<PublishedFile> {
     publish(&EDITS, edits, date, progress)
+}
+
+pub fn upload_edits_tiles(
+    tiles: &Path,
+    date: &str,
+    progress: &MultiProgress,
+) -> Result<PublishedFile> {
+    publish(&EDITS_TILES, tiles, date, progress)
 }
 
 pub fn upload_spider_stats(
