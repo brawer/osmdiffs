@@ -26,8 +26,13 @@
 //! - A charge point (`man_made=charge_point`) that OSM doesn't map on
 //!   its own, in the OSM charging station that contains it or is within
 //!   [CHARGING_STATION_METERS]; see [charging_station_host].
+//! - Any other ATP feature that nothing matched, inside an OSM shopping
+//!   mall (`shop=mall`), or within [MALL_NODE_METERS] of a mall that OSM
+//!   maps as a node; see [mall_host]. This is only tried when the
+//!   feature has no other host in OSM.
 //!
-//! See `docs/notes/2026-11-09-departments.md`.
+//! See `docs/notes/2026-11-09-departments.md` and
+//! `docs/notes/2026-11-28-mall-tenants.md`.
 
 use crate::matchers::category::main_category;
 use crate::matchers::post_partner::{self, PartnerHost, PostalBrand};
@@ -158,6 +163,24 @@ pub(super) const HOST_SEARCH_METERS: f64 = 300.0;
 /// `docs/notes/2026-11-21-charge-points.md`.
 pub(super) const CHARGING_STATION_METERS: f64 = 50.0;
 
+/// How far from a shopping mall that OSM maps as a node an ATP feature
+/// may be to be `located_in` it. A mall mapped as an area must contain
+/// the feature instead. The edits step keeps a create's position next
+/// to a host node up to 30 m away (`HOST_NODE_RADIUS_M`).
+pub(super) const MALL_NODE_METERS: f64 = 30.0;
+
+/// The kinds of ATP features that can be `located_in` a mall; see
+/// [mall_host].
+const MALL_TENANTS: MatchMask = MatchMask(
+    MatchMask::SHOP.0 | MatchMask::RESTAURANT.0 | MatchMask::LODGING.0 | MatchMask::SCHOOL.0,
+);
+
+/// How far from an ATP feature we look for the centroid of a shopping
+/// mall that may contain it. The OSM index only knows an area by its
+/// centroid, and a large mall's centroid can be some way from its
+/// shops.
+pub(super) const MALL_SEARCH_METERS: f64 = 500.0;
+
 /// S2 level for grouping features in [find_departments], about 1 km.
 const GROUP_LEVEL: u64 = 13;
 
@@ -189,6 +212,17 @@ pub(super) enum Host {
     /// The store that a postal partner is in, by the name that ATP
     /// gives for it; see [crate::matchers::post_partner].
     PostPartner(PartnerHost),
+    /// The shopping mall (`shop=mall`) around an ATP feature that
+    /// nothing matched, unless the mall has one of these
+    /// `brand:wikidata` IDs, or a `name` or `brand` like one of these
+    /// normalized `names` (see [same_business_name]), those of the ATP
+    /// feature: OSM sometimes tags a store as `shop=mall`, such as the
+    /// Migros VOI in Kappel SO, and a store isn't `located_in` itself;
+    /// see [mall_host].
+    Mall {
+        brands: Vec<u64>,
+        names: Vec<String>,
+    },
 }
 
 impl Host {
@@ -200,6 +234,7 @@ impl Host {
             Host::LocatedIn { .. } => "located_in",
             Host::ChargingStation => "charging_station",
             Host::PostPartner(_) => "post_partner",
+            Host::Mall { .. } => "mall",
         }
     }
 
@@ -220,6 +255,11 @@ impl Host {
                 mask.add_tag("amenity", "charging_station");
                 mask
             }
+            Host::Mall { .. } => {
+                let mut mask = MatchMask::default();
+                mask.add_tag("shop", "mall");
+                mask
+            }
         }
     }
 
@@ -229,6 +269,7 @@ impl Host {
         match self {
             Host::ChargingStation => CHARGING_STATION_METERS,
             Host::PostPartner(_) => post_partner::HOST_METERS,
+            Host::Mall { .. } => MALL_SEARCH_METERS,
             _ => HOST_SEARCH_METERS,
         }
     }
@@ -244,6 +285,13 @@ impl Host {
     /// not just in the cells that cover that circle.
     pub(super) fn is_strict_radius(&self) -> bool {
         matches!(self, Host::ChargingStation | Host::PostPartner(_))
+    }
+
+    /// How far a host mapped as a node may be from the ATP feature, if
+    /// a host mapped as an area must contain it rather than just be
+    /// near it: [MALL_NODE_METERS] for a mall, `None` for the others.
+    pub(super) fn enclosing_or_node_meters(&self) -> Option<f64> {
+        matches!(self, Host::Mall { .. }).then_some(MALL_NODE_METERS)
     }
 
     /// Whether the OSM feature with `tags` is the host. A host is never
@@ -295,6 +343,15 @@ impl Host {
                 let category = main_category(tags.clone());
                 category.is_some_and(|c| !is_not_host_category(&c)) && host.agrees(tags)
             }
+            Host::Mall { brands, names } => {
+                main_category(tags.clone())
+                    .is_some_and(|c| category_values(&c).any(|c| c == "shop=mall"))
+                    && !brand_ids(tags.clone()).any(|id| brands.contains(&id))
+                    && !tags
+                        .filter(|(k, _)| is_name_key(k))
+                        .map(|(_, v)| normalize_name(v))
+                        .any(|v| names.iter().any(|n| same_business_name(&v, n)))
+            }
         }
     }
 
@@ -320,6 +377,8 @@ impl Host {
             // The partner matcher only takes OSM partners of its brand,
             // and its host may be one already.
             Host::PostPartner(_) => false,
+            // A mall is only looked for once nothing matched.
+            Host::Mall { .. } => false,
         }
     }
 }
@@ -343,6 +402,52 @@ pub(super) fn post_partner_host(place: &Place) -> Option<Host> {
     }
     let brand = PostalBrand::of_atp(&place.spider, tags());
     PartnerHost::of_atp(tags(), &brand).map(Host::PostPartner)
+}
+
+/// The host of an ATP feature that nothing matched and that has no
+/// other host in OSM: the shopping mall it is in, if OSM has one; see
+/// [Host::Mall]. Shops that ATP names after their mall, such as
+/// `ａｕショップ イオンモール羽生`, would otherwise become plain
+/// creates, or none at all if the mall's name held them back as
+/// similar; see
+/// [brawer/osmdiffs#1067](https://github.com/brawer/osmdiffs/issues/1067).
+/// Only for a shop, restaurant, hotel or school ([MALL_TENANTS]), and
+/// `None` for a mall itself and for a postal partner, whose host gets
+/// its tags in the edits. Street furniture, such as post boxes, parcel
+/// lockers and bike-share docks, often stands in a mall's car park or
+/// at its doors, and a transit stop or charging station is no tenant.
+pub(super) fn mall_host(place: &Place) -> Option<Host> {
+    let tags = || place.tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+    if !place.mask.intersects(&MALL_TENANTS)
+        || post_partner::is_post_partner(tags())
+        || tags().any(|(k, v)| k == "shop" && v == "mall")
+    {
+        return None;
+    }
+    let mut names: Vec<String> = tags()
+        .filter(|(k, _)| is_name_key(k))
+        .map(|(_, v)| normalize_name(v))
+        .filter(|n| !n.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    Some(Host::Mall {
+        brands: brand_ids(tags()).collect(),
+        names,
+    })
+}
+
+/// Whether [Host::Mall] compares the value of `key` with the other
+/// side's names: `name`, `brand`, and their `name:*` and `brand:*`
+/// variants in other languages, such as `brand:th` for Big C, but not
+/// `brand:wikidata` or `brand:wikipedia`.
+fn is_name_key(key: &str) -> bool {
+    match key.split_once(':') {
+        None => key == "name" || key == "brand",
+        Some((base, suffix)) => {
+            (base == "name" || base == "brand") && !matches!(suffix, "wikidata" | "wikipedia")
+        }
+    }
 }
 
 /// Whether `category` is in [NAMED_HOST_CATEGORIES]. A category with
@@ -854,6 +959,116 @@ mod tests {
         );
         let station = place(&[("amenity", "charging_station")], MatchMask::FUEL);
         assert_eq!(charging_station_host(&station), None);
+    }
+
+    #[test]
+    fn test_mall_host() {
+        // https://github.com/brawer/osmdiffs/issues/1067
+        let place = |tags: &[(&str, &str)], mask| {
+            let coord = geo::Coord { x: 139.5, y: 36.2 };
+            Place::new(
+                &coord,
+                "au_jp".to_string(),
+                mask,
+                tags.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                &geo::Point::from(coord).into(),
+                crate::utils::UtcTimestamp(
+                    time::UtcDateTime::from_unix_timestamp(1_770_000_000).unwrap(),
+                ),
+            )
+            .unwrap()
+        };
+        let au = place(
+            &[
+                ("shop", "mobile_phone"),
+                ("brand:wikidata", "Q485814"),
+                ("name", "ａｕショップ イオンモール羽生"),
+            ],
+            MatchMask::SHOP,
+        );
+        let host = mall_host(&au).expect("a mall host");
+        assert_eq!(
+            host,
+            Host::Mall {
+                brands: vec![485814],
+                names: vec!["ａｕショップ イオンモール羽生".into()]
+            }
+        );
+        assert_eq!(host.rule(), "mall");
+        assert_eq!(host.search_meters(), MALL_SEARCH_METERS);
+        assert_eq!(host.enclosing_or_node_meters(), Some(MALL_NODE_METERS));
+        assert!(!host.prefers_enclosing() && !host.is_strict_radius());
+        assert_eq!(Host::ChargingStation.enclosing_or_node_meters(), None);
+        assert!(host.mask().intersects(&MatchMask::SHOP));
+        let aeon = [("shop", "mall"), ("name", "イオンモール羽生")];
+        assert!(host.is_host(aeon.iter().copied()));
+        assert!(!host.excludes(aeon.iter().copied()));
+        assert!(!host.is_host([("shop", "supermarket")].into_iter()));
+        assert!(
+            !host.is_host([("shop", "mobile_phone"), ("brand:wikidata", "Q485814")].into_iter())
+        );
+        // A mall of the feature's own brand isn't its host.
+        assert!(!host.is_host([("shop", "mall"), ("brand:wikidata", "Q485814")].into_iter()));
+        assert!(host.is_host([("shop", "mall"), ("brand:wikidata", "Q1")].into_iter()));
+
+        // A store that OSM tags as a mall isn't its own host: the VOI
+        // in Kappel SO, node/8996515960, and Big C in Pathum Thani,
+        // way/544540116.
+        let voi = mall_host(&place(
+            &[("shop", "supermarket"), ("name", "VOI"), ("brand", "VOI")],
+            MatchMask::SHOP,
+        ))
+        .expect("a mall host");
+        assert!(
+            !voi.is_host([("shop", "mall"), ("name", "VOI"), ("operator", "Migros")].into_iter())
+        );
+        let big_c = mall_host(&place(
+            &[
+                ("shop", "supermarket"),
+                ("name", "BigC ปทุมธานี"),
+                ("brand", "Big C"),
+                ("brand:th", "บิ๊กซี"),
+                ("brand:wikidata", "Q858665"),
+            ],
+            MatchMask::SHOP,
+        ))
+        .expect("a mall host");
+        let pathum_thani = [("shop", "mall"), ("name", "Big C Pathum Thani -บิ๊กซี ปทุมธานี")];
+        assert!(!big_c.is_host(pathum_thani.iter().copied()));
+        assert!(!big_c.is_host([("shop", "mall"), ("name", "บิ๊กซี อ่างทอง")].into_iter()));
+        // But the Pure pharmacy inside is a tenant.
+        let pure = mall_host(&place(
+            &[
+                ("amenity", "pharmacy"),
+                ("name", "Pure ปทุมธานี"),
+                ("brand", "Pure"),
+            ],
+            MatchMask::SHOP,
+        ))
+        .expect("a mall host");
+        assert!(pure.is_host(pathum_thani.iter().copied()));
+        assert!(is_name_key("name:ja") && is_name_key("brand:th") && is_name_key("brand"));
+        assert!(!is_name_key("brand:wikidata") && !is_name_key("official_name"));
+
+        let mall = place(
+            &[("shop", "mall"), ("name", "Emmen Center")],
+            MatchMask::SHOP,
+        );
+        assert_eq!(mall_host(&mall), None);
+        let partner = place(&[("post_office", "post_partner")], MatchMask::SHOP);
+        assert_eq!(mall_host(&partner), None);
+        let charge_point = place(&[("man_made", "charge_point")], MatchMask::STREET_FURNITURE);
+        assert_eq!(mall_host(&charge_point), None);
+        let station = place(&[("amenity", "charging_station")], MatchMask::FUEL);
+        assert_eq!(mall_host(&station), None);
+        let post_box = place(&[("amenity", "post_box")], MatchMask::STREET_FURNITURE);
+        assert_eq!(mall_host(&post_box), None);
+        let stop = place(&[("public_transport", "platform")], MatchMask::TRANSIT);
+        assert_eq!(mall_host(&stop), None);
+        let cafe = place(&[("amenity", "cafe")], MatchMask::RESTAURANT);
+        assert!(mall_host(&cafe).is_some());
     }
 
     #[test]

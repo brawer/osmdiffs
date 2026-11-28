@@ -183,6 +183,7 @@ scores lower than one matched by its ID, even when both are right.
 | `located_in` | `located_in` | the host named by the `located_in` or `located_in:wikidata` tags, such as a Starbucks in a Target |
 | `located_in` | `post_partner` | a postal partner, such as a DHL counter in a kiosk, in the OSM store whose name ATP gives, within 100 m; the edits add the `post_office` tags to the store |
 | `located_in` | `charging_station` | a charge point that OSM doesn't map on its own, in the OSM charging station that contains it or is within 50 m |
+| `located_in` | `mall` | a shop, restaurant, hotel or school that nothing matched and that has no other host in OSM, inside an OSM shopping mall (`shop=mall`), or within 30 m of a mall mapped as a node, unless the mall has the feature's `brand:wikidata`, or its `name` or `brand` begins with the feature's, as when OSM tags a store as a mall |
 | `deletion_candidate` | `wikidata` | brand, network or operator by Wikidata ID |
 | `deletion_candidate` | `name` | brand, network or operator by name |
 | `deletion_candidate` | `swiss_transit_id` | Swiss stop whose ID the register doesn't know |

@@ -176,7 +176,8 @@ fn assert_spider_churn(workdir: &Path) -> Result<()> {
     assert_eq!(drops.len(), 1, "{drops:?}");
     assert_eq!(drops[0]["fields"]["spider"], "misenso_ch");
     assert_eq!(drops[0]["fields"]["previous"], 0.9);
-    assert_eq!(drops[0]["fields"]["current"], 0.0);
+    // One of its three rows is `located_in` the Zugerland mall.
+    assert_eq!(drops[0]["fields"]["current"], 0.333);
     Ok(())
 }
 
@@ -342,7 +343,9 @@ fn assert_spider_stats(path: &Path) -> Result<()> {
     // 8 conflated rows, 3 of them matched; see assert_conflated_parquet.
     assert_eq!(numbers("rows"), [1, 0, 1, 3, 1, 2]);
     assert_eq!(numbers("same"), [1, 0, 1, 0, 1, 0]);
-    assert_eq!(numbers("missing_in_osm"), [0, 0, 0, 3, 0, 2]);
+    // One Misenso shop is in the Zugerland mall.
+    assert_eq!(numbers("missing_in_osm"), [0, 0, 0, 2, 0, 2]);
+    assert_eq!(numbers("located_in"), [0, 0, 0, 1, 0, 0]);
     assert_eq!(numbers("atp_features"), [1, 0, 1, 3, 1, 4]);
     // Two Winterthur features have no matcher, so no conflated row.
     assert_eq!(numbers("no_matcher"), [0, 0, 0, 0, 0, 2]);
@@ -380,8 +383,9 @@ fn assert_spider_stats(path: &Path) -> Result<()> {
         assert_eq!(no_candidate[i] + rejected[i] + taken[i], missing[i]);
     }
     // One Misenso shop has a shop of the same kind right next to it in
-    // OSM, which the matcher rejected.
-    assert_eq!(rejected, [0, 0, 0, 1, 0, 0]);
+    // OSM, which the matcher rejected. It is in the Zugerland mall, so
+    // its row is `located_in` the mall, not `missing_in_osm`.
+    assert_eq!(rejected, [0, 0, 0, 0, 0, 0]);
     // Small spiders move all their features for chance pairs. For
     // Winterthur, that's two benches and two playgrounds, which have a
     // matcher because their operator can be found by name.
@@ -679,6 +683,7 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
     // (osm id, match.relation, match.evidence.rule) of rows without an
     // ATP side.
     let mut deletion_candidates = Vec::new();
+    let mut located_in = Vec::new();
     for batch in reader {
         let batch: RecordBatch = batch?;
         total_rows += batch.num_rows();
@@ -791,6 +796,10 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
                 .downcast_ref::<UInt64Array>()
                 .context("'id' is not UInt64")?
                 .value(row);
+            if relations.value(row) == "located_in" {
+                located_in.push((id, rules.value(row).to_string()));
+                continue;
+            }
             let r#type = get("type")?
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -903,6 +912,10 @@ fn assert_conflated_parquet(path: &Path) -> Result<()> {
             "wikidata".to_string()
         )]
     );
+    // An ATP feature that OSM lacks, inside the Einkaufszentrum
+    // Zugerland, way/25432556; see
+    // https://github.com/brawer/osmdiffs/issues/1067.
+    assert_eq!(located_in, vec![(25432556, "mall".to_string())]);
     assert_eq!(
         matched.len(),
         3,
@@ -1206,7 +1219,16 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
                 .map(|f| f["properties"][key].as_u64().expect(key))
                 .sum()
         };
-        assert_eq!((sum("n"), sum("same"), sum("missing_in_osm")), (8, 3, 5));
+        // One of the unmatched is `located_in` the Zugerland mall.
+        assert_eq!(
+            (
+                sum("n"),
+                sum("same"),
+                sum("missing_in_osm"),
+                sum("located_in")
+            ),
+            (8, 3, 4, 1)
+        );
         // At z0, each of the five spiders with rows has one cell.
         if zoom == 0 {
             assert_eq!(at_zoom().count(), 5, "{spider_cells:#?}");
@@ -1254,7 +1276,20 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     for feature in &overview_matched {
         assert_eq!(feature["properties"]["relation"], "same");
     }
+    // The ATP feature in the Zugerland mall is `located_in` it.
+    let relation = |f: &&serde_json::Value| f["properties"]["relation"].clone();
+    assert_eq!(
+        overview_unmatched
+            .iter()
+            .filter(|f| relation(f) == "located_in")
+            .count(),
+        1,
+        "{overview_unmatched:#?}"
+    );
     for feature in &overview_unmatched {
+        if relation(&feature) == "located_in" {
+            continue;
+        }
         assert_eq!(feature["properties"]["relation"], "missing_in_osm");
         assert!(
             feature["properties"].get("osm:type").is_none(),
@@ -1270,14 +1305,17 @@ fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
         "expected 2-3 matched-detail features per matched row, got {}:\n{detail_matched:#?}",
         detail_matched.len()
     );
+    // Four `missing_in_osm` rows with one feature each, and the
+    // `located_in` one with its atp, host and link features.
     assert_eq!(
         detail_unmatched.len(),
-        5,
-        "expected 5 unmatched-detail features, got:\n{detail_unmatched:#?}"
+        7,
+        "expected 7 unmatched-detail features, got:\n{detail_unmatched:#?}"
     );
     for feature in detail_matched.iter().chain(&detail_unmatched) {
         assert!(
-            ["atp", "osm", "link"].contains(&feature["properties"]["part"].as_str().unwrap_or("")),
+            ["atp", "osm", "host", "link"]
+                .contains(&feature["properties"]["part"].as_str().unwrap_or("")),
             "detail feature has no valid part: {feature}"
         );
         assert!(

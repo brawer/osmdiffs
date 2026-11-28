@@ -75,7 +75,7 @@ use diagnostics::{Diagnostics, Missing};
 use local_coverage::{LocalCoverage, LocalKey, MIN_LOCAL_SHARE};
 use located_in::{
     Host, charging_station_host, department_brands, enclosing_host, find_departments,
-    located_in_tag, post_partner_host,
+    located_in_tag, mall_host, post_partner_host,
 };
 use s2_util::MergedCellRanges;
 use writer::{MatchInfo, ParquetRow, ParquetWriter};
@@ -399,9 +399,18 @@ fn produce_rows(
     // `report_missing` false, only a `located_in` row goes out; see
     // [crate::matchers::Matcher::reports_located_in].
     let send_unmatched = |atp: &Place, host: Option<&Host>, report_missing: bool| -> Result<bool> {
-        if let Some(host) = host
-            && let Some(r) = find_host(atp, host, osm)?
+        let mut found = None;
+        if let Some(host) = host {
+            found = find_host(atp, host, osm)?.map(|r| (r, host.rule()));
+        }
+        // A feature that would be missing may still be in a mall.
+        if found.is_none()
+            && report_missing
+            && let Some(mall) = mall_host(atp)
         {
+            found = find_host(atp, &mall, osm)?.map(|r| (r, mall.rule()));
+        }
+        if let Some((r, rule)) = found {
             // The host exists, whether or not ATP has it.
             matched.insert(r);
             located_in_rows.fetch_add(1, Ordering::Relaxed);
@@ -409,7 +418,7 @@ fn produce_rows(
             send_row(
                 atp,
                 Some(r),
-                MatchInfo::located_in(host.rule()).with_similar(similar),
+                MatchInfo::located_in(rule).with_similar(similar),
                 osm,
                 signals,
                 &out,
@@ -1069,7 +1078,10 @@ fn is_colocated(e: &ExclusiveCandidates, s2_cell_id: u64) -> bool {
 }
 
 /// The OSM feature of `host` nearest to `atp`, within
-/// [located_in::HOST_SEARCH_METERS].
+/// [Host::search_meters]. One whose outline contains `atp` counts as at
+/// distance 0 if [Host::prefers_enclosing] or
+/// [Host::enclosing_or_node_meters]; with the latter, only an area that
+/// contains `atp`, or a node that close, counts.
 fn find_host(atp: &Place, host: &Host, osm: &OsmFeatures) -> Result<Option<LocalFeatureRef>> {
     let coverer = s2::region::RegionCoverer {
         max_cells: 16,
@@ -1103,11 +1115,21 @@ fn find_host(atp: &Place, host: &Host, osm: &OsmFeatures) -> Result<Option<Local
                 continue;
             };
             let ll = s2::latlng::LatLng::from_degrees(centroid.y(), centroid.x());
-            let d = if host.prefers_enclosing() && geo::Contains::contains(&geometry, &point) {
+            let node_meters = host.enclosing_or_node_meters();
+            let encloses = (host.prefers_enclosing() || node_meters.is_some())
+                && geo::Contains::contains(&geometry, &point);
+            let d = if encloses {
                 0.0
             } else {
                 center.distance(&s2::point::Point::from(ll)).rad()
             };
+            // A mall must contain the feature, or be a node close by.
+            if let Some(node_meters) = node_meters
+                && !encloses
+                && (!matches!(geometry, geo::Geometry::Point(_)) || d > node_meters / 6_371_000.0)
+            {
+                continue;
+            }
             // The covering reaches farther than the search radius, and
             // a charge point's station must really be close.
             if host.is_strict_radius() && d > max_rad {
@@ -1403,5 +1425,146 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(a[&10], Some(r(1)));
         assert_eq!(a[&11], Some(r(3)));
+    }
+}
+
+#[cfg(test)]
+mod find_host_tests {
+    use super::*;
+    use crate::matchers::MatchMask;
+    use crate::tables::{Feature, FeatureToIndex, OsmFeatureIndex, StringPool};
+
+    /// Zürich HB, moved `east` and `north` meters.
+    fn at(east: f64, north: f64) -> (f64, f64) {
+        (8.5402 + east / 75_000.0, 47.3782 + north / 111_195.0)
+    }
+
+    /// An [OsmFeatures] with one feature per entry of `features`, each
+    /// with its tags and geometry.
+    fn build_osm(
+        dir: &std::path::Path,
+        features: &[(&[(&str, &str)], geo::Geometry)],
+    ) -> Result<OsmFeatures<'static>> {
+        let mut strings: Vec<String> = features
+            .iter()
+            .flat_map(|(tags, _)| tags.iter())
+            .flat_map(|(k, v)| [k.to_string(), v.to_string()])
+            .collect();
+        strings.sort();
+        strings.dedup();
+        let pool = StringPool::create(strings.into_iter(), dir, &dir.join("strings"))?;
+        let mut fti: Vec<FeatureToIndex> = features
+            .iter()
+            .enumerate()
+            .map(|(i, (tags, geometry))| {
+                let mut mask = MatchMask::default();
+                for (k, v) in tags.iter() {
+                    mask.add_tag(k, v);
+                }
+                let c = geo::Centroid::centroid(geometry).expect("a centroid");
+                let cell =
+                    s2::cellid::CellID::from(s2::latlng::LatLng::from_degrees(c.y(), c.x())).0;
+                FeatureToIndex {
+                    centroid_s2_cell_id: cell,
+                    feature: Some(Feature {
+                        id: i as u64 * 10 + 2,
+                        tags: tags
+                            .iter()
+                            .flat_map(|(k, v)| {
+                                [
+                                    pool.lookup(k).unwrap() as u32,
+                                    pool.lookup(v).unwrap() as u32,
+                                ]
+                            })
+                            .collect(),
+                        geometry_wkb: crate::geometry::encode_wkb(geometry),
+                        ..Default::default()
+                    }),
+                    match_mask: mask.0 as u32,
+                    coverage_s2_cell_id: vec![cell],
+                }
+            })
+            .collect();
+        fti.sort_by_key(|f| f.centroid_s2_cell_id);
+        let index = OsmFeatureIndex::create(fti.into_iter(), dir, &dir.join("osm-features.index"))?;
+        Ok(OsmFeatures {
+            index,
+            strings: pool,
+        })
+    }
+
+    fn place(tags: &[(&str, &str)], (lng, lat): (f64, f64)) -> Place {
+        let coord = geo::Coord { x: lng, y: lat };
+        Place::new(
+            &coord,
+            "newyorker".to_string(),
+            MatchMask::SHOP,
+            tags.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            &geo::Point::from(coord).into(),
+            crate::utils::UtcTimestamp(
+                time::UtcDateTime::from_unix_timestamp(1_770_000_000).unwrap(),
+            ),
+        )
+        .unwrap()
+    }
+
+    /// A square of `size` meters with its south-west corner at
+    /// `(east, north)`.
+    fn square(east: f64, north: f64, size: f64) -> geo::Geometry {
+        let p = |e, n| geo::Coord::from(at(e, n));
+        geo::Polygon::new(
+            geo::LineString::from(vec![
+                p(east, north),
+                p(east + size, north),
+                p(east + size, north + size),
+                p(east, north + size),
+                p(east, north),
+            ]),
+            vec![],
+        )
+        .into()
+    }
+
+    fn osm_id(osm: &OsmFeatures, r: Option<LocalFeatureRef>) -> Option<u64> {
+        r.map(|r| osm.index.feature_id(r))
+    }
+
+    #[test]
+    fn test_find_mall() -> Result<()> {
+        // https://github.com/brawer/osmdiffs/issues/1067
+        let dir = tempfile::tempdir()?;
+        let mall: &[(&str, &str)] = &[("shop", "mall"), ("name", "Lyssach Center")];
+        let osm = build_osm(
+            dir.path(),
+            &[
+                // A large mall, whose centroid is 400 m from the shop.
+                (mall, square(-100.0, -100.0, 800.0)),
+                // A clothes shop, which is no mall.
+                (&[("shop", "clothes")], square(-10.0, -10.0, 20.0)),
+                // A mall node 25 m away, and one 50 m away.
+                (mall, geo::Point::from(at(1000.0, 25.0)).into()),
+                (mall, geo::Point::from(at(2000.0, 50.0)).into()),
+                // A mall polygon close by, but not around the shop.
+                (mall, square(3005.0, 0.0, 50.0)),
+            ],
+        )?;
+        let shop = |east| {
+            place(
+                &[("shop", "clothes"), ("brand:wikidata", "Q706421")],
+                at(east, 0.0),
+            )
+        };
+        let find = |east| -> Result<Option<u64>> {
+            let atp = shop(east);
+            let host = mall_host(&atp).expect("a mall host");
+            Ok(osm_id(&osm, find_host(&atp, &host, &osm)?))
+        };
+        assert_eq!(find(0.0)?, Some(2));
+        assert_eq!(find(1000.0)?, Some(22));
+        assert_eq!(find(2000.0)?, None);
+        assert_eq!(find(3000.0)?, None);
+        Ok(())
     }
 }
