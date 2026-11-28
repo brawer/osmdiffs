@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.9.3](https://github.com/brawer/osmdiffs/compare/v0.9.2...v0.9.3) (2026-11-28)
+
+
+### 🆕 Enhancements
+
+* **matchers:** pair hotels with motels and resorts, hostels with restaurants ([#1076](https://github.com/brawer/osmdiffs/issues/1076)) ([86da803](https://github.com/brawer/osmdiffs/commit/86da803fd80fc72473b1df8bc6ede2297983f934)), closes [#1065](https://github.com/brawer/osmdiffs/issues/1065)
+* **tiles:** icons for edits.pmtiles from id-tagging-schema ([#1077](https://github.com/brawer/osmdiffs/issues/1077)) ([189c841](https://github.com/brawer/osmdiffs/commit/189c84114a0584e8d85e713c62a6960c95fdd8c6))
+* **tiles:** publish edits.pmtiles, a map of edits.parquet ([#1070](https://github.com/brawer/osmdiffs/issues/1070)) ([9776885](https://github.com/brawer/osmdiffs/commit/977688563f3704bf06de379b92cc98c002ffa292))
+
+
+### 🐞 Bug Fixes
+
+* **conflate:** leave address words out of similar_osm name words ([#1064](https://github.com/brawer/osmdiffs/issues/1064)) ([2d83113](https://github.com/brawer/osmdiffs/commit/2d83113122dde4def941e2fb5b2365cd5a67f2f4))
+* **edits:** leave worldcat out of creates ([#1075](https://github.com/brawer/osmdiffs/issues/1075)) ([06adad1](https://github.com/brawer/osmdiffs/commit/06adad1cf46b007d07120549b575a46746e7d8a1))
+
+
+### 📚 Documentation
+
+* **notes:** mark milestone 4 done and link the web app's icon issue ([#1078](https://github.com/brawer/osmdiffs/issues/1078)) ([ea34b8f](https://github.com/brawer/osmdiffs/commit/ea34b8f793f91021a6b0a27b2db2ac9d92c176ce))
+* **notes:** plan a map of edit suggestions ([#1069](https://github.com/brawer/osmdiffs/issues/1069)) ([3d743f1](https://github.com/brawer/osmdiffs/commit/3d743f1c4342512db76b80845929afc3863ffb6a))
+
 ## [0.9.2](https://github.com/brawer/osmdiffs/compare/v0.9.1...v0.9.2) (2026-11-27)
 
 
