@@ -124,3 +124,19 @@ shop=battery	shop=electrical	20	20
 # amenity=doctors	healthcare=laboratory	87	87	laboratory at a practice
 # shop=butcher	shop=supermarket	86	86	butcher counter inside a supermarket
 # amenity=pharmacy	shop=convenience	63	63	pharmacy counter inside a shop
+
+# Lodging pairs added by hand (issue #1065), since each was too rare in one
+# of the sources above. tourism=hotel and tourism=motel: 198 brand:wikidata
+# matches in the production run of 2026-11-23, all with agreeing names
+# (mostly Sonesta, whose motels OSM maps as hotels or the other way round).
+# tourism=hotel and leisure=resort: a resort hotel that OSM maps only as its
+# resort, such as SO/ Ras Al Khaimah. tourism=hostel and amenity=restaurant:
+# a mountain inn with dormitories, such as Berghaus Niederhorn, like the
+# hotel and restaurant pair above. See
+# docs/notes/2026-11-28-lodging-category-pairs.md.
+#
+# Columns: category, category, contact matches in the eval regions (ATP
+# 2026-11-14), of which names agree.
+tourism=hotel	tourism=motel	6	5
+leisure=resort	tourism=hotel	3	3
+amenity=restaurant	tourism=hostel	21	21
