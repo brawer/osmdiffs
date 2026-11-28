@@ -266,16 +266,24 @@ graph TD
     SPIDER_STATS_PARQUET --> MAKE_EDITS
     MAKE_EDITS --> EDITS_PARQUET[edits.parquet]
     EDITS_PARQUET --> UPLOAD_EDITS(upload_edits) --> S3A
+    EDITS_PARQUET --> EXTRACT_EDITS_LAYERS(extract_edits_layers)
+    EXTRACT_EDITS_LAYERS --> RENDER_EDITS_OVERVIEW(render_edits_overview)
+    EXTRACT_EDITS_LAYERS --> RENDER_EDITS_DETAIL(render_edits_detail)
+    RENDER_EDITS_OVERVIEW --> JOIN_EDITS_TILES(join_edits_tiles)
+    RENDER_EDITS_DETAIL --> JOIN_EDITS_TILES
+    JOIN_EDITS_TILES --> EDITS_TILES[edits.pmtiles]
+    EDITS_TILES --> UPLOAD_EDITS_TILES(upload_edits_tiles) --> S3A
 
     CONFLATED --> UPLOAD_BOM(upload_conflated_bom) --> S3A
     UPLOAD_CONFLATED --> UPLOAD_DATAPACKAGE
     UPLOAD_CONFLATED_TILES --> UPLOAD_DATAPACKAGE
     UPLOAD_SPIDER_STATS --> UPLOAD_DATAPACKAGE
     UPLOAD_EDITS --> UPLOAD_DATAPACKAGE
+    UPLOAD_EDITS_TILES --> UPLOAD_DATAPACKAGE
     UPLOAD_BOM --> UPLOAD_DATAPACKAGE(upload_datapackage<br/>data/datapackage.json) --> S3A
 
     classDef process fill:#fce4ec,stroke:#ad1457,stroke-width:2px,color:#4a0e28,font-weight:bold;
-    class FETCH_INPUTS,IMPORT_ATP,OSMVIEWS_RANKS,COLLECT_WIKI,QRANK_QUANTILES,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,SPIDER_STATS,UPLOAD_SPIDER_STATS,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
+    class FETCH_INPUTS,IMPORT_ATP,OSMVIEWS_RANKS,COLLECT_WIKI,QRANK_QUANTILES,IMPORT_OSM,CONFLATE,UPLOAD_CONFLATED,EXTRACT_CONFLATED_LAYERS,RENDER_CONFLATED_OVERVIEW,RENDER_CONFLATED_DETAIL,JOIN_CONFLATED_TILES,UPLOAD_CONFLATED_TILES,EXTRACT_EDITS_LAYERS,RENDER_EDITS_OVERVIEW,RENDER_EDITS_DETAIL,JOIN_EDITS_TILES,UPLOAD_EDITS_TILES,SPIDER_STATS,UPLOAD_SPIDER_STATS,UPLOAD_BOM,UPLOAD_DATAPACKAGE process;
 ```
 
 (Pink boxes are processing steps; plain rectangles are the files they
@@ -642,7 +650,19 @@ fetch away.
   that get an edit. See
   [`docs/outputs/EDITS_PARQUET.md`](outputs/EDITS_PARQUET.md) for the
   schema.
-- **`upload_conflated` / `upload_conflated_tiles` / `upload_spider_stats` / `upload_edits`**
+- **`extract_edits_layers` / `render_edits_overview` /
+  `render_edits_detail` / `join_edits_tiles`**
+  ([`src/pipeline/edits_tiles.rs`](../src/pipeline/edits_tiles.rs)) —
+  turn `edits.parquet` into `edits.pmtiles`, a map of the suggested
+  edits, the same way as `conflated.pmtiles`: one scan writes an
+  overview layer (one point per edit, with four properties) and a
+  detail layer (one point per edit with everything a mapper needs,
+  plus a line from the AllThePlaces position), which tippecanoe
+  renders at z0–12 and z13–14, and `tile-join` merges
+  ([plan](notes/2026-11-28-edits-map.md)). See
+  [`docs/outputs/EDITS_TILES.md`](outputs/EDITS_TILES.md) for the
+  layer and its properties.
+- **`upload_conflated` / `upload_conflated_tiles` / `upload_spider_stats` / `upload_edits` / `upload_edits_tiles`**
   ([`src/pipeline/upload.rs`](../src/pipeline/upload.rs)) — push the
   data output, its tiles and the spider statistics to the public (`PUBLIC_S3_*`)
   bucket, each under a dated, content-hashed key

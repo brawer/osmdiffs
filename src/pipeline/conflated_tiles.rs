@@ -636,7 +636,7 @@ fn decode_and_round(wkb: &[u8]) -> Result<geo::Geometry<f64>> {
     Ok(geometry)
 }
 
-fn geometry_to_geojson_line(
+pub(crate) fn geometry_to_geojson_line(
     geometry: &geo::Geometry<f64>,
     properties: Map<String, Value>,
 ) -> Result<String> {

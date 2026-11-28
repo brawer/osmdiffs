@@ -277,11 +277,15 @@ pub(crate) fn excluded_kind(tags: &[(String, String)]) -> Option<&'static str> {
 /// Q62267023), even in Kenya or India; `little_free_library` is a
 /// registry of book boxes, many in private front yards and named
 /// after their owners, which keeps boxes long after they are gone,
-/// and which nobody can check from home.
+/// and which nobody can check from home; `worldcat` is the OCLC
+/// registry of member institutions rather than of library buildings,
+/// so it gives library systems at their head office, consortia, whole
+/// universities, PO boxes and towns (`Stadt Kaufbeuren`), even among
+/// its public libraries.
 pub(crate) fn excluded_spider(spider: &str) -> bool {
     matches!(
         spider,
-        "gbfs" | "standard_chartered_bank" | "little_free_library"
+        "gbfs" | "standard_chartered_bank" | "little_free_library" | "worldcat"
     )
 }
 
@@ -2064,9 +2068,18 @@ mod tests {
             east(ZURICH, 600.0),
             &[("amenity", "bicycle_rental"), ("name", "C")],
         );
-        let (edits, stats) = run(vec![atm, stop, dott], &DeletionCandidates::default());
+        let library = candidate(
+            "worldcat",
+            "4",
+            east(ZURICH, 900.0),
+            &[("amenity", "library"), ("name", "Haringey Libraries")],
+        );
+        let (edits, stats) = run(
+            vec![atm, stop, dott, library],
+            &DeletionCandidates::default(),
+        );
         assert!(edits.is_empty());
-        assert_eq!(stats.skipped(Skip::Kind), 3);
+        assert_eq!(stats.skipped(Skip::Kind), 4);
     }
 
     #[test]
