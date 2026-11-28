@@ -193,6 +193,12 @@ mod tests {
             "shop=supermarket",
             "shop=department_store"
         ));
+        // Added by hand for lodging (#1065).
+        assert!(categories_agree("tourism=hotel", "tourism=motel"));
+        assert!(categories_agree("tourism=hotel", "leisure=resort"));
+        assert!(categories_agree("tourism=hostel", "amenity=restaurant"));
+        // Pairs aren't transitive.
+        assert!(!categories_agree("tourism=motel", "leisure=resort"));
         // The shop at a fuel station is a feature of its own.
         assert!(!categories_agree("amenity=fuel", "shop=convenience"));
         // A pharmacy counter inside a supermarket, too.
