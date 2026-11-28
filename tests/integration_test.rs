@@ -189,6 +189,11 @@ fn test_pipeline() -> Result<()> {
         workdir.path().join("conflated.pmtiles").exists(),
         "conflated.pmtiles was not produced"
     );
+    assert_edits_tile_layers(workdir.path())?;
+    assert!(
+        workdir.path().join("edits.pmtiles").exists(),
+        "edits.pmtiles was not produced"
+    );
     for name in [
         "alltheplaces.nondescript-phones",
         "alltheplaces.nondescript-emails",
@@ -226,8 +231,8 @@ fn assert_publish_artifacts(workdir: &Path) -> Result<()> {
     assert_eq!(manifest["name"], "osmdiffs");
 
     let resources = manifest["resources"].as_array().context("no resources")?;
-    // conflated + bom + conflated-tiles + spider-stats + edits
-    assert_eq!(resources.len(), 5, "manifest resources: {resources:#?}");
+    // conflated + bom + conflated-tiles + spider-stats + edits + edits-tiles
+    assert_eq!(resources.len(), 6, "manifest resources: {resources:#?}");
     // Resource name -> the workdir file it was uploaded from (the local
     // copies keep their undated names; only the S3 key and the manifest
     // path carry the date+hash).
@@ -237,6 +242,7 @@ fn assert_publish_artifacts(workdir: &Path) -> Result<()> {
         // The edits step adds its counts to the published copy.
         "spider-stats" => "spider-stats.published.parquet",
         "edits" => "edits.parquet",
+        "edits-tiles" => "edits.pmtiles",
         "bom" => "", // exists under its manifest path
         other => panic!("unexpected resource {other}"),
     };
@@ -588,6 +594,8 @@ fn test_kept_workdir_rebuilds_after_newer_osm() -> Result<()> {
         "conflated.pmtiles",
         "spider-stats.parquet",
         "edits.parquet",
+        "edits.jsonl",
+        "edits.pmtiles",
     ] {
         assert!(first.contains_key(name), "{name} was not produced");
     }
@@ -1051,6 +1059,74 @@ fn assert_edits_parquet(path: &Path) -> Result<()> {
 /// "expected 3 ATP features matched" assertions above). The overview layers are deliberately minimal
 /// (no tags); the detail layers carry the full ATP tag set and a few
 /// OSM tags, keyed back to the overview by `fid`.
+/// One overview point per edit in `edits.parquet`, with few
+/// properties, and one detail point per edit with everything a mapper
+/// needs, plus `link` lines.
+fn assert_edits_tile_layers(workdir: &Path) -> Result<()> {
+    let read_features = |name: &str| -> Result<Vec<serde_json::Value>> {
+        let path = workdir.join(name);
+        let content =
+            std::fs::read_to_string(&path).with_context(|| format!("could not read {path:?}"))?;
+        content
+            .lines()
+            .map(|line| Ok(serde_json::from_str(line)?))
+            .collect()
+    };
+    let num_edits = {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let file = std::fs::File::open(workdir.join("edits.parquet"))?;
+        ParquetRecordBatchReaderBuilder::try_new(file)?
+            .metadata()
+            .file_metadata()
+            .num_rows() as usize
+    };
+    assert!(num_edits > 0);
+
+    let overview = read_features("edits.jsonl")?;
+    assert_eq!(overview.len(), num_edits);
+    for feature in &overview {
+        assert_eq!(feature["geometry"]["type"], "Point", "{feature}");
+        let mut keys: Vec<&str> = feature["properties"]
+            .as_object()
+            .context("properties")?
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["action", "icon", "importance", "topic"], "{feature}");
+    }
+
+    let detail = read_features("edits-detail.jsonl")?;
+    let (points, links): (Vec<_>, Vec<_>) = detail
+        .iter()
+        .partition(|f| f["properties"].get("part").is_none());
+    assert_eq!(points.len(), num_edits);
+    for link in &links {
+        assert_eq!(link["properties"]["part"], "link", "{link}");
+        assert_eq!(link["geometry"]["type"], "LineString", "{link}");
+    }
+    for point in &points {
+        let props = &point["properties"];
+        assert_eq!(point["geometry"]["type"], "Point", "{point}");
+        assert!(props["id"].is_string(), "{props}");
+        let changes: serde_json::Value =
+            serde_json::from_str(props["changes"].as_str().context("changes")?)?;
+        assert!(
+            !changes.as_array().context("changes")?.is_empty(),
+            "{props}"
+        );
+        let sources: serde_json::Value =
+            serde_json::from_str(props["sources"].as_str().context("sources")?)?;
+        assert!(sources[0]["spider"].is_string(), "{props}");
+        match props["action"].as_str() {
+            Some("modify") => assert!(props["osm:version"].is_u64(), "{props}"),
+            Some("create") => assert!(props.get("osm:id").is_none(), "{props}"),
+            other => panic!("unexpected action {other:?}"),
+        }
+    }
+    Ok(())
+}
+
 fn assert_conflated_tile_layers(workdir: &Path) -> Result<()> {
     let read_features = |name: &str| -> Result<Vec<serde_json::Value>> {
         let path = workdir.join(name);
